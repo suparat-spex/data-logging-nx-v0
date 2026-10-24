@@ -1,4 +1,4 @@
-"""Add / edit a variable: formula, statistic or signal processing of channels (tabbed)."""
+"""Add / edit a variable: formula, statistic or signal processing of tags (tabbed)."""
 from __future__ import annotations
 
 import copy
@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
 from nxlogger.core import analysis as an
 from nxlogger.core import variables as vr
 from nxlogger.core.channel_math import FUNCS, UNITS, identifier
+from nxlogger.core.view_model import WIN_MODES, WIN_UNITS
 from nxlogger.ui.dialogs.common import ChannelPicker, ColorButton, form_page, spin
 from nxlogger.ui.theme.ui_kit import label, set_prop
 
@@ -19,7 +20,7 @@ from nxlogger.ui.theme.ui_kit import label, set_prop
 class VariableDialog(QDialog):
     """
     engine  : VariableEngine (validation, formula names, latest values)
-    choices : channel choices [(topic_id, index, label, colour, unit)] incl. other variables
+    choices : tag choices [(device_id, index, label, colour, unit)] incl. other variables
     """
 
     def __init__(self, parent, var: dict, engine, choices):
@@ -59,7 +60,7 @@ class VariableDialog(QDialog):
         self.desc = QPlainTextEdit(self.v.get("description", "")); self.desc.setMaximumHeight(60)
         self.desc.setPlaceholderText("What it means, how it is used ... (saved in the files)")
         self.enabled = QCheckBox("Enabled - calculate, show in views and alarms", checked=self.v["enabled"])
-        self.log = QCheckBox("Logged by logging profiles set to 'All enabled channels'",
+        self.log = QCheckBox("Logged by logging profiles set to 'All enabled tags'",
                              checked=bool(self.v.get("log", True)))
         f.addRow("Name", self.name)
         f.addRow("", self.ident)
@@ -119,7 +120,7 @@ class VariableDialog(QDialog):
         r2.addWidget(QLabel("A")); r2.addWidget(self.op_a, 1); r2.addWidget(QLabel("B")); r2.addWidget(self.op_b, 1)
         r2.addWidget(self.op_t); r2.addWidget(build)
         f.addRow("Operation", r2)
-        h = label("Sample by sample on the block of the first channel used; a channel of another topic "
+        h = label("Sample by sample on the block of the first tag used; a tag of another device "
                   "enters as its latest value.  Operators  + - * / ** %  and comparisons.  Functions: "
                   + ", ".join(sorted(FUNCS)) + ".  Constants: pi, e.", muted=True, small=True)
         h.setWordWrap(True)
@@ -137,13 +138,24 @@ class VariableDialog(QDialog):
             if k in an.STAT_HELP:
                 self.stat.setItemData(self.stat.count() - 1, an.STAT_HELP[k], 3)
         self.stat.setCurrentIndex(max(self.stat.findData(self.v.get("stat", "rms")), 0))
-        self.win = spin(float(self.v.get("window_s", 1.0)), 0, 3600, 2)
-        self.win.setSuffix(" s"); self.win.setSpecialValueText("Each block")
+        self.win = spin(float(self.v.get("win_n") or 0), 0, 1e7, 2)
+        self.win.setSpecialValueText("Each block / scan")
+        self.win_unit = QComboBox()
+        for k, (text, _) in WIN_UNITS.items():
+            self.win_unit.addItem(text, k)
+        self.win_unit.setCurrentIndex(max(0, self.win_unit.findData(self.v.get("win_unit", "s"))))
+        self.win_mode = QComboBox()
+        for k, text in WIN_MODES.items():
+            self.win_mode.addItem(text, k)
+        self.win_mode.setCurrentIndex(max(0, self.win_mode.findData(self.v.get("win_mode", "moving"))))
+        wr = QHBoxLayout(); wr.addWidget(self.win, 1); wr.addWidget(self.win_unit)
         f.addRow("Source", self.st_src)
         f.addRow("Statistic", self.stat)
-        f.addRow("Window", self.win)
-        f.addRow(label("One value per received block, computed over the last window (sliding). "
-                       "Useful for trends: RMS level, crest factor, kurtosis, dominant frequency.",
+        f.addRow("Window", wr)
+        f.addRow("", self.win_mode)
+        f.addRow(label("One value per received block or scan, over the window: seconds, minutes, hours or "
+                       "a number of samples, buffered by NX Logger. Moving = always the newest window; "
+                       "block = the result of the last full window (e.g. the mean of each minute).",
                        muted=True, small=True))
         return w
 
@@ -197,7 +209,8 @@ class VariableDialog(QDialog):
                  color=self.color.color(), decimals=self.dec.value(),
                  description=self.desc.toPlainText().strip(), enabled=self.enabled.isChecked(),
                  log=self.log.isChecked(), kind=kind, expr=self.expr.text().strip(),
-                 stat=self.stat.currentData(), window_s=self.win.value(),
+                 stat=self.stat.currentData(), win_n=self.win.value(), window_s=0.0,
+                 win_unit=self.win_unit.currentData(), win_mode=self.win_mode.currentData(),
                  op=self.op.currentData(), param=self.param.value())
         if kind == "statistic":
             v["source"] = self.st_src.current()

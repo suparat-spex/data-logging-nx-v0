@@ -1,36 +1,37 @@
 """
-views.py - user-built "views" (like FlexLogger Screen documents) for NX Logger.
+views.py - user-built "views" (screens) for NX Logger: a grid of rows x columns.
 
-A view is a free-form canvas of tiles (use several views to split a large screen):
-  Graph       time plot, FFT spectrum, spectrogram (STFT) or histogram of any channels
-              and variables; optional stacked plots, legend, axis labels, colours
-  Indicator   numeric readout or gauge (6 styles) of one channel: the value or a
-              statistic (mean, RMS, SD, crest, kurtosis ...) over a time window
-  Table       statistics table (channels x statistics) or alarm table
-  Text        heading H1 / H2 / H3 or body text
+A view is a grid (GA10 / FUXA style screen layout). Each cell holds at most one
+component, which can span several cells:
+  Header / text   heading H1 / H2 / H3 or body text
+  Graph           time plot (trend), FFT spectrum, spectrogram (STFT) or histogram
+  Indicator       numeric readout, gauge (6 styles) or LED of one tag: the value or a
+                  statistic (mean, RMS, SD ...) over a window buffered by the app
+                  (seconds / minutes / hours / samples, moving or block - stat_buffer.py)
+  Table           statistics table, alarm table, tag table (value, quality, time)
 
-Edit mode shows mock-up data in every tile (no live updates), so arranging a big view
-stays fast; Live mode draws the real data. Spectra, spectrograms and histograms are
-recomputed at most 5 times a second.
-
-Edit mode: Add places a tile with defaults (no dialog); double-click or the pencil
-configures it, right-click for duplicate / delete. Drag a tile to move it,
-the grip in its bottom-right corner to resize (snaps to the view grid); while dragging only
-an outline moves, the tile follows on release (smooth with many plots). Live mode locks
-the layout. Only the visible view is drawn; a view holds at most MAX_TILES tiles
-(MAX_GRAPHS graphs) to stay fast. Views are plain dicts so the project file stores them as JSON.
+Edit mode shows the grid: row / column handles (click = select, menu = insert / delete /
+size), empty cells with a + button, mock-up data in every component (no live updates, so
+arranging a big view stays fast). Click selects (the Properties panel edits the
+selection), drag a component to another cell, double-click opens all its settings. Live
+mode locks the layout. Only the visible view is drawn. Views are plain dicts
+(core/view_model.py) so the project file stores them as JSON.
 
 The page talks to the main window through a small `host` object:
-  host.channel_choices() -> [(topic_id, index, label, color, unit)]   (channels + variables)
-  host.series(topic_id, index) -> (t, y) numpy arrays or None
-  host.last_value(topic_id, index) -> (value or None, unit)
+  host.channel_choices() -> [(device_id, index, label, colour, unit)]   (tags + variables)
+  host.series(device_id, index) -> (t, y) numpy arrays or None
+  host.last_value(device_id, index) -> (value or None, unit)
   host.view_changed()          mark project dirty
   host.reg_icon(target, name, token="text")
   host.view_properties(page) / host.delete_view(page)
-optional (stats / alarm tiles are offered only when the host has them):
-  host.stat_values(topic_id, index, window_s or None, keys=None) -> {"Value", "Mean", ...} or None
+optional (offered only when the host has them):
+  host.stat_values(device_id, index, window, keys=None) -> {"Value", "Mean", ...} or None
+        window: a tile dict (win_n / win_unit / win_mode) or None (Quick View window)
   host.alarm_rows(source, max_rows, levels) -> [{column: text, "_level": n}]
   host.alarm_seq() -> int that changes whenever the alarm data changes
+  host.tag_rows(keys) -> [{column: text, "_good": bool}]   (tag table)
+  host.view_selected(page, selection)   selection: ("tile", cfg) | ("cell", r, c) |
+                                        ("row", i) | ("col", i) | None
 """
 from __future__ import annotations
 
@@ -42,16 +43,18 @@ import time
 
 import numpy as np
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLabel, QMenu,
-                               QMessageBox, QRubberBand, QScrollArea, QTableWidget, QTableWidgetItem,
-                               QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen
+from PySide6.QtWidgets import (QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
+                               QInputDialog, QLabel, QMenu, QMessageBox, QRubberBand, QScrollArea,
+                               QSizePolicy, QSpacerItem, QTableWidget, QTableWidgetItem, QToolButton,
+                               QVBoxLayout, QWidget)
 import pyqtgraph as pg
 
 from nxlogger.core import analysis as an
-from nxlogger.core.view_model import (ALARM_SOURCES, ALARM_TILE_COLS, GRID, MAX_GRAPHS, MAX_TILES, MIN_H,
-                                      MIN_W, PLOT_TYPES, STAT_TILE_COLS, axis_defaults, is_graph,
-                                      new_tile, normalize_view)
+from nxlogger.core import view_model as vm
+from nxlogger.core.view_model import (ALARM_SOURCES, ALARM_TILE_COLS, MAX_GRAPHS, MAX_TILES, MIN_CELL,
+                                      PLOT_TYPES, STAT_TILE_COLS, TAG_TILE_COLS, axis_defaults, is_graph,
+                                      new_tile, normalize_view, tile_title)
 from nxlogger.ui.dialogs.tile_dialog import TileDialog
 from nxlogger.ui.theme.ui_kit import T, label, set_prop
 from nxlogger.ui.widgets.gauge import GaugeWidget
@@ -64,17 +67,20 @@ LEVEL_TOKEN = {1: "bad", 2: "accent", 3: "warn", 4: "info"}
 ANALYSIS_DT = 0.2            # s between spectrum / spectrogram / histogram updates
 _COL_KEY = {an.STAT_LABEL[k]: k for k in an.STAT_KEYS}
 
-# add-tile menus: (button text, icon, [(item text, icon, kind, preset)])
+# insert menus: (section, [(item text, icon, kind, preset)])
 ADD_MENUS = [
-    ("Graph", "chart", [("Time plot", "activity", "plot", {"plot": "time"}),
-                        ("FFT spectrum", "audio-waveform", "plot", {"plot": "fft"}),
-                        ("Spectrogram (STFT)", "grid", "plot", {"plot": "stft"}),
-                        ("Histogram", "chart-column", "plot", {"plot": "hist"})]),
-    ("Indicator", "gauge", [("Numeric", "hash", "value", {}),
-                            ("Gauge", "gauge", "gauge", {})]),
-    ("Table", "table", [("Statistics table", "sigma", "stats", {}),
-                        ("Alarm table", "bell", "alarms", {})]),
-    ("Text", "type", [("Heading / text", "type", "text", {})]),
+    ("Text", [("Header", "heading", "text", {"style": "H1", "show_title": False}),
+              ("Text", "type", "text", {"style": "Body", "text": "Text", "show_title": False})]),
+    ("Graph", [("Trend (time plot)", "activity", "plot", {"plot": "time"}),
+               ("FFT spectrum", "audio-waveform", "plot", {"plot": "fft"}),
+               ("Spectrogram (STFT)", "grid", "plot", {"plot": "stft"}),
+               ("Histogram", "chart-column", "plot", {"plot": "hist"})]),
+    ("Indicator", [("Number", "hash", "value", {}),
+                   ("Gauge", "gauge", "gauge", {}),
+                   ("LED", "circle-dot", "led", {})]),
+    ("Table", [("Tag table", "tag", "tags", {}),
+               ("Statistics table", "sigma", "stats", {}),
+               ("Alarm table", "bell", "alarms", {})]),
 ]
 
 
@@ -103,47 +109,39 @@ def add_legend(p: pg.PlotItem):
                        brush=pg.mkBrush(*PLOT_LEGEND_BG), pen=pg.mkPen("#333333"))
 
 
-# ====================================================================== tiles
-class _Grip(QWidget):
-    """Resize grip drawn above the tile content (bottom-right corner, edit mode)."""
-    SIZE = 16
-
-    def __init__(self, tile):
-        super().__init__(tile)
-        self.setFixedSize(self.SIZE, self.SIZE)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setToolTip("Drag to resize")
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(QPen(QColor(T["accent"]), 1.6))
-        s = self.SIZE
-        for k in (4, 8, 12):
-            p.drawLine(s - 3 - k, s - 3, s - 3, s - 3 - k)
-        p.end()
+def insert_menu(page, parent, row=None, col=None) -> QMenu:
+    """Component menu: inserts at the cell (row, col) or the first free one."""
+    m = QMenu(parent)
+    for section, items in ADD_MENUS:
+        if section == "Table" and not hasattr(page.host, "stat_values"):
+            continue
+        m.addSection(section)
+        for text, icon, kind, preset in items:
+            a = m.addAction(text, lambda k=kind, p=preset: page.add_tile(k, at=(row, col) if row is not None
+                                                                         else None, **p))
+            page.host.reg_icon(a, icon)
+    return m
 
 
+# ====================================================================== components
 class Tile(QFrame):
     kind = "tile"
 
-    def __init__(self, page: "ViewPage", canvas: "Canvas", cfg: dict):
+    def __init__(self, page: "ViewPage", canvas: "GridCanvas", cfg: dict):
         super().__init__(canvas)
         self.page, self.canvas, self.cfg = page, canvas, cfg
         self.setObjectName("viewTile")
         self.setProperty("kind", self.kind)
-        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)   # the grid decides
+        self.setMinimumSize(40, 30)
         self._press: QPoint | None = None
-        self._start = QRect()
-        self._target = QRect()
-        self._drag = "move"
+        self._dragging = False
 
         # edit-mode buttons float over the top-right corner, so they never take space
         self.header = QFrame(self); self.header.setObjectName("tileHeader")
         hl = QHBoxLayout(self.header); hl.setContentsMargins(2, 0, 2, 0); hl.setSpacing(0)
         self.title_lbl = QLabel()            # kept for tooltips only
-        for icon, tip, slot in (("pencil", "Configure", lambda: page.edit_tile(self)),
-                                ("copy", "Duplicate", lambda: page.duplicate_tile(self)),
+        for icon, tip, slot in (("pencil", "All settings", lambda: page.edit_tile(self)),
                                 ("x", "Delete", lambda: page.delete_tile(self))):
             b = QToolButton(); b.setAutoRaise(True); b.setToolTip(tip)
             page.host.reg_icon(b, icon, "muted")
@@ -156,8 +154,6 @@ class Tile(QFrame):
         self.body.addWidget(self.caption)
         self.content = self.build_content()
         self.body.addWidget(self.content, 1)
-        self.grip = _Grip(self)
-        self.setGeometry(cfg["x"], cfg["y"], cfg["w"], cfg["h"])
         self.apply_cfg()
         self.set_edit(page.editing)
 
@@ -177,17 +173,17 @@ class Tile(QFrame):
         self.caption.setVisible(bool(self.cfg.get("show_title", True)) and bool(text))
 
     def channel_info(self, key) -> tuple[str, str, str]:
-        """(label, colour, unit) of a channel / variable key, or placeholders."""
+        """(label, colour, unit) of a tag / variable key, or placeholders."""
         for tid, idx, lbl, col, unit in self.page.host.channel_choices():
             if (tid, idx) == tuple(key or ()):
                 return lbl, col, unit
-        return "(no channel)", T["muted"], ""
+        return "(no tag)", T["muted"], ""
 
-    # ---- colours: tile override > view default > theme
+    # ---- colours: component override > view default > theme
     def bg_color(self) -> QColor | None:
         c = self.cfg.get("card_bg") or self.page.view.get("tile_bg")
         if not c and self.kind == "text" and not self.page.editing:
-            return None                               # text tiles float on the canvas
+            return None                               # text floats on the view background
         return QColor(c or T["panel"])
 
     def border_color(self) -> QColor | None:
@@ -201,71 +197,48 @@ class Tile(QFrame):
         self.header.adjustSize()
         self.header.move(self.width() - self.header.width() - 4, 4)
         self.header.raise_()
-        self.grip.move(self.width() - _Grip.SIZE - 1, self.height() - _Grip.SIZE - 1)
-        self.grip.raise_()
 
     def set_edit(self, on: bool):
         self.header.setVisible(on)
         self.header.raise_()
-        self.grip.setVisible(on)
-        self.grip.raise_()
-        self.setToolTip(f"{self.title_lbl.text()} - double-click to configure, right-click for more"
-                        if on else "")
+        self.setToolTip(f"{tile_title(self.cfg)} - click to select, drag to another cell, "
+                        "double-click for all settings" if on else "")
         self.content.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, on)
         set_prop(self, "edit", "true" if on else "false")
-        self.setCursor(Qt.CursorShape.ArrowCursor)
         if on:
             self.show_mock()
         self.update()
 
     def show_mock(self):
-        """Edit mode: fill the tile with mock-up data (live updates are paused)."""
+        """Edit mode: fill the component with mock-up data (live updates are paused)."""
 
-    # ---- drag to move / resize (edit mode only)
-    def _in_corner(self, pos) -> bool:
-        return pos.x() > self.width() - 20 and pos.y() > self.height() - 20
-
+    # ---- select / drag to another cell (edit mode only)
     def mousePressEvent(self, e):
         if not self.page.editing or e.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(e)
         self._press = e.globalPosition().toPoint()
-        self._start = QRect(self.geometry())
-        self._target = QRect(self._start)
-        self._drag = "resize" if self._in_corner(e.position()) else "move"
-        self.raise_()
-        self.canvas.ghost.setGeometry(self._start)    # only this outline moves while dragging
-        self.canvas.ghost.show(); self.canvas.ghost.raise_()
+        self._dragging = False
+        self.page.select(("tile", self.cfg))
 
     def mouseMoveEvent(self, e):
-        if not self.page.editing:
+        if not self.page.editing or self._press is None:
             return super().mouseMoveEvent(e)
-        if self._press is None:
-            self.setCursor(Qt.CursorShape.SizeFDiagCursor if self._in_corner(e.position())
-                           else Qt.CursorShape.SizeAllCursor)
-            return
-        d = e.globalPosition().toPoint() - self._press
-        g = QRect(self._start)
-        snap = self.page.snap
-        if self._drag == "move":
-            g.moveTo(max(0, snap(g.x() + d.x())), max(0, snap(g.y() + d.y())))
-        else:
-            g.setWidth(max(MIN_W, snap(g.width() + d.x())))
-            g.setHeight(max(MIN_H, snap(g.height() + d.y())))
-        if g != self._target:
-            self._target = g
-            self.canvas.ghost.setGeometry(g)
-            self.canvas.grow_to(g)
+        g = e.globalPosition().toPoint()
+        if not self._dragging and (g - self._press).manhattanLength() > 8:
+            self._dragging = True
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        if self._dragging:
+            self.canvas.show_drop(self, g)
 
     def mouseReleaseEvent(self, e):
         if self._press is not None:
-            self._press = None
-            self.canvas.ghost.hide()
-            g = self._target
-            if g != self.geometry():
-                self.setGeometry(g)
-                self.cfg.update(x=g.x(), y=g.y(), w=g.width(), h=g.height())
-                self.canvas.fit()
-                self.page.host.view_changed()
+            if self._dragging:
+                self.canvas.ghost.hide()
+                cell = self.canvas.cell_at(e.globalPosition().toPoint())
+                if cell is not None:
+                    self.page.move_tile(self, *cell)
+            self._press, self._dragging = None, False
+            self.unsetCursor()
         super().mouseReleaseEvent(e)
 
     def mouseDoubleClickEvent(self, e):
@@ -277,25 +250,26 @@ class Tile(QFrame):
     def contextMenuEvent(self, e):
         if not self.page.editing:
             return super().contextMenuEvent(e)
+        self.page.select(("tile", self.cfg))
         m = QMenu(self)
-        m.addAction("Configure...", lambda: self.page.edit_tile(self))
-        m.addAction("Duplicate", lambda: self.page.duplicate_tile(self))
-        m.addAction("Bring to front", self.raise_)
+        m.addAction("All settings...", lambda: self.page.edit_tile(self))
         m.addSeparator()
+        for text, dc, dr in (("Wider", 1, 0), ("Narrower", -1, 0), ("Taller", 0, 1), ("Shorter", 0, -1)):
+            m.addAction(text, lambda a=dc, b=dr: self.page.resize_tile(self, a, b))
+        m.addSeparator()
+        m.addAction("Duplicate", lambda: self.page.duplicate_tile(self))
         m.addAction("Delete", lambda: self.page.delete_tile(self))
         m.exec(e.globalPos())
-
-    def leaveEvent(self, e):
-        if self._press is None:
-            self.unsetCursor()
-        super().leaveEvent(e)
 
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         bg, border = self.bg_color(), self.border_color()
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        if self.page.editing:
+        if self.page.editing and self.page.is_selected(self.cfg):
+            pen = QPen(QColor(T["accent"]), 2)
+            r = r.adjusted(0.5, 0.5, -0.5, -0.5)
+        elif self.page.editing:
             pen = QPen(QColor(T["accent"]), 1, Qt.PenStyle.DashLine)
         else:
             pen = QPen(border, 1) if border is not None else Qt.PenStyle.NoPen
@@ -505,6 +479,7 @@ class PlotTile(Tile):
     def draw(self, t_end: float, win: float):
         kind = self.ptype
         host = self.page.host
+        win = float(self.cfg.get("span_s") or 0) or win      # a trend can show its own time span
         if kind == "time":
             n = int(self.cfg.get("x_samples", 1000)) if self.by_samples else 0
             for (tid, idx), curve in self.curves.items():
@@ -601,11 +576,12 @@ class PlotTile(Tile):
 # ---------------------------------------------------------------------- text
 class TextTile(Tile):
     kind = "text"
+    ALIGN = {"left": Qt.AlignmentFlag.AlignLeft, "center": Qt.AlignmentFlag.AlignHCenter,
+             "right": Qt.AlignmentFlag.AlignRight}
 
     def build_content(self):
         self.lbl = QLabel()
         self.lbl.setWordWrap(True)
-        self.lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.lbl.setTextFormat(Qt.TextFormat.RichText)
         self.lbl.setContentsMargins(8, 4, 8, 4)
         return self.lbl
@@ -613,8 +589,10 @@ class TextTile(Tile):
     def apply_cfg(self):
         style = self.cfg.get("style", "H1")
         self.caption.hide()
-        self.title_lbl.setText(f"Text · {style}")
+        self.title_lbl.setText(tile_title(self.cfg))
         self.lbl.setObjectName(f"view{style}")
+        v = Qt.AlignmentFlag.AlignVCenter if style != "Body" else Qt.AlignmentFlag.AlignTop
+        self.lbl.setAlignment(self.ALIGN.get(self.cfg.get("align", "left"), Qt.AlignmentFlag.AlignLeft) | v)
         text = html.escape(self.cfg.get("text", "")).replace("\n", "<br>")
         col = self.cfg.get("value_color")
         self.lbl.setText(f"<span style='color:{col}'>{text}</span>" if col else text)
@@ -623,14 +601,13 @@ class TextTile(Tile):
 
 # ---------------------------------------------------------------------- indicators
 class _IndicatorTile(Tile):
-    """Numeric / gauge: one channel, the value or a statistic over a window."""
+    """Number / gauge / LED: one tag, the value or a statistic over a buffered window."""
 
     def quantity_text(self) -> str:
         q = self.cfg.get("quantity", "value")
         if q == "value":
             return ""
-        win = float(self.cfg.get("window_s") or 0)
-        return f"{an.STAT_LABEL.get(q, q)} · " + (f"{win:g} s" if win else "screen window")
+        return f"{an.STAT_LABEL.get(q, q)} · {vm.win_text(self.cfg)}"
 
     def default_caption(self) -> str:
         lbl = self.channel_info(self.cfg.get("channel"))[0]
@@ -648,8 +625,7 @@ class _IndicatorTile(Tile):
         q = self.cfg.get("quantity", "value")
         if q == "value" or not hasattr(host, "stat_values"):
             return host.last_value(*ch)[0]
-        st = host.stat_values(ch[0], ch[1], float(self.cfg.get("window_s") or 0) or None,
-                              keys=[q]) or {}
+        st = host.stat_values(ch[0], ch[1], self.cfg, keys=[q]) or {}
         return st.get(an.STAT_LABEL[q])
 
 
@@ -669,7 +645,7 @@ class ValueTile(_IndicatorTile):
         return w
 
     def apply_cfg(self):
-        self.title_lbl.setText("Numeric")
+        self.title_lbl.setText("Number")
         self.set_caption()
         self.unit_lbl.setText(self.unit())
         f = self.val_lbl.font(); f.setPixelSize(int(self.cfg.get("value_size", 30)))
@@ -679,7 +655,7 @@ class ValueTile(_IndicatorTile):
 
     def _show(self, val):
         dec = int(self.cfg.get("decimals", 3))
-        text = "-" if val is None else f"{val:.{dec}f}"
+        text = "-" if val is None or val != val else f"{val:.{dec}f}"
         col = self.cfg.get("value_color")
         self.val_lbl.setText(f"<span style='color:{col}'>{text}</span>" if col else text)
 
@@ -710,6 +686,66 @@ class GaugeTile(_IndicatorTile):
 
     def update_value(self):
         self.gauge.set_value(self.read())
+
+
+class _Led(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.color, self.text = QColor(T["muted"]), ""
+
+    def set(self, color: QColor, text: str):
+        if (color.name(), text) != (self.color.name(), self.text):
+            self.color, self.text = color, text
+            self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        fm = self.fontMetrics()
+        th = fm.height() + 4 if self.text else 0
+        d = max(10, min(self.width() - 16, self.height() - th - 12, 90))
+        x, y = (self.width() - d) / 2, (self.height() - th - d) / 2
+        glow = QColor(self.color); glow.setAlpha(60)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(glow)
+        p.drawEllipse(QRectF(x - 4, y - 4, d + 8, d + 8))
+        p.setBrush(self.color); p.setPen(QPen(QColor(T["border"]), 1))
+        p.drawEllipse(QRectF(x, y, d, d))
+        if self.text:
+            p.setPen(QColor(T["text"]))
+            p.drawText(QRectF(0, y + d + 4, self.width(), th), Qt.AlignmentFlag.AlignHCenter, self.text)
+        p.end()
+
+
+class LedTile(_IndicatorTile):
+    """On / off lamp: on when value <op> threshold (alarm state, running, valve open ...)."""
+    kind = "led"
+    OPS = {">": lambda a, b: a > b, ">=": lambda a, b: a >= b, "<": lambda a, b: a < b,
+           "<=": lambda a, b: a <= b, "==": lambda a, b: a == b, "!=": lambda a, b: a != b}
+
+    def build_content(self):
+        self.led = _Led()
+        return self.led
+
+    def apply_cfg(self):
+        self.title_lbl.setText("LED")
+        self.set_caption()
+        if self.page.editing:
+            self.show_mock()
+
+    def _show(self, val):
+        c = self.cfg
+        if val is None or val != val:
+            self.led.set(QColor(T["muted"]), "no data")
+            return
+        on = self.OPS.get(c.get("led_op", ">"), self.OPS[">"])(val, float(c.get("led_value", 0.5)))
+        col = (c.get("led_on") or T["ok"]) if on else (c.get("led_off") or T["panel2"])
+        self.led.set(QColor(col), c.get("led_on_text" if on else "led_off_text", ""))
+
+    def show_mock(self):
+        self._show(float(self.cfg.get("led_value", 0.5)) + 1)
+
+    def update_value(self):
+        self._show(self.read())
 
 
 # ---------------------------------------------------------------------- tables
@@ -746,9 +782,18 @@ class _TableTile(Tile):
                 it.setForeground(QBrush(QColor(fg)) if fg else QBrush())
                 it.setBackground(QBrush(bg) if bg else QBrush())
 
+    def _columns(self, cols: list[str], stretch=()):
+        self.table.setColumnCount(len(cols))
+        self.table.setHorizontalHeaderLabels(cols)
+        hh = self.table.horizontalHeader()
+        for c, name in enumerate(cols):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch if name in stretch
+                                    else QHeaderView.ResizeMode.ResizeToContents)
+        hh.setStretchLastSection(False)
+
 
 class StatsTile(_TableTile):
-    """Rows = channels, columns = the chosen statistics (Value, Mean, Min, Max, SD, RMS ...)."""
+    """Rows = tags, columns = the chosen statistics (Value, Mean, Min, Max, SD, RMS ...)."""
     kind = "stats"
 
     def default_caption(self) -> str:
@@ -758,15 +803,8 @@ class StatsTile(_TableTile):
         self.title_lbl.setText("Statistics table")
         cols = [c for c in STAT_TILE_COLS if c in (self.cfg.get("columns") or STAT_TILE_COLS)]
         self.cols = cols
-        win = float(self.cfg.get("window_s", 0) or 0)
-        self.set_caption(f"  ·  last {win:g} s" if win else "  ·  screen time window")
-        self.table.setColumnCount(len(cols) + 2)
-        self.table.setHorizontalHeaderLabels(["Channel"] + cols + ["Unit"])
-        hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for c in range(1, len(cols) + 2):
-            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
-        hh.setStretchLastSection(False)
+        self.set_caption(f"  ·  {vm.win_text(self.cfg)}")
+        self._columns(["Tag"] + cols + ["Unit"], stretch=("Tag",))
         names = {(tid, idx): (lbl, unit) for tid, idx, lbl, _, unit in self.page.host.channel_choices()}
         self.rows = [(tuple(ch), *names[tuple(ch)]) for ch in self.cfg.get("channels", [])
                      if tuple(ch) in names]
@@ -781,20 +819,68 @@ class StatsTile(_TableTile):
             return
         d = int(self.cfg.get("decimals", 3))
         self.set_rows([[lbl.split(" [")[0]] + [f"{_mock(i, k):.{d}f}" for k in range(len(self.cols))] + [unit]
-                       for i, (_, lbl, unit) in enumerate(self.rows)] or [["(mock-up) choose channels"]
+                       for i, (_, lbl, unit) in enumerate(self.rows)] or [["(mock-up) choose tags"]
                                                                            + [""] * (len(self.cols) + 1)],
                       right_from=1)
 
     def update_value(self):
         d = int(self.cfg.get("decimals", 3))
-        win = float(self.cfg.get("window_s", 0) or 0) or None
         keys = [_COL_KEY.get(c, "value") for c in self.cols]
         out = []
         for (tid, idx), lbl, unit in self.rows:
-            st = self.page.host.stat_values(tid, idx, win, keys=keys) or {}
+            st = self.page.host.stat_values(tid, idx, self.cfg, keys=keys) or {}
             out.append([lbl.split(" [")[0]] +
-                       ["-" if st.get(c) is None else f"{st[c]:.{d}f}" for c in self.cols] + [unit])
+                       ["-" if st.get(c) is None or st[c] != st[c] else f"{st[c]:.{d}f}" for c in self.cols]
+                       + [unit])
         self.set_rows(out)
+
+
+class TagTile(_TableTile):
+    """Live tag list: value, unit, quality, time of the last value."""
+    kind = "tags"
+
+    def default_caption(self) -> str:
+        return "Tags"
+
+    def apply_cfg(self):
+        self.title_lbl.setText("Tag table")
+        self.cols = [c for c in TAG_TILE_COLS if c in (self.cfg.get("columns") or TAG_TILE_COLS)] or ["Tag"]
+        self.set_caption()
+        self._columns(self.cols, stretch=("Tag", "Description"))
+        self.keys = [tuple(k) for k in self.cfg.get("channels", [])]
+        self.table.setRowCount(0)
+        if self.page.editing:
+            self.show_mock()
+        else:
+            self.update_value()
+
+    def show_mock(self):
+        if not hasattr(self, "cols"):
+            return
+        rows = []
+        for i, k in enumerate(self.keys or [None] * 3):
+            lbl, _, unit = self.channel_info(k) if k else (f"Tag{i + 1}", "", "")
+            rows.append({"Tag": lbl.split(" · ")[-1].split(" [")[0], "Value": f"{_mock(i):.2f}", "Unit": unit,
+                         "Quality": "Good", "Time": "12:00:00", "Device": lbl.split(" · ")[0],
+                         "Description": "", "_good": True})
+        self._show(rows)
+
+    def _show(self, rows):
+        right = self.cols.index("Value") if "Value" in self.cols else 99
+        self.set_rows([[r.get(c, "") for c in self.cols] for r in rows] or
+                      [["No tags - choose them in Properties"] + [""] * (len(self.cols) - 1)],
+                      right_from=99, colors=lambda r, c: (
+                          T["bad"] if r < len(rows) and not rows[r].get("_good", True)
+                          and self.cols[c] in ("Value", "Quality") else None, None))
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, right) if right < 99 else None
+            if it is not None:
+                it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+    def update_value(self):
+        host = self.page.host
+        if hasattr(host, "tag_rows"):
+            self._show(host.tag_rows(self.keys, int(self.cfg.get("decimals", 3))))
 
 
 class AlarmTile(_TableTile):
@@ -808,13 +894,7 @@ class AlarmTile(_TableTile):
         self.title_lbl.setText("Alarm table")
         self.cols = [c for c in ALARM_TILE_COLS if c in (self.cfg.get("columns") or ALARM_TILE_COLS)] or ["Alarm"]
         self.set_caption(f"  ·  max {int(self.cfg.get('max_rows', 10))} rows")
-        self.table.setColumnCount(len(self.cols))
-        self.table.setHorizontalHeaderLabels(self.cols)
-        hh = self.table.horizontalHeader()
-        for c, name in enumerate(self.cols):
-            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch if name in ("Alarm", "Tag")
-                                    else QHeaderView.ResizeMode.ResizeToContents)
-        hh.setStretchLastSection(False)
+        self._columns(self.cols, stretch=("Alarm", "Tag"))
         self._seq = None
         self.table.setRowCount(0)
         if self.page.editing:
@@ -832,7 +912,7 @@ class AlarmTile(_TableTile):
             lv = levels[i % len(levels)]
             rows.append({"Time": f"12:0{i}:15", "Level": f"Level {lv}",
                          "State": ("ON", "OFF")[i % 2] if self.cfg.get("source") == "log" else "ALARM",
-                         "Alarm": f"Mock alarm {i + 1}", "Tag": f"Topic · CH{i + 1}",
+                         "Alarm": f"Mock alarm {i + 1}", "Tag": f"Device · Tag{i + 1}",
                          "Type": ("H", "L", "RH", "D")[i % 4], "Value": f"{_mock(i):.3f}",
                          "Setpoint": f"{_mock(i) - 1:.1f}", "_level": lv})
         self._show(rows)
@@ -862,65 +942,183 @@ class AlarmTile(_TableTile):
                                    self.cfg.get("levels", [1, 2, 3, 4])))
 
 
-TILE_TYPES = {"plot": PlotTile, "text": TextTile, "value": ValueTile, "gauge": GaugeTile,
-              "stats": StatsTile, "alarms": AlarmTile}
+TILE_TYPES = {"plot": PlotTile, "text": TextTile, "value": ValueTile, "gauge": GaugeTile, "led": LedTile,
+              "stats": StatsTile, "alarms": AlarmTile, "tags": TagTile}
+LIVE_TYPES = (ValueTile, GaugeTile, LedTile, StatsTile, AlarmTile, TagTile)
 
 
-# ====================================================================== page
-class Canvas(QWidget):
-    """The free-form area of a view, holding its tiles."""
+# ====================================================================== grid
+class _Cell(QFrame):
+    """An empty cell in edit mode: click selects it, + inserts a component."""
+
+    def __init__(self, page, row: int, col: int):
+        super().__init__()
+        self.page, self.row, self.col = page, row, col
+        self.setObjectName("gridCell")
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
+        b = QToolButton(); b.setAutoRaise(True); b.setToolTip("Insert a component here")
+        b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        page.host.reg_icon(b, "plus", "muted")
+        b.setMenu(insert_menu(page, b, row, col))
+        lay.addWidget(b, 0, Qt.AlignmentFlag.AlignCenter)
+        self.setToolTip(f"Row {row + 1}, column {col + 1} - click to select, + to insert")
+
+    def mousePressEvent(self, e):
+        self.page.select(("cell", self.row, self.col))
+
+    def contextMenuEvent(self, e):
+        self.page.select(("cell", self.row, self.col))
+        insert_menu(self.page, self, self.row, self.col).exec(e.globalPos())
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        sel = self.page.is_selected(("cell", self.row, self.col))
+        p.setPen(QPen(QColor(T["accent" if sel else "border"]), 2 if sel else 1,
+                      Qt.PenStyle.SolidLine if sel else Qt.PenStyle.DashLine))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 6, 6)
+        p.end()
+
+
+class _Head(QToolButton):
+    """Row / column handle (edit mode): click selects the line, the menu edits the grid."""
+
+    def __init__(self, page, axis: str, i: int):
+        super().__init__()
+        self.page, self.axis, self.i = page, axis, i
+        self.setObjectName("gridHead")
+        line = page.view[axis][i]
+        size = f"{line['size']:g} px" if line.get("fixed") else f"{line['size']:g}×"
+        self.setText(f"{i + 1}" if axis == "rows" else chr(65 + i) if i < 26 else str(i + 1))
+        self.setToolTip(f"{'Row' if axis == 'rows' else 'Column'} {self.text()} · {size}"
+                        " - click to select, right-click to insert / delete")
+        self.setSizePolicy(QSizePolicy.Policy.Ignored if axis == "cols" else QSizePolicy.Policy.Fixed,
+                           QSizePolicy.Policy.Fixed if axis == "cols" else QSizePolicy.Policy.Ignored)
+        self.clicked.connect(lambda: page.select(("row" if axis == "rows" else "col", i)))
+        set_prop(self, "selected", page.is_selected(("row" if axis == "rows" else "col", i)))
+
+    def contextMenuEvent(self, e):
+        self.page.line_menu(self.axis, self.i).exec(e.globalPos())
+
+
+class GridCanvas(QWidget):
+    """The grid of a view: components, empty cells and (edit mode) row / column handles."""
+    HEAD = 22
 
     def __init__(self, page):
         super().__init__()
         self.page = page
         self.tiles: list[Tile] = []
         self.setObjectName("viewCanvas")
+        self.lay = QGridLayout(self)
         self.ghost = QRubberBand(QRubberBand.Shape.Rectangle, self)
-        self.empty = label("Empty view - click Edit, then add a graph, indicator, table or text tile.",
-                           muted=True)
-        self.empty.setParent(self); self.empty.move(20, 20); self.empty.adjustSize()
-        self._grid_px: tuple | None = None
+        self._extra: list[QWidget] = []                   # cells + handles, rebuilt by relayout
+        self._used = (0, 0)
 
-    def fit(self):
-        r = b = 0
+    @property
+    def off(self) -> int:
+        return 1 if self.page.editing else 0
+
+    def relayout(self):
+        v, lay, off = self.page.view, self.lay, self.off
+        while lay.count():
+            lay.takeAt(0)
+        for w in self._extra:
+            w.deleteLater()
+        self._extra = []
+        ur, uc = self._used
+        for r in range(ur):
+            lay.setRowStretch(r, 0); lay.setRowMinimumHeight(r, 0)
+        for c in range(uc):
+            lay.setColumnStretch(c, 0); lay.setColumnMinimumWidth(c, 0)
+        m = int(v.get("margin", 10))
+        lay.setContentsMargins(m, m, m, m)
+        lay.setSpacing(int(v.get("gap", 8)))
+        rows, cols = v["rows"], v["cols"]
+        nr, nc = len(rows), len(cols)
+        min_h = min_w = 0
+        for i, line in enumerate(rows):
+            px = int(line["size"]) if line.get("fixed") else MIN_CELL
+            lay.setRowMinimumHeight(i + off, px)
+            lay.setRowStretch(i + off, 0 if line.get("fixed") else max(1, int(float(line["size"]) * 100)))
+            min_h += px
+        for i, line in enumerate(cols):
+            px = int(line["size"]) if line.get("fixed") else MIN_CELL
+            lay.setColumnMinimumWidth(i + off, px)
+            lay.setColumnStretch(i + off, 0 if line.get("fixed") else max(1, int(float(line["size"]) * 100)))
+            min_w += px
+        # all lines fixed: an empty stretch line takes the rest, so fixed sizes stay fixed
+        if all(x.get("fixed") for x in rows):
+            lay.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding), nr + off, 0)
+            lay.setRowStretch(nr + off, 1)
+        if all(x.get("fixed") for x in cols):
+            lay.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 0, nc + off)
+            lay.setColumnStretch(nc + off, 1)
+        self._used = (nr + 2, nc + 2)
+        if off:                                           # handles: row 0 / column 0
+            lay.setRowMinimumHeight(0, self.HEAD); lay.setColumnMinimumWidth(0, self.HEAD + 6)
+            for i in range(nc):
+                h = _Head(self.page, "cols", i); lay.addWidget(h, 0, i + 1); self._extra.append(h)
+            for i in range(nr):
+                h = _Head(self.page, "rows", i); lay.addWidget(h, i + 1, 0); self._extra.append(h)
+            min_h += self.HEAD; min_w += self.HEAD + 6
+        taken = vm.occupied(v)
         for t in self.tiles:
-            g = t.geometry()
-            r, b = max(r, g.right()), max(b, g.bottom())
-        self.setMinimumSize(r + 40, b + 40)
-        self.empty.setVisible(not self.tiles)
+            c = t.cfg
+            lay.addWidget(t, c["row"] + off, c["col"] + off, c["rowspan"], c["colspan"])
+            t.show()
+        if self.page.editing:
+            for r in range(nr):
+                for c in range(nc):
+                    if (r, c) not in taken:
+                        cell = _Cell(self.page, r, c)
+                        lay.addWidget(cell, r + off, c + off)
+                        self._extra.append(cell)
+        gap = int(v.get("gap", 8))
+        self.setMinimumSize(min_w + gap * max(nc - 1, 0) + 2 * m, min_h + gap * max(nr - 1, 0) + 2 * m)
+        self.update()
 
-    def grow_to(self, g: QRect):
-        """Grow (never shrink) while dragging, so a tile can be pulled past the edge."""
-        if g.right() + 40 > self.minimumWidth() or g.bottom() + 40 > self.minimumHeight():
-            self.setMinimumSize(max(self.minimumWidth(), g.right() + 40), max(self.minimumHeight(), g.bottom() + 40))
+    def cell_at(self, gpos: QPoint) -> tuple[int, int] | None:
+        p = self.mapFromGlobal(gpos)
+        v, off = self.page.view, self.off
+        row = next((r for r in range(len(v["rows"]))
+                    if self.lay.cellRect(r + off, off).top() <= p.y() <= self.lay.cellRect(r + off, off).bottom()
+                    + self.lay.spacing()), None)
+        col = next((c for c in range(len(v["cols"]))
+                    if self.lay.cellRect(off, c + off).left() <= p.x() <= self.lay.cellRect(off, c + off).right()
+                    + self.lay.spacing()), None)
+        return (row, col) if row is not None and col is not None else None
 
-    def _grid_brush(self, step: int) -> QBrush:
-        key = (step, T["border"])
-        if self._grid_px is None or self._grid_px[0] != key:
-            pm = QPixmap(step, step); pm.fill(Qt.GlobalColor.transparent)
-            p = QPainter(pm); p.setPen(QColor(T["border"])); p.drawPoint(0, 0); p.end()
-            self._grid_px = (key, QBrush(pm))
-        return self._grid_px[1]
+    def span_rect(self, r, c, rs, cs) -> QRect:
+        off = self.off
+        return self.lay.cellRect(r + off, c + off).united(self.lay.cellRect(r + rs - 1 + off, c + cs - 1 + off))
+
+    def show_drop(self, tile: Tile, gpos: QPoint):
+        cell = self.cell_at(gpos)
+        span = vm.fit_span(self.page.view, tile.cfg, *cell, tile.cfg["colspan"], tile.cfg["rowspan"]) \
+            if cell else None
+        if not span:
+            self.ghost.hide()
+            return
+        self.ghost.setGeometry(self.span_rect(cell[0], cell[1], span[1], span[0]))
+        self.ghost.show(); self.ghost.raise_()
 
     def paintEvent(self, e):
         p = QPainter(self)
-        v = self.page.view
-        p.fillRect(e.rect(), QColor(v.get("bg") or T["bg"]))
-        if self.page.editing and v.get("show_grid", True):      # dot grid while editing (one brush)
-            step = max(4, int(v.get("grid", GRID)))
-            step *= 2 if step < 10 else 1
-            p.fillRect(e.rect(), self._grid_brush(step))
+        p.fillRect(e.rect(), QColor(self.page.view.get("bg") or T["bg"]))
         p.end()
 
 
 class ViewPage(QWidget):
-    """One custom view: toolbar + scrollable free-form canvas."""
+    """One view: toolbar + scrollable grid."""
     changed = Signal()
 
     def __init__(self, host, view: dict, editing: bool = False):
         super().__init__()
         self.host, self.view = host, normalize_view(view)
         self.editing = editing
+        self.selected = None
         self._last: tuple | None = None                 # last (t_end, win) drawn
 
         bar = QFrame(); bar.setObjectName("docBar")
@@ -931,25 +1129,25 @@ class ViewPage(QWidget):
         host.reg_icon(self.btn_edit, "pencil")
         self.btn_edit.toggled.connect(self.set_edit)
         bl.addWidget(self.btn_edit)
-        self.add_btns = []
-        tables = hasattr(host, "stat_values")
-        for text, icon, items in ADD_MENUS:
-            if text == "Table" and not tables:
-                continue
+        self.edit_btns = []
+        ins = QToolButton(); ins.setText("Insert")
+        ins.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        ins.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        ins.setToolTip("Insert a component in the selected cell (or the first free one)")
+        host.reg_icon(ins, "plus")
+        ins.setMenu(QMenu(ins))
+        ins.menu().aboutToShow.connect(lambda: self._fill_insert(ins.menu()))
+        bl.addWidget(ins); self.edit_btns.append(ins)
+        for text, icon, axis in (("Row", "rows", "rows"), ("Column", "columns", "cols")):
             b = QToolButton(); b.setText(text)
             b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-            b.setToolTip(f"Add a {text.lower()} tile")
+            b.setToolTip(f"Add a {text.lower()} at the end (handles: right-click to insert / delete)")
             host.reg_icon(b, icon)
-            m = QMenu(b)
-            for itext, iicon, kind, preset in items:
-                a = m.addAction(itext, lambda k=kind, p=preset: self.add_tile(k, **p))
-                host.reg_icon(a, iicon)
-            b.setMenu(m)
-            bl.addWidget(b); self.add_btns.append(b)
+            b.clicked.connect(lambda _=False, a=axis: self.insert_line(a, len(self.view[a])))
+            bl.addWidget(b); self.edit_btns.append(b)
         bl.addStretch(1)
-        self.hint = label("Mock-up data while editing · double-click a tile to configure · drag to move · "
-                          "corner grip to resize", muted=True, small=True)
+        self.hint = label("Mock-up data while editing · click to select · drag to move · "
+                          "double-click for all settings", muted=True, small=True)
         bl.addWidget(self.hint)
         self.count_lbl = label("", muted=True, small=True)
         bl.addWidget(self.count_lbl)
@@ -961,7 +1159,7 @@ class ViewPage(QWidget):
             bl.addWidget(b)
         self.bar = bar
 
-        self.canvas = Canvas(self)
+        self.canvas = GridCanvas(self)
         self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(self.canvas)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
@@ -982,73 +1180,139 @@ class ViewPage(QWidget):
     def all_tiles(self) -> list[Tile]:
         return self.canvas.tiles
 
-    def snap(self, v: int) -> int:
-        g = max(1, int(self.view.get("grid", GRID)))
-        return int(round(v / g) * g) if self.view.get("snap", True) else int(v)
+    def tile_of(self, cfg: dict) -> Tile | None:
+        return next((t for t in self.tiles if t.cfg is cfg), None)
 
-    # ---- tiles
+    # ---- selection (the Properties panel follows it)
+    def select(self, sel):
+        self.selected = sel
+        for t in self.tiles:
+            t.update()
+        for w in self.canvas._extra:
+            if isinstance(w, _Head):
+                set_prop(w, "selected", self.is_selected(("row" if w.axis == "rows" else "col", w.i)))
+            w.update()
+        if hasattr(self.host, "view_selected"):
+            self.host.view_selected(self, sel)
+
+    def is_selected(self, what) -> bool:
+        s = self.selected
+        if s is None:
+            return False
+        if isinstance(what, dict):
+            return s[0] == "tile" and s[1] is what
+        return tuple(s) == tuple(what)
+
+    def selected_cell(self) -> tuple[int, int] | None:
+        s = self.selected
+        if s and s[0] == "cell":
+            return s[1], s[2]
+        if s and s[0] == "tile":
+            return s[1]["row"], s[1]["col"]
+        return None
+
+    def _fill_insert(self, m: QMenu):
+        m.clear()
+        cell = self.selected_cell() if self.selected and self.selected[0] == "cell" else None
+        sub = insert_menu(self, m, *(cell or (None, None)))
+        for a in sub.actions():
+            m.addAction(a)
+
+    # ---- components
     def _make_tile(self, cfg: dict) -> Tile:
         t = TILE_TYPES[cfg["kind"]](self, self.canvas, cfg)
-        t.show()
         self.canvas.tiles.append(t)
-        self.canvas.fit()
         return t
 
     def _update_count(self):
         tiles = self.view["tiles"]
         g = sum(1 for t in tiles if is_graph(t))
-        self.count_lbl.setText(f"  {len(tiles)}/{MAX_TILES} tiles · {g}/{MAX_GRAPHS} graphs")
+        self.count_lbl.setText(f"  {len(self.view['rows'])}×{len(self.view['cols'])} grid · "
+                               f"{len(tiles)}/{MAX_TILES} components · {g}/{MAX_GRAPHS} graphs")
         self.count_lbl.setVisible(self.editing)
 
     def _room(self, cfg: dict) -> bool:
-        """Tile limits per view (speed): MAX_TILES tiles, MAX_GRAPHS graphs."""
+        """Limits per view (speed): MAX_TILES components, MAX_GRAPHS graphs."""
         tiles = self.view["tiles"]
         if len(tiles) >= MAX_TILES:
-            msg = f"A view holds at most {MAX_TILES} tiles - add another view for more (Project → New view)."
+            msg = f"A view holds at most {MAX_TILES} components - add another view for more."
         elif is_graph(cfg) and sum(1 for t in tiles if is_graph(t)) >= MAX_GRAPHS:
             msg = (f"A view holds at most {MAX_GRAPHS} graphs (they redraw live) - add another view, "
-                   "or show several channels in one graph.")
+                   "or show several tags in one graph.")
         else:
             return True
         QMessageBox.information(self, "View is full", msg)
         return False
 
-    def _free_y(self) -> int:
-        y = max((t.geometry().bottom() for t in self.tiles), default=0)
-        return self.snap(y + 20) if self.tiles else self.snap(10)
+    def _changed(self, relayout: bool = True):
+        if relayout:
+            self.canvas.relayout()
+        self._update_count()
+        self.host.view_changed()
 
-    def add_tile(self, kind: str, **preset):
-        """Place a tile with sensible defaults; configure it later (double-click / pencil)."""
+    def add_tile(self, kind: str, at=None, **preset):
+        """Place a component with sensible defaults in a cell; refine it in Properties."""
         ch = self.host.channel_choices()
-        cfg = new_tile(kind, self.snap(10), self._free_y(), show_title=bool(self.view.get("title_bar", True)),
-                       **preset)
+        cfg = new_tile(kind, 0, 0, show_title=bool(self.view.get("title_bar", True)), **preset)
         if not self._room(cfg):
             return
-        if kind in ("plot", "stats") and ch:      # start with every channel of the first topic
+        if kind in ("plot", "stats", "tags") and ch:   # start with every tag of the first device
             first = ch[0][0]
             cfg["channels"] = [[tid, idx] for tid, idx, *_ in ch if tid == first]
             if kind == "plot" and cfg["plot"] == "stft":
                 cfg["channels"] = cfg["channels"][:1]
-        elif kind in ("value", "gauge") and ch:
+        elif kind in ("value", "gauge", "led") and ch:
             cfg["channel"] = [ch[0][0], ch[0][1]]
         if kind == "gauge":
             cfg["decimals"] = 1
+        if kind == "text" and cfg.get("style") != "Body":
+            cfg["colspan"] = len(self.view["cols"])          # a header spans the row
+        place = None
+        if at is not None and at[0] is not None:
+            span = vm.fit_span(self.view, None, at[0], at[1], cfg["colspan"], cfg["rowspan"])
+            place = (at[0], at[1], *span) if span else None
+        place = place or vm.free_cell(self.view, cfg["colspan"], cfg["rowspan"]) or vm.free_cell(self.view)
+        if place is None:                                    # full: add a row for it
+            vm.insert_line(self.view, "rows", len(self.view["rows"]))
+            place = vm.free_cell(self.view, cfg["colspan"], 1)
+        cfg.update(row=place[0], col=place[1], colspan=place[2], rowspan=place[3])
         self.view["tiles"].append(cfg)
-        t = self._make_tile(cfg)
-        t.raise_()
-        self.scroll.ensureWidgetVisible(t, 20, 20)
-        self._update_count()
-        self.host.view_changed()
+        self._make_tile(cfg)
+        self._changed()
+        self.select(("tile", cfg))
 
     def edit_tile(self, tile: Tile):
         dlg = TileDialog(self, tile.cfg, self.host.channel_choices())
         if dlg.exec():
             tile.cfg.update(dlg.result_cfg())
-            tile.apply_cfg()
-            tile.update()
-            if self.editing:
-                tile.show_mock()
-            self.host.view_changed()
+            self.tile_changed(tile.cfg)
+
+    def tile_changed(self, cfg: dict, relayout: bool = False):
+        """A component's settings changed (dialog or Properties panel)."""
+        tile = self.tile_of(cfg)
+        if tile is None:
+            return
+        tile.apply_cfg()
+        tile.update()
+        if self.editing:
+            tile.show_mock()
+        self._changed(relayout)
+
+    def move_tile(self, tile: Tile, row: int, col: int):
+        c = tile.cfg
+        span = vm.fit_span(self.view, c, row, col, c["colspan"], c["rowspan"])
+        if span and (row, col, *span) != (c["row"], c["col"], c["colspan"], c["rowspan"]):
+            c.update(row=row, col=col, colspan=span[0], rowspan=span[1])
+            self._changed()
+            self.select(("tile", c))
+
+    def resize_tile(self, tile: Tile, dcs: int, drs: int):
+        c = tile.cfg
+        cs, rs = c["colspan"] + dcs, c["rowspan"] + drs
+        if vm.fits(self.view, c, c["row"], c["col"], rs, cs):
+            c.update(colspan=cs, rowspan=rs)
+            self._changed()
+            self.select(("tile", c))
 
     def redraw_tile(self, tile: Tile):
         """Settings changed in live mode: draw at once, no empty frame."""
@@ -1060,32 +1324,98 @@ class ViewPage(QWidget):
         if not self._room(tile.cfg):
             return
         cfg = copy.deepcopy(tile.cfg)
-        cfg.update(id=new_tile(cfg["kind"], 0, 0)["id"], x=self.snap(cfg["x"] + 20), y=self.snap(cfg["y"] + 20))
+        place = vm.free_cell(self.view, cfg["colspan"], cfg["rowspan"]) or vm.free_cell(self.view)
+        if place is None:
+            vm.insert_line(self.view, "rows", len(self.view["rows"]))
+            place = vm.free_cell(self.view, cfg["colspan"], 1)
+        cfg.update(id=new_tile(cfg["kind"])["id"], row=place[0], col=place[1], colspan=place[2], rowspan=place[3])
         self.view["tiles"].append(cfg)
-        self._make_tile(cfg).raise_()
-        self._update_count()
-        self.host.view_changed()
+        self._make_tile(cfg)
+        self._changed()
+        self.select(("tile", cfg))
 
     def delete_tile(self, tile: Tile):
         self.canvas.tiles.remove(tile)
         self.view["tiles"] = [x for x in self.view["tiles"] if x is not tile.cfg]
         tile.deleteLater()
-        self.canvas.fit()
-        self._update_count()
-        self.host.view_changed()
+        if self.is_selected(tile.cfg):
+            self.select(("cell", tile.cfg["row"], tile.cfg["col"]))
+        self._changed()
+
+    # ---- rows / columns
+    def line_menu(self, axis: str, i: int) -> QMenu:
+        word = "row" if axis == "rows" else "column"
+        a, b = ("above", "below") if axis == "rows" else ("left", "right")
+        m = QMenu(self)
+        m.addAction(f"Insert {word} {a}", lambda: self.insert_line(axis, i))
+        m.addAction(f"Insert {word} {b}", lambda: self.insert_line(axis, i + 1))
+        m.addSeparator()
+        line = self.view[axis][i]
+        m.addAction("Size..." , lambda: self._ask_size(axis, i))
+        act = m.addAction(f"Fixed size ({'px' if axis == 'rows' else 'px'})")
+        act.setCheckable(True); act.setChecked(bool(line.get("fixed")))
+        act.toggled.connect(lambda on: self.set_line(axis, i, fixed=on))
+        m.addSeparator()
+        d = m.addAction(f"Delete {word}", lambda: self.delete_line(axis, i))
+        d.setEnabled(len(self.view[axis]) > 1)
+        return m
+
+    def _ask_size(self, axis, i):
+        line = self.view[axis][i]
+        if line.get("fixed"):
+            val, ok = QInputDialog.getInt(self, "Size", "Size in pixels:", int(line["size"]), 20, 4000)
+        else:
+            val, ok = QInputDialog.getDouble(self, "Size", "Weight (share of the free space):",
+                                             float(line["size"]), 0.1, 50, 1)
+        if ok:
+            self.set_line(axis, i, size=val)
+
+    def set_line(self, axis: str, i: int, size=None, fixed=None):
+        line = self.view[axis][i]
+        if fixed is not None and bool(fixed) != bool(line.get("fixed")):
+            line["fixed"] = bool(fixed)
+            line["size"] = (120 if axis == "rows" else 200) if fixed else 1.0
+        if size is not None:
+            line["size"] = int(size) if line.get("fixed") else float(size)
+        self._changed()
+        self.select((("row" if axis == "rows" else "col"), i))
+
+    def insert_line(self, axis: str, at: int):
+        if len(self.view[axis]) >= (vm.MAX_ROWS if axis == "rows" else vm.MAX_COLS):
+            return
+        vm.insert_line(self.view, axis, at)
+        self._changed()
+        self.select((("row" if axis == "rows" else "col"), at))
+
+    def delete_line(self, axis: str, i: int):
+        pos, span = ("row", "rowspan") if axis == "rows" else ("col", "colspan")
+        lost = [t for t in self.view["tiles"] if t[pos] == i and t[span] == 1]
+        if lost and QMessageBox.question(
+                self, "Delete", f"Delete the {'row' if axis == 'rows' else 'column'} and the "
+                                f"{len(lost)} component(s) only in it?") != QMessageBox.StandardButton.Yes:
+            return
+        for cfg in vm.delete_line(self.view, axis, i):
+            tile = self.tile_of(cfg)
+            if tile is not None:
+                self.canvas.tiles.remove(tile)
+                tile.deleteLater()
+        self.selected = None
+        self._changed()
+        self.select(None)
 
     # ---- modes / updates
     def set_edit(self, on: bool):
         self.editing = on
         self.btn_edit.setText("Done" if on else "Edit")
-        for b in self.add_btns:
+        for b in self.edit_btns:
             b.setVisible(on)
         self.hint.setVisible(on)
         self._update_count()
         for t in self.tiles:
             t.set_edit(on)
-        self.canvas.update()
+        self.canvas.relayout()
         if not on:
+            self.selected = None
             for t in self.tiles:
                 if isinstance(t, PlotTile):          # drop the mock curves, live data follows
                     for c in t.curves.values():
@@ -1097,12 +1427,15 @@ class ViewPage(QWidget):
                     t.info.setText("")
                     t.reset_zoom()
             self.update_values()
+            if hasattr(self.host, "view_selected"):
+                self.host.view_selected(self, None)
 
     def apply_view(self):
-        """View properties changed: canvas, grid, card defaults."""
-        self.canvas.update()
+        """View properties changed: grid, colours, component defaults."""
         for t in self.tiles:
             t.apply_cfg(); t.update()
+        self.canvas.relayout()
+        self._update_count()
         self.setToolTip(self.view.get("description", ""))
 
     def restyle(self):
@@ -1122,5 +1455,5 @@ class ViewPage(QWidget):
         if self.editing:
             return
         for t in self.tiles:
-            if isinstance(t, (ValueTile, GaugeTile, StatsTile, AlarmTile)):
+            if isinstance(t, LIVE_TYPES):
                 t.update_value()

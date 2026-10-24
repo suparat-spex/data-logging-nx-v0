@@ -1,4 +1,4 @@
-"""Configure one view tile: graph, text, numeric, gauge, statistics or alarm table (tabbed)."""
+"""All settings of one view component: graph, text, number, gauge, LED, statistics / tag / alarm table."""
 from __future__ import annotations
 
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QGridLayout,
@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
 
 from nxlogger.core import analysis as an
 from nxlogger.core.view_model import (ALARM_SOURCES, ALARM_TILE_COLS, COLORMAPS, GAUGE_STYLES,
-                                      STAT_TILE_COLS, TEXT_STYLES, axis_defaults, tile_title)
+                                      STAT_TILE_COLS, TAG_TILE_COLS, TEXT_STYLES, WIN_MODES, WIN_UNITS,
+                                      axis_defaults, tile_title)
 from nxlogger.ui.dialogs.common import ChannelPicker, ColorButton, form_page, spin
 from nxlogger.ui.theme.ui_kit import label, set_prop
 from nxlogger.ui.widgets.gauge import GaugeWidget
@@ -32,7 +33,7 @@ class TileDialog(QDialog):
         self.setMinimumWidth(560)
         self.tabs = QTabWidget()
         build = {"plot": self._plot, "text": self._text, "value": self._value, "gauge": self._gauge,
-                 "stats": self._stats, "alarms": self._alarms}[kind]
+                 "led": self._led, "stats": self._stats, "tags": self._tags, "alarms": self._alarms}[kind]
         build()
         if kind != "text":
             self.tabs.addTab(self._appearance(), "Appearance")
@@ -60,19 +61,36 @@ class TileDialog(QDialog):
             if k in an.STAT_HELP:
                 self.quantity.setItemData(self.quantity.count() - 1, an.STAT_HELP[k], 3)   # tooltip
         self.quantity.setCurrentIndex(max(self.quantity.findData(self.cfg.get("quantity", "value")), 0))
-        self.window_s = self._window_spin(self.cfg.get("window_s", 0))
         f.addRow("Show", self.quantity)
-        f.addRow("Statistics over", self.window_s)
+        win = self._window_rows(f)
         self.quantity.currentIndexChanged.connect(
-            lambda _: self.window_s.setEnabled(self.quantity.currentData() != "value"))
-        self.window_s.setEnabled(self.quantity.currentData() != "value")
+            lambda _: win.setEnabled(self.quantity.currentData() != "value"))
+        win.setEnabled(self.quantity.currentData() != "value")
 
-    @staticmethod
-    def _window_spin(val, special="Quick View time window"):
-        s = spin(float(val or 0), 0, 3600, 1)
-        s.setSuffix(" s"); s.setSpecialValueText(special)
-        s.setToolTip("Time window of the statistic (0 = the Quick View time window)")
-        return s
+    def _window_rows(self, f) -> QWidget:
+        """Statistics window: length + unit (s / min / h / samples) + mode (moving / block)."""
+        c = self.cfg
+        self.win_n = spin(float(c.get("win_n") or 0), 0, 1e7, 1)
+        self.win_n.setSpecialValueText("Quick View time window")
+        self.win_n.setToolTip("Window length; 0 = the Quick View time window. Longer windows are "
+                              "buffered by NX Logger itself (independent of the plots).")
+        self.win_unit = QComboBox()
+        for k, (text, _) in WIN_UNITS.items():
+            self.win_unit.addItem(text, k)
+        self.win_unit.setCurrentIndex(max(0, self.win_unit.findData(c.get("win_unit", "s"))))
+        self.win_mode = QComboBox()
+        for k, text in WIN_MODES.items():
+            self.win_mode.addItem(text, k)
+        self.win_mode.setCurrentIndex(max(0, self.win_mode.findData(c.get("win_mode", "moving"))))
+        box = QWidget(); r = QHBoxLayout(box); r.setContentsMargins(0, 0, 0, 0)
+        r.addWidget(self.win_n, 1); r.addWidget(self.win_unit)
+        f.addRow("Statistics over", box)
+        f.addRow("Window", self.win_mode)
+        return box
+
+    def _window_cfg(self) -> dict:
+        return {"win_n": self.win_n.value(), "win_unit": self.win_unit.currentData(),
+                "win_mode": self.win_mode.currentData(), "window_s": 0.0}
 
     @staticmethod
     def _checks(names, chosen, per_row=5, tips=None):
@@ -93,7 +111,7 @@ class TileDialog(QDialog):
         self._title_rows(f, "optional")
         k = self.ptype
         self.legend = QCheckBox("Legend visible", checked=bool(c.get("legend", True)))
-        self.stack = QCheckBox("Stack plots (one plot per channel, shared X axis)",
+        self.stack = QCheckBox("Stack plots (one plot per tag, shared X axis)",
                                checked=bool(c.get("stack", False)))
         self.grid = QCheckBox("Grid lines", checked=bool(c.get("grid", True)))
         for x in (self.legend, self.stack, self.grid):
@@ -102,14 +120,19 @@ class TileDialog(QDialog):
         self.lw = spin(c.get("line_width", 1.5), 0.5, 6, 1)
         if k != "stft":
             f.addRow("Line width", self.lw)
+        self.span = spin(float(c.get("span_s") or 0), 0, 7200, 1)
+        self.span.setSuffix(" s"); self.span.setSpecialValueText("Quick View time window")
+        self.span.setToolTip("How much history the trend shows (number tags keep 2 h at a 1 s scan)")
+        if k == "time":
+            f.addRow("Time span", self.span)
         self.tabs.addTab(w, "General")
 
         chosen = c.get("channels", [])
         self.picker = ChannelPicker(self.choices, chosen[:1] if k == "stft" else chosen, multi=k != "stft")
         cw = QWidget(); cv = QVBoxLayout(cw); cv.addWidget(self.picker)
-        cv.addWidget(label("Variables are listed with the topics - add them in Project Files → Variables.",
+        cv.addWidget(label("Variables are listed with the devices - add them in Project Files → Variables.",
                            muted=True, small=True))
-        self.tabs.addTab(cw, "Channel" if k == "stft" else "Channels")
+        self.tabs.addTab(cw, "Tag" if k == "stft" else "Tags")
 
         aw, af = form_page()
         self.axis_labels = QCheckBox("Axis labels visible", checked=bool(c.get("axis_labels", True)))
@@ -206,7 +229,8 @@ class TileDialog(QDialog):
                                       checked=bool(c.get("hist_density", True)))
         self.hist_fit = QCheckBox("Overlay fitted normal (Gaussian) curve", checked=bool(c.get("hist_fit", True)))
         self.hist_stats = QCheckBox("Show mean, SD, skewness, kurtosis", checked=bool(c.get("hist_stats", True)))
-        self.hist_span = self._window_spin(c.get("hist_span_s", 0))
+        self.hist_span = spin(float(c.get("hist_span_s") or 0), 0, 7200, 1)
+        self.hist_span.setSuffix(" s"); self.hist_span.setSpecialValueText("Quick View time window")
         hf.addRow("Bins", self.hist_bins)
         hf.addRow("Data", self.hist_span)
         for x in (self.hist_density, self.hist_fit, self.hist_stats):
@@ -242,8 +266,13 @@ class TileDialog(QDialog):
         self.text_style.setCurrentText(self.cfg.get("style", "H1"))
         self.text = QPlainTextEdit(self.cfg.get("text", ""))
         self.text.setMaximumHeight(140)
+        self.align = QComboBox()
+        for k, text in (("left", "Left"), ("center", "Centre"), ("right", "Right")):
+            self.align.addItem(text, k)
+        self.align.setCurrentIndex(max(0, self.align.findData(self.cfg.get("align", "left"))))
         f.addRow("Style", self.text_style)
         f.addRow("Text", self.text)
+        f.addRow("Alignment", self.align)
         self.tabs.addTab(w, "General")
 
     # ================================================================ numeric
@@ -251,10 +280,10 @@ class TileDialog(QDialog):
         w, f = form_page()
         self._title_rows(f)
         self.picker = ChannelPicker(self.choices, [self.cfg.get("channel")], multi=False)
-        f.addRow("Channel", self.picker)
+        f.addRow("Tag", self.picker)
         self._quantity_rows(f)
         self.dec = QSpinBox(minimum=0, maximum=8, value=int(self.cfg.get("decimals", 3)))
-        self.unit = QLineEdit(self.cfg.get("unit", "")); self.unit.setPlaceholderText("default: channel unit")
+        self.unit = QLineEdit(self.cfg.get("unit", "")); self.unit.setPlaceholderText("default: the tag's unit")
         f.addRow("Decimals", self.dec)
         f.addRow("Unit", self.unit)
         self.tabs.addTab(w, "General")
@@ -266,7 +295,7 @@ class TileDialog(QDialog):
         self._title_rows(f)
         self.picker = ChannelPicker(self.choices, [c.get("channel")], multi=False)
         self.picker.setMinimumHeight(150)
-        f.addRow("Channel", self.picker)
+        f.addRow("Tag", self.picker)
         self._quantity_rows(f)
         self.tabs.addTab(w, "General")
 
@@ -278,7 +307,7 @@ class TileDialog(QDialog):
         sf.addRow("Major ticks", self.g_ticks)
         self.dec = QSpinBox(minimum=0, maximum=8, value=int(c.get("decimals", 1)))
         sf.addRow("Decimals", self.dec)
-        self.unit = QLineEdit(c.get("unit", "")); self.unit.setPlaceholderText("default: channel unit")
+        self.unit = QLineEdit(c.get("unit", "")); self.unit.setPlaceholderText("default: the tag's unit")
         sf.addRow("Unit", self.unit)
         self.warn_on = QCheckBox("Warning from", checked=c.get("g_warn") is not None)
         self.warn = spin(c.get("g_warn") if c.get("g_warn") is not None else 70)
@@ -328,9 +357,8 @@ class TileDialog(QDialog):
         c = self.cfg
         w, f = form_page()
         self._title_rows(f, "optional - default: Statistics")
-        self.window_s = self._window_spin(c.get("window_s", 0))
+        self._window_rows(f)
         self.dec = QSpinBox(minimum=0, maximum=8, value=int(c.get("decimals", 3)))
-        f.addRow("Statistics over", self.window_s)
         f.addRow("Decimals", self.dec)
         tips = {an.STAT_LABEL[k]: t for k, t in an.STAT_HELP.items()}
         self.col_checks = self._checks(STAT_TILE_COLS, c.get("columns") or ["Value", "Mean", "Min", "Max"],
@@ -338,7 +366,42 @@ class TileDialog(QDialog):
         f.addRow("Columns", self.col_checks[0])
         self.tabs.addTab(w, "General")
         self.picker = ChannelPicker(self.choices, c.get("channels", []))
-        self.tabs.addTab(self.picker, "Channels")
+        self.tabs.addTab(self.picker, "Tags")
+
+    # ================================================================ tag table
+    def _tags(self):
+        c = self.cfg
+        w, f = form_page()
+        self._title_rows(f, "optional - default: Tags")
+        self.dec = QSpinBox(minimum=0, maximum=8, value=int(c.get("decimals", 3)))
+        f.addRow("Decimals", self.dec)
+        self.col_checks = self._checks(TAG_TILE_COLS, c.get("columns") or TAG_TILE_COLS, per_row=4)
+        f.addRow("Columns", self.col_checks[0])
+        self.tabs.addTab(w, "General")
+        self.picker = ChannelPicker(self.choices, c.get("channels", []))
+        self.tabs.addTab(self.picker, "Tags")
+
+    # ================================================================ LED
+    def _led(self):
+        c = self.cfg
+        w, f = form_page()
+        self._title_rows(f)
+        self.picker = ChannelPicker(self.choices, [c.get("channel")], multi=False)
+        f.addRow("Tag", self.picker)
+        self._quantity_rows(f)
+        self.led_op = QComboBox(); self.led_op.addItems([">", ">=", "<", "<=", "==", "!="])
+        self.led_op.setCurrentText(c.get("led_op", ">"))
+        self.led_value = spin(c.get("led_value", 0.5))
+        r = QHBoxLayout(); r.addWidget(self.led_op); r.addWidget(self.led_value, 1)
+        f.addRow("On when value", r)
+        self.led_on, self.led_off = ColorButton(c.get("led_on", ""), "Auto (ok)"), \
+            ColorButton(c.get("led_off", ""), "Auto (grey)")
+        self.led_on_text, self.led_off_text = QLineEdit(c.get("led_on_text", "ON")), QLineEdit(c.get("led_off_text", "OFF"))
+        f.addRow("On colour", self.led_on); f.addRow("On text", self.led_on_text)
+        f.addRow("Off colour", self.led_off); f.addRow("Off text", self.led_off_text)
+        self.dec = QSpinBox(minimum=0, maximum=8, value=int(c.get("decimals", 3)))
+        self.unit = QLineEdit(c.get("unit", ""))
+        self.tabs.addTab(w, "General")
 
     # ================================================================ alarm table
     def _alarms(self):
@@ -390,8 +453,8 @@ class TileDialog(QDialog):
             err = "Y range: min must be below max."
         elif self.kind == "gauge" and self.g_min.value() >= self.g_max.value():
             err = "Gauge range: min must be below max."
-        elif self.kind in ("value", "gauge") and not self.picker.current():
-            err = "Choose a channel."
+        elif self.kind in ("value", "gauge", "led") and not self.picker.current():
+            err = "Choose a tag."
         if err:
             set_prop(self.err, "level", "bad"); self.err.setText(err)
             self.tabs.setCurrentIndex(2 if err.startswith("Y") else 1 if err.startswith("Gauge") else 0)
@@ -407,6 +470,7 @@ class TileDialog(QDialog):
         if kind == "plot":
             c.update(plot=self.ptype, legend=self.legend.isChecked(),
                      stack=self.stack.isChecked(), grid=self.grid.isChecked(), line_width=self.lw.value(),
+                     span_s=self.span.value(),
                      channels=([self.picker.current()] if self.picker.current() else [])
                      if self.ptype == "stft" else self.picker.checked(),
                      x_mode=self.x_mode.currentData(), x_samples=self.x_samples.value(), axis_labels=self.axis_labels.isChecked(),
@@ -425,17 +489,24 @@ class TileDialog(QDialog):
                      hist_span_s=self.hist_span.value())
         elif kind == "text":
             c.update(style=self.text_style.currentText(), text=self.text.toPlainText(),
-                     value_color=self.value_color.color())
-        elif kind in ("value", "gauge"):
+                     value_color=self.value_color.color(), align=self.align.currentData())
+        elif kind in ("value", "gauge", "led"):
             c.update(channel=self.picker.current(), quantity=self.quantity.currentData(),
-                     window_s=self.window_s.value(), decimals=self.dec.value(), unit=self.unit.text().strip())
+                     decimals=self.dec.value(), unit=self.unit.text().strip(), **self._window_cfg())
             if kind == "value":
                 c.update(value_color=self.value_color.color(), value_size=self.value_size.value())
-            else:
+            elif kind == "gauge":
                 c.update(self._gauge_cfg())
+            else:
+                c.update(led_op=self.led_op.currentText(), led_value=self.led_value.value(),
+                         led_on=self.led_on.color(), led_off=self.led_off.color(),
+                         led_on_text=self.led_on_text.text(), led_off_text=self.led_off_text.text())
         elif kind == "stats":
-            c.update(window_s=self.window_s.value(), decimals=self.dec.value(), channels=self.picker.checked(),
+            c.update(decimals=self.dec.value(), channels=self.picker.checked(), **self._window_cfg(),
                      columns=[n for n, b in self.col_checks[1].items() if b.isChecked()] or ["Value"])
+        elif kind == "tags":
+            c.update(decimals=self.dec.value(), channels=self.picker.checked(),
+                     columns=[n for n, b in self.col_checks[1].items() if b.isChecked()] or ["Tag"])
         elif kind == "alarms":
             c.update(source=self.src.currentData(), max_rows=self.rows.value(),
                      columns=[n for n, b in self.col_checks[1].items() if b.isChecked()] or ["Alarm"],

@@ -30,9 +30,9 @@ from nxlogger.core import wavepacket as wp
 
 # ====================================================================== schemas
 # field: (key, label, type, default, extra)   type: str | int | float | bool | choice | password
-#        extra: choices list for "choice", (min, max) for numbers, tooltip text otherwise
-def F(key, label, kind, default, extra=None, tip=""):
-    return {"key": key, "label": label, "type": kind, "default": default, "extra": extra, "tip": tip}
+#        extra: choices list for "choice", (min, max) for numbers; more: UI hints (button text ...)
+def F(key, label, kind, default, extra=None, tip="", **more):
+    return {"key": key, "label": label, "type": kind, "default": default, "extra": extra, "tip": tip, **more}
 
 
 MODBUS_AREAS = {"holding": "Holding register (4x)", "input": "Input register (3x)",

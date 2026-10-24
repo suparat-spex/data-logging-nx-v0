@@ -1,4 +1,6 @@
-"""Edit one channel: name, unit, colour, scaling (linear / two-point / formula), display range."""
+"""Edit one tag: name, unit, colour, group, address, scaling (linear / two-point / formula),
+display range. ChannelDialog is the common part (also every waveform channel); TagDialog adds
+the Address tab of the device's connector."""
 from __future__ import annotations
 
 import numpy as np
@@ -10,6 +12,8 @@ from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog, QDia
                                QVBoxLayout, QWidget)
 
 from nxlogger.core.channel_math import FUNCS, SCALE_TYPES, UNITS, make_scaler
+from nxlogger.core.tags import DRIVERS, DeviceCfg, TagCfg, describe_address
+from nxlogger.ui.dialogs.common import SchemaForm, form_page
 from nxlogger.ui.icons import swatch
 from nxlogger.ui.theme.ui_kit import label, set_prop
 
@@ -29,11 +33,11 @@ class ChannelDialog(QDialog):
         super().__init__(parent)
         self.ch, self.default_color, self.raw_value = ch, default_color, raw_value
         self.alarms = alarms           # False: alarms live in their own document (MQDAQ v6)
-        self.setWindowTitle(f"Channel - {topic_name} · CH{ch.index + 1}")
+        self.setWindowTitle(f"Tag - {topic_name} · {ch.name}")
         self.setMinimumWidth(520)
         self._color = ch.color or default_color
 
-        tabs = QTabWidget()
+        tabs = self.tabs = QTabWidget()
         tabs.addTab(self._general(topic_name, mqtt_topic), "General")
         tabs.addTab(self._scaling(), "Scaling")
         tabs.addTab(self._display(), "Display && alarms" if alarms else "Display")
@@ -53,8 +57,9 @@ class ChannelDialog(QDialog):
     # ---- pages
     def _general(self, topic_name, mqtt_topic):
         w = QWidget(); f = QFormLayout(w)
-        f.addRow("Topic", label(f"{topic_name}   ({mqtt_topic})" if mqtt_topic else topic_name, muted=True))
-        f.addRow("Channel", label(f"CH{self.ch.index + 1}  (index {self.ch.index} in the packet)", muted=True))
+        f.addRow("Device", label(f"{topic_name}   ({mqtt_topic})" if mqtt_topic else topic_name, muted=True))
+        if getattr(self.ch, "kind", "array") == "array":
+            f.addRow("Channel", label(f"CH{self.ch.index + 1}  (index {self.ch.index} in the packet)", muted=True))
         self.name = QLineEdit(self.ch.name)
         self.unit = QComboBox(); self.unit.setEditable(True); self.unit.addItems(UNITS)
         self.unit.setCurrentText(self.ch.unit)
@@ -247,3 +252,40 @@ class ChannelDialog(QDialog):
             return
         ch.alarm_lo = self.lo.value() if self.lo_on.isChecked() else None
         ch.alarm_hi = self.hi.value() if self.hi_on.isChecked() else None
+
+
+# ====================================================================== tag
+class TagDialog(ChannelDialog):
+    def __init__(self, parent, dev: DeviceCfg, tag: TagCfg, default_color: str, raw_value):
+        super().__init__(parent, dev.name, tag, default_color, raw_value, dev.topic, alarms=False)
+        self.dev, self.tag = dev, tag
+        self.setWindowTitle(f"Tag - {dev.name} · {tag.name}")
+        tabs = self.tabs
+        w, f = form_page()
+        self.group = QComboBox(); self.group.setEditable(True)
+        self.group.addItems([""] + dev.all_groups())
+        self.group.setCurrentText(tag.group)
+        self.group.setToolTip("Folder inside the device; use / for sub-groups (Boiler/Pumps)")
+        f.addRow("Group", self.group)
+        self.access = QCheckBox("Writable (RW) - values can be written from the tag table",
+                                checked=tag.access == "RW")
+        if tag.kind == "array":
+            f.addRow("Address", label(f"{describe_address(dev.driver, '', tag)} of the waveform packets on "
+                                      f"{dev.settings.get('topic', '')}", muted=True))
+            self.addr = None
+        else:
+            f.addRow("", self.access)
+            self.addr = SchemaForm(DRIVERS[dev.driver]["address"], tag.address)
+            box = QWidget(); v = QVBoxLayout(box); v.setContentsMargins(0, 0, 0, 0)
+            v.addWidget(self.addr)
+            f.addRow(label("Address", name="sectionTitle"))
+            f.addRow(box)
+        tabs.insertTab(1, w, "Address")
+        tabs.setCurrentIndex(0)
+
+    def apply(self, tag: TagCfg):
+        super().apply(tag)
+        tag.group = "/".join(p.strip() for p in self.group.currentText().split("/") if p.strip())
+        if self.addr is not None:
+            tag.address = {**tag.address, **self.addr.values()}
+            tag.access = "RW" if self.access.isChecked() else "R"

@@ -24,19 +24,19 @@ class LogProfileDialog(QDialog):
         super().__init__(parent)
         self.p, self.taken, self.add_variable = copy.deepcopy(prof), taken, add_variable
         self.stat = self.p["type"] == "statistic"
-        self.setWindowTitle("Statistic logging profile" if self.stat else "Signal logging profile")
+        self.setWindowTitle("Statistic logging profile" if self.stat else "Data logging profile")
         self.setMinimumWidth(580)
         v = QVBoxLayout(self)
         v.addWidget(label(
             "Statistic: the stream is cut into intervals aligned to the clock (a 1 min interval starts "
             "at hh:mm:00); each interval gives one row with the sample count and the chosen statistics "
-            "per channel - ideal for long-term trends and reports (a day at 1 min = 1440 rows)."
+            "per tag - ideal for long-term trends and reports (a day at 1 min = 1440 rows)."
             if self.stat else
-            "Signal: every sample of the chosen channels - scaled engineering values in CSV / TDMS, "
-            "untouched packets in .wpk.", muted=True, small=True))
+            "Data: every value of the chosen tags - one row per scan (number tags) or per sample "
+            "(waveforms), scaled engineering values in CSV; untouched waveform packets in .wpk.", muted=True, small=True))
         f = QFormLayout(); f.setSpacing(8)
         self.name = QLineEdit(self.p["name"])
-        self.name.setToolTip("Used in the file names: <profile>_<topic>.csv / <project>_<profile>.tdms")
+        self.name.setToolTip("Used in the file names: <profile>_<device>.csv")
         self.enabled = QCheckBox("Enabled", checked=self.p["enabled"])
         r = QHBoxLayout(); r.addWidget(self.name, 1); r.addWidget(self.enabled)
         f.addRow("Name", r)
@@ -76,11 +76,11 @@ class LogProfileDialog(QDialog):
         hr.addWidget(label("Channels", name="sectionTitle")); hr.addStretch(1)
         if add_variable is not None:
             b = QPushButton("Add variable...")
-            b.setToolTip("Create a calculated channel (formula / statistic / processing) and log it here")
+            b.setToolTip("Create a calculated tag (formula / statistic / processing) and log it here")
             b.clicked.connect(self._add_variable)
             hr.addWidget(b)
         v.addLayout(hr)
-        self.all = QCheckBox("All enabled channels and the variables marked Logged "
+        self.all = QCheckBox("All enabled tags and the variables marked Logged "
                              "(new ones are included automatically)",
                              checked=self.p.get("channels") is None)
         v.addWidget(self.all)
@@ -112,7 +112,7 @@ class LogProfileDialog(QDialog):
         self._set_picker(choices, chosen)
         if self.all.isChecked():                     # it is logged anyway (Logged is on by default)
             set_prop(self.err, "level", "muted")
-            self.err.setText("Variable added - logged with all enabled channels.")
+            self.err.setText("Variable added - logged with all enabled tags.")
 
     def _preset(self, i):
         sec = self.preset.itemData(i)
@@ -135,7 +135,7 @@ class LogProfileDialog(QDialog):
         elif self.stat and not any(b.isChecked() for b in self.stats.values()):
             err = "Choose at least one statistic."
         elif not self.all.isChecked() and not self.picker.checked():
-            err = "Choose at least one channel."
+            err = "Choose at least one tag."
         if err:
             set_prop(self.err, "level", "bad"); self.err.setText(err)
             return

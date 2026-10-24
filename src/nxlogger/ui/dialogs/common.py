@@ -1,10 +1,12 @@
-"""Small helpers shared by the dialogs: spin box, channel tree, colour button, form pages."""
+"""Small helpers shared by the dialogs: spin box, channel tree, colour button, form pages,
+schema forms (driver settings / tag addresses)."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QColorDialog, QDoubleSpinBox, QFormLayout, QLineEdit, QMenu,
-                               QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFormLayout, QLineEdit,
+                               QMenu, QSpinBox, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from nxlogger.ui.icons import swatch
 
@@ -25,7 +27,7 @@ def form_page() -> tuple[QWidget, QFormLayout]:
 
 
 def group_of(label: str) -> str:
-    """'Simulator · CH1 [V]' -> 'Simulator' (channel choices are labelled '<group> · <name>')."""
+    """'Simulator · Temp [V]' -> 'Simulator' (choices are labelled '<device> · <tag>')."""
     return label.split(" · ", 1)[0] if " · " in label else ""
 
 
@@ -133,3 +135,62 @@ class ColorButton(QToolButton):
 
     def color(self) -> str:
         return self._color
+
+
+class SchemaForm(QWidget):
+    """Form built from a field schema (core/tags.F): str, password, int, float, bool, choice.
+    values() -> {key: value} typed like the defaults."""
+    changed = Signal()
+
+    def __init__(self, schema, values: dict | None = None, parent=None):
+        super().__init__(parent)
+        values = values or {}
+        self.form = QFormLayout(self); self.form.setContentsMargins(0, 0, 0, 0); self.form.setSpacing(8)
+        self.w: dict[str, tuple[str, QWidget]] = {}
+        for f in schema or []:
+            v = values.get(f["key"], f["default"])
+            kind, extra = f["type"], f.get("extra")
+            if kind in ("str", "password"):
+                w = QLineEdit("" if v is None else str(v))
+                if kind == "password":
+                    w.setEchoMode(QLineEdit.EchoMode.Password)
+                w.textChanged.connect(lambda _: self.changed.emit())
+            elif kind == "int":
+                lo, hi = extra if isinstance(extra, tuple) else (-2_000_000_000, 2_000_000_000)
+                w = QSpinBox(minimum=int(lo), maximum=int(hi)); w.setValue(int(v or 0))
+                w.valueChanged.connect(lambda _: self.changed.emit())
+            elif kind == "float":
+                lo, hi = extra if isinstance(extra, tuple) else (-1e12, 1e12)
+                w = spin(float(v or 0), lo, hi, 4)
+                w.valueChanged.connect(lambda _: self.changed.emit())
+            elif kind == "bool":
+                w = QCheckBox(); w.setChecked(bool(v))
+                w.toggled.connect(lambda _: self.changed.emit())
+            else:                                            # choice
+                w = QComboBox()
+                items = list(extra.items()) if isinstance(extra, dict) else [(x, str(x)) for x in extra or []]
+                for val, text in items:
+                    w.addItem(text, val)
+                w.setCurrentIndex(max(0, next((i for i, (val, _) in enumerate(items) if str(val) == str(v)), 0)))
+                w.currentIndexChanged.connect(lambda _: self.changed.emit())
+            if f.get("tip"):
+                w.setToolTip(f["tip"])
+            self.form.addRow(f["label"], w)
+            self.w[f["key"]] = (kind, w)
+
+    def values(self) -> dict:
+        out = {}
+        for k, (kind, w) in self.w.items():
+            if kind in ("str", "password"):
+                out[k] = w.text().strip()
+            elif kind in ("int", "float"):
+                out[k] = w.value()
+            elif kind == "bool":
+                out[k] = w.isChecked()
+            else:
+                out[k] = w.currentData()
+        return out
+
+    def set_visible(self, key: str, on: bool):
+        if key in self.w:
+            self.form.setRowVisible(self.w[key][1], on)

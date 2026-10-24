@@ -89,6 +89,19 @@ QToolButton#alarmStatus { border: none; padding: 0 8px; color: @muted@; }
 QToolButton#alarmStatus[level="bad"] { color: @bad@; font-weight: 600; }
 QToolButton#alarmStatus[level="warn"] { color: @warn@; font-weight: 600; }
 QFrame#viewTile QTableWidget { border: none; }
+QFrame#gridCell { background: transparent; border: none; }   /* dashed outline painted by _Cell */
+QToolButton#gridHead { background: @panel2@; border: 1px solid @border@; border-radius: 3px; color: @muted@; font-size: 11px; padding: 0; }
+QToolButton#gridHead:hover { color: @text@; border: 1px solid @muted@; }
+QToolButton#gridHead[selected="true"] { color: @accent_text@; background: @accent@; border: 1px solid @accent@; }
+QTreeWidget#propGrid { background: @panel@; alternate-background-color: @panel@; border: none; }
+QTreeWidget#propGrid::item { padding: 1px 0; }
+QTreeWidget#propGrid QLineEdit, QTreeWidget#propGrid QComboBox, QTreeWidget#propGrid QSpinBox,
+QTreeWidget#propGrid QDoubleSpinBox { padding: 1px 4px; border-radius: 3px; }
+QLabel#propTitle { font-size: 14px; font-weight: 600; background: transparent; }
+QFrame#propHead { background: @panel2@; border-bottom: 1px solid @border@; }
+QFrame#propHead QLabel { background: transparent; }
+QLabel#quality[level="bad"] { color: @bad@; }
+QLabel#quality[level="ok"] { color: @ok@; }
 """
 
 # Small screens: same tokens, tighter spacing (appended after EXTRA_QSS so it wins)

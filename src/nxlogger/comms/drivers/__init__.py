@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import copy
 
-from nxlogger.comms.drivers.base import STATES, Driver, PollDriver  # noqa: F401
+from nxlogger.comms.drivers.base import Driver, PollDriver
+
+__all__ = ["Driver", "PollDriver", "make_driver"]
 
 
 class OpcDaDriver(PollDriver):

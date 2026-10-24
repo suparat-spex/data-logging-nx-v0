@@ -16,7 +16,7 @@ from nxlogger import paths
 from nxlogger.core import alarm_rules as ar
 from nxlogger.core import ml_log as mlg
 from nxlogger.core import variables as vr
-from nxlogger.core.tags import (COLORS, ChannelCfg, DeviceCfg, TagCfg, device_from_dict,  # noqa: F401
+from nxlogger.core.tags import (ChannelCfg, DeviceCfg, TagCfg, device_from_dict,
                                 device_from_topic, new_device, tag_color)
 from nxlogger.core.view_model import default_view, normalize_view, split_tabs
 

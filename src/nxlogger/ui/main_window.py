@@ -1,59 +1,41 @@
 """
-main_window.py - NX Logger main window: multi-topic live waveforms + recording.
+main_window.py - NX Logger main window: devices + tags, live views, alarms, recording.
 
-v6 (professional data-logger features):
-  * Alarms document (closable tab, Project Files -> Alarms): alarm definitions with
-    4 levels per channel (Level 1-4: H, L, dH, dL, RH, RL, D + hysteresis + on-delay),
-    add / edit / delete / enable / disable, active alarm list (optional sound),
-    alarm log (1000 entries, filter, CSV
-    export) and notification profiles (log, popup, REST API webhook, MQTT publish,
-    e-mail planned). No alarm banners on top - status bar + toolbar show the count.
-    See core/alarm_rules.py.
-  * Logging profiles: add / edit / delete / enable several profiles, each Signal
-    (waveform, CSV / TDMS / WPK) or Statistic (one row per interval with mean / min /
-    max / SD / RMS / P-P / sum / inst, CSV / TDMS) and its own channel selection. All
-    enabled profiles write into the same session folder.
-  * Views: Statistics table and Alarm table tiles (columns, max rows, levels); edit
-    mode shows mock-up data so big views stay fast.
+NX Logger (tag-based data logger, Yokogawa GA10 / Genesis64 / FUXA style):
+  * Connectivity document: devices (Simulation, Modbus TCP, Modbus RTU, MQTT, OPC UA client;
+    OPC DA planned) with groups and tags. Each device runs in its own driver thread
+    (comms/drivers); number tags are read every scan interval, MQTT devices in wavepacket
+    mode stream ESP32 waveforms as array tags. Start / stop per device or all at once.
+  * Tags have every channel property (unit, colour, scaling, decimals, Y range) and are
+    used everywhere a channel was: alarms, variables, views, logging, AI/ML log.
+  * Views are grids of rows x columns; each cell holds a component (header, trend, FFT,
+    number, gauge, LED, tag / statistics / alarm table). Statistics windows are seconds,
+    minutes, hours or samples, buffered by the app (core/stat_buffer.py).
+  * Right: Properties panel - whatever is selected (device, tag, group, view, cell,
+    component ...) is edited there, like the Genesis64 / FUXA property inspectors. A small
+    Runtime section under it shows recording / communication state.
+  * Recording: CSV (and raw .wpk for waveform devices); session folders keep project.json
+    (docs/recording-format.md - read by the NX Viewer). TDMS is no longer written.
+  * Project files: .nxl (JSON); .sxl and .mqdaq open and are converted (topics -> MQTT
+    wavepacket devices).
 
-v5 workspace (FlexLogger-like):
-  * Left:   "Project Files" dock (top) and "Data" dock (bottom), stacked
-  * Centre: closable document tabs - Screen, Channel Specification, Logging
-            Specification and any number of custom Views (+ button / Project menu)
-  * Right:  "Status" dock (toggle in the toolbar); bottom: "Log" dock (toggle too)
-  * Plots:  black data area, drag a box to zoom (plot then holds), double-click or
-            "Reset zoom" returns to live; Stack / Grid layout
-  * Views:  free-form canvas of plot / heading-text / numeric tiles with Edit and
-            Live modes, saved in the project (see ui/widgets/views.py)
-Layout still adapts to laptop screens like v4.
+Layout:
+  * Left:   "Project" dock (navigator tree) and "Data" dock (recorded sessions)
+  * Centre: closable document tabs - Quick View, Connectivity, Logging, Alarms, Variables, Views
+  * Right:  "Properties" dock; bottom: "Log" dock
+Responsive (by window width): wide >= 1500 px, medium 1180-1500, compact < 1180 (the
+Properties panel auto-hides, icon-only toolbar, short tab names).
 
-Works like NI FlexLogger, on MQTT sources:
-  * Project (.sxl, JSON; .mqdaq from MQDAQ v6 opens too): name, operator, description, topics, channels, logging.
-  * Channel Specification: add / edit / delete / enable topics (each topic = one
-    device publishing wavepacket blocks), rename channels (CH1 -> "Temperature"),
-    set units, enable channels. Live value per channel.
-  * Logging Specification: folder + file format (CSV, TDMS, raw .wpk) [+ raw copy].
-  * Screen: live plots, per topic or per channel.
-  * Record / Stop: each run makes a session folder <project>_<date_time>/ with the
-    data files and project.json. Only enabled topics and channels are logged.
-    The configuration is locked while recording.
-
-Files are written by core/recording.py (no Qt), which also has the readers for the
-next steps (viewer, statistics, ML).
-
-Responsive layout (by window width):
-  wide    >= 1500 px  project tree | plots | status panel, full toolbar text
-  medium  1180-1500  narrower docks, toolbar text only on Connect / Record / Stop
-  compact  < 1180    status panel auto-hidden (toolbar button brings it back),
-                     icon-only toolbar, short tab names
-  Small screens (< 1440 x 860) also get a denser style (smaller paddings and icons).
-  The window always opens inside the screen, even if it was last used on a bigger one.
+Threads: driver threads only queue (comms/drivers/base.py); decoding, scaling, alarms,
+variables and statistics run on the GUI timer (_drain_and_draw 33 ms, _update_stats
+500 ms); disk writes in the Recorder / MlLogger threads.
 
 Run:  python -m nxlogger
 """
 from __future__ import annotations
 
 import copy
+import csv
 import json
 import os
 import queue
@@ -63,46 +45,47 @@ from contextlib import contextmanager
 
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QSettings, QSize, QTimer, QUrl, Qt
-from PySide6.QtGui import (QBrush, QColor, QDesktopServices, QIcon, QKeySequence,
-                           QPainter, QPixmap)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog,
-                               QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
-                               QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-                               QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-                               QScrollArea, QSizePolicy, QStackedWidget, QTabWidget, QTableWidget,
-                               QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
-                               QVBoxLayout, QWidget)
-import paho.mqtt.client as mqtt
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDockWidget,
+                               QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
+                               QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
+                               QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
+                               QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 import pyqtgraph as pg
 
-from nxlogger import APP_NAME, paths
-from nxlogger.comms.mqtt_client import MqttClient
+from nxlogger import APP_NAME, config, paths
+from nxlogger.comms.manager import DriverManager
 from nxlogger.core import alarm_rules as ar
 from nxlogger.core import analysis as an
 from nxlogger.core import channel_math as cm
 from nxlogger.core import ml_log as mlg
 from nxlogger.core import recording as dl
+from nxlogger.core import stat_buffer as sb
 from nxlogger.core import variables as vr
+from nxlogger.core import view_model as vmod
 from nxlogger.core import wavepacket as wp
-from nxlogger.core.project import (COLORS, ChannelCfg, OLD_PROJECT_EXT, PROJECT_EXT, Project, TopicCfg, ch_color,
-                                   fmt_interval, new_log_profile)
-from nxlogger.core.ring import MAX_WINDOW_S, TopicStream
-from nxlogger.core.view_model import new_view
+from nxlogger.core.project import (OLD_PROJECT_EXTS, PROJECT_EXT, Project, fmt_interval, new_log_profile)
+from nxlogger.core.ring import MAX_PLOT_S, TopicStream
+from nxlogger.core.tags import (COLORS, DRIVERS, PLANNED, DeviceCfg, ScanBlock, TagCfg, driver_label, new_device,
+                                new_tag, tag_color, tag_from_row, tags_to_rows)
 from nxlogger.ui.dialogs.about_dialog import show_about
-from nxlogger.ui.dialogs.channel_dialog import ChannelDialog
-from nxlogger.ui.dialogs.connection_dialog import ConnectionDialog
+from nxlogger.ui.dialogs.add_tags_dialog import AddTagsDialog
+from nxlogger.ui.dialogs.device_dialog import DeviceDialog
 from nxlogger.ui.dialogs.log_profile_dialog import LogProfileDialog
 from nxlogger.ui.dialogs.ml_log_dialog import MlLogDialog
-from nxlogger.ui.dialogs.topic_dialog import TopicDialog
+from nxlogger.ui.dialogs.opcua_browse_dialog import OpcUaBrowseDialog
+from nxlogger.ui.dialogs.pick_dialog import PickDialog
+from nxlogger.ui.dialogs.tag_dialog import TagDialog
 from nxlogger.ui.dialogs.view_dialog import ViewDialog
-from nxlogger.ui.icons import check_icon_file, grip_icon_file, level_color, level_icon, swatch
+from nxlogger.ui.icons import check_icon_file, grip_icon_file, level_icon, swatch
 from nxlogger.ui.theme import ui_kit as ui
 from nxlogger.ui.theme.app_style import DENSE_QSS, EXTRA_QSS, blend, fusion_palette, fusion_qss
-from nxlogger.ui.theme.ui_kit import (AppWindow, Card, Chip, EmptyState, T, label, make_icon,
-                                      set_prop)
+from nxlogger.ui.theme.ui_kit import AppWindow, Card, Chip, EmptyState, T, label, make_icon, set_prop
 from nxlogger.ui.widgets import alarm_panel as ap
+from nxlogger.ui.widgets import properties as props
 from nxlogger.ui.widgets import views as dv
-from nxlogger.ui.widgets.mqtt_panel import ThemedMqttPanel
+from nxlogger.ui.widgets.connectivity import STATE_TOKEN, ConnectivityPage
+from nxlogger.ui.widgets.property_grid import PropertiesPanel
 from nxlogger.ui.widgets.variables_panel import VariablesPage
 
 
@@ -110,23 +93,19 @@ from nxlogger.ui.widgets.variables_panel import VariablesPage
 MARKER_TYPES = [("note", "Note"), ("normal", "Normal operation"), ("startup", "Startup"),
                 ("maintenance", "Maintenance (re-baseline after this)"), ("fault", "Fault"),
                 ("bad_data", "Bad data (exclude from training)")]
+LEGACY_BROKER = "daq3"            # QSettings group of the MQDAQ / SX Logger broker form
 
 
 def _brk(path: str) -> str:
     """Let long paths wrap after each separator (a path has no spaces, so a QLabel
     would otherwise force the window wider than a laptop screen)."""
-    return path.replace("/", "/\u200b").replace("\\", "\\\u200b")
+    return path.replace("/", "/​").replace("\\", "\\​")
 
 
 # window-width breakpoints (px)
 BP_COMPACT, BP_WIDE = 1180, 1500
-DOCK_W = {"compact": (230, 300), "medium": (260, 320), "wide": (290, 400)}   # (left, right)
+DOCK_W = {"compact": (230, 300), "medium": (260, 320), "wide": (290, 360)}   # (left, right)
 CHIP_W = 132                    # status chips keep one width whatever the text
-
-STAT_COLS = ["Mean", "Min", "Max", "SD", "RMS", "P-P"]
-SPEC_COLS = ["Name", "Topic / Channel", "Unit", "Live value"] + STAT_COLS + ["Details"]
-COL_DETAILS = len(SPEC_COLS) - 1
-LOCKED_COLS = {"Name"}               # always visible
 
 
 # ======================================================================= window
@@ -158,12 +137,12 @@ def _reveal(w):
 
 class DaqWindow(AppWindow):
     TITLE = APP_NAME
-    LEFT_TITLE, RIGHT_TITLE = "Project Files", "Status"
-    LEFT_W, RIGHT_W = 300, 470
+    LEFT_TITLE, RIGHT_TITLE = "Project", "Properties"
+    LEFT_W, RIGHT_W = 300, 340
 
     # ---------------------------------------------------------------- init
     def __init__(self):
-        self.q: "queue.Queue[tuple[float, str, bytes]]" = queue.Queue(maxsize=20000)
+        self.drivers = DriverManager()
         self.overflow = 0
         self.project = Project.default()
         self.project_path: str | None = None
@@ -171,9 +150,9 @@ class DaqWindow(AppWindow):
         self.recorder: dl.Recorder | None = None
         self.ml_logger: mlg.MlLogger | None = None    # AI/ML data log, independent of Record
         self.streams: dict[str, TopicStream] = {}
+        self.stats = sb.StatHub()
+        self._scan_seq: dict[str, int] = {}           # per device: continuous across driver restarts
         self.t_ref: float | None = None
-        self._routes: dict[str, list[str]] = {}
-        self._busy_on = False
         self._loading = False
         self.plots: list[pg.PlotItem] = []
         self.curves: dict[tuple[str, int], pg.PlotDataItem] = {}
@@ -181,9 +160,8 @@ class DaqWindow(AppWindow):
         self._dense = self._screen_is_small()  # read by apply_theme() during super().__init__
         self._auto_hidden_right = False
         self._status_full = ""
-        self._zoomed = False                   # Screen plots hold their range after a box zoom
-        self._grid = False                     # Screen plots: stack (False) or 2-column grid
-        self._waitcur = False
+        self._zoomed = False                   # Quick View plots hold their range after a box zoom
+        self._grid = False                     # Quick View plots: stack (False) or 2-column grid
         self.view_pages: dict[str, dv.ViewPage] = {}
         self._scalers: dict[tuple[str, int], object] = {}
         self.docs: dict[str, tuple] = {}       # key -> (widget, title, short title, icon)
@@ -191,20 +169,23 @@ class DaqWindow(AppWindow):
         self.alarm_engine.describe = self._alarm_describe
         self.alarm_engine.ref_value = lambda tid, idx: self.last_value(tid, idx)[0]
         self.alarm_engine.listeners.append(self._on_alarm_event)
-        self.notifier = ar.Notifier(lambda *a: self.mqtt.publish(*a))
+        self.notifier = ar.Notifier(lambda *a: self.drivers.publish(*a))
         self.profile_results: dict[str, tuple[bool, str, float]] = {}
         self.variable_engine = vr.VariableEngine()
         self.variable_engine.channel_ids = self._channel_ids
         self.variable_engine.history = self._history
         self.variable_engine.latest = lambda key: self.last_value(*key)[0]
-        self._var_groups: dict[str, list[str]] = {}   # recorder topic id -> variable ids (rows)
+        self.variable_engine.window_stat = self._window_stat
+        self._var_groups: dict[str, list[str]] = {}   # recorder group id -> variable ids (rows)
         self._noflash = _NoFlash()                    # no parent: created before the Qt base
         self._alarm_level = None               # last indicator state (repaint only on change)
+        self._prop_key: tuple | None = None    # what the Properties panel shows
+        self._stat_dirty = True                # statistics windows to (re)collect
         super().__init__()
         self.theme_listeners.append(self._rebuild_plots)
         self.left_dock.setMinimumWidth(210)
         self.left_dock.widget().setMinimumWidth(200)   # ui_kit's scroll area asks for 300
-        self.right_dock.setMinimumWidth(280)       # ui_kit default (460) is too wide for laptops
+        self.right_dock.setMinimumWidth(260)
         self.setMinimumSize(960, 600)
         self.status_msg.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._resp_timer = QTimer(self, singleShot=True, interval=60, timeout=self._apply_responsive)
@@ -214,7 +195,7 @@ class DaqWindow(AppWindow):
         self.banners.lay.setContentsMargins(8, 0, 8, 0)   # no empty gap above the tabs
         self.theme_listeners.append(self._refresh_chrome)
         self._refresh_chrome()
-        self.doc_tabs.currentChanged.connect(lambda _: self._draw(force=True))
+        self.doc_tabs.currentChanged.connect(self._doc_changed)
         self._build_help_menu()
         self.alarm_btn = QToolButton(); self.alarm_btn.setObjectName("alarmStatus")
         self.alarm_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
@@ -229,13 +210,9 @@ class DaqWindow(AppWindow):
         self._ml_update_ui()
         self.theme_listeners.append(lambda: (setattr(self, "_alarm_level", None),
                                              self._update_alarm_indicator(), self.alarm_page.refresh(),
-                                             self.var_page.refresh()))
+                                             self.var_page.refresh(), self.conn_page.refresh(),
+                                             self.props.refresh_icons()))
         QApplication.instance().installEventFilter(self._noflash)   # dialogs: no white flash
-
-        self.mqtt.on_payload = self._on_payload_net_thread
-        self.mqtt.connected.connect(self._on_connected)
-        self.mqtt.status.connect(self._on_mqtt_status)
-        self.mqtt_panel.btn.clicked.connect(self._sync_conn)
 
         last = QSettings().value("last_project", "")
         if last and os.path.isfile(last):
@@ -274,7 +251,7 @@ class DaqWindow(AppWindow):
     # ---------------------------------------------------------------- toolbar / menus
     def build_toolbar_items(self, tb):
         self.brand = QLabel(); self.brand.setObjectName("brand")
-        self.brand.setToolTip(f"{APP_NAME} - MQTT data logger")
+        self.brand.setToolTip(f"{APP_NAME} - data logger: Modbus, MQTT, OPC UA, simulation")
         tb.addWidget(self.brand)
         tb.addSeparator()
         tb.addAction(self.act("New", self._new_project, "Ctrl+N", "file-plus"))
@@ -314,7 +291,7 @@ class DaqWindow(AppWindow):
         self.reg_icon(self.act_log, "panel-bottom")
         tb.addAction(self.act_log)
         self.act_panel = self.right_dock.toggleViewAction()
-        self.act_panel.setText("Status panel")
+        self.act_panel.setText("Properties panel")
         self.act_panel.setShortcut(QKeySequence("Ctrl+Shift+P"))
         self.act_panel.triggered.connect(lambda on: setattr(self, "_auto_hidden_right", False))
         self.reg_icon(self.act_panel, "panel-right")
@@ -326,7 +303,7 @@ class DaqWindow(AppWindow):
             self._set_tip(a)
 
     def _toggle_left_docks(self):
-        """Hide / show the left side (Project Files + Data) as one panel."""
+        """Hide / show the left side (Project + Data) as one panel."""
         shown = [d for d in (self.left_dock, self.data_dock) if not d.isHidden()]
         if shown:
             self._left_shown = shown
@@ -343,8 +320,7 @@ class DaqWindow(AppWindow):
 
     def build_extra_menus(self, mb):
         # actions shared by the Acquisition menu and the toolbar (menus are built first)
-        self.act_connect = self.act("Connect", lambda: self.mqtt_panel.btn.click(), "Ctrl+K", "plug")
-        self.act_conn_settings = self.act("Connection settings...", self._show_connection, "Ctrl+,")
+        self.act_connect = self.act("Start", self._toggle_comm, "Ctrl+K", "play")
         self.act_rec = self.act("Record", self._start_recording, "Ctrl+R", None)
         self.reg_icon(self.act_rec, "circle", "bad")
         self.act_stop = self.act("Stop", self._stop_recording, "Ctrl+Shift+R", "square")
@@ -363,20 +339,31 @@ class DaqWindow(AppWindow):
         self.act_marker.setMenu(mm)
         proj = QMenu("&Project", self)
         mb.insertMenu(self.view_menu.menuAction(), proj)
+        add_dev = QMenu("Add device", self)
+        add_dev.setIcon(make_icon("server", T["text"]))
+        for k, d in DRIVERS.items():
+            a = add_dev.addAction(d["label"] + "...", lambda kk=k: self.add_device(kk))
+            self.reg_icon(a, d["icon"])
         for a in (self.act("Quick View", lambda: self._show_doc("screen"), "Ctrl+1", "chart"),
-                  self.act("Channel Specification", lambda: self._show_doc("channels"), "Ctrl+2", "share"),
-                  self.act("Logging Specification", lambda: self._show_doc("logging"), "Ctrl+3", "file-text"),
+                  self.act("Connectivity", lambda: self._show_doc("connectivity"), "Ctrl+2", "network"),
+                  self.act("Logging", lambda: self._show_doc("logging"), "Ctrl+3", "file-text"),
                   self.act_alarms,
                   self.act_vars,
                   None,
-                  self.act("Add topic...", self._add_topic, "Ctrl+T", "plus"),
+                  add_dev,
+                  self.act("Add tag", self._add_tag_current, "Ctrl+T", "tag"),
                   self.act("Add variable...", lambda: self._var_action("add"), None, "function-square"),
                   self.act("Add alarm...", lambda: self._alarm_action("add"), "Ctrl+Shift+M", "bell"),
                   self.act("Add logging profile...", lambda: self._add_log_profile("signal"), None, "file-plus"),
                   self.act("New view...", self._new_view, "Ctrl+Shift+N", "layout"),
                   None,
                   self.act("Open recordings folder", self._open_log_folder, None, "folder-open")):
-            proj.addSeparator() if a is None else proj.addAction(a)
+            if a is None:
+                proj.addSeparator()
+            elif isinstance(a, QMenu):
+                proj.addMenu(a)
+            else:
+                proj.addAction(a)
         v = self.view_menu
         first = v.actions()[0]
         v.insertSeparator(first)
@@ -387,7 +374,7 @@ class DaqWindow(AppWindow):
                   self.act("Open AI/ML data folder", self._ml_open_folder, None, "folder-open")):
             v.insertAction(first, a)
         acq = mb.addMenu("&Acquisition")
-        for a in (self.act_connect, self.act_conn_settings, None, self.act_rec, self.act_stop,
+        for a in (self.act_connect, None, self.act_rec, self.act_stop,
                   None, self.act_ml, self.act_marker, self.act_ml_settings):
             acq.addSeparator() if a is None else acq.addAction(a)
         f = self.file_menu
@@ -398,15 +385,8 @@ class DaqWindow(AppWindow):
 
     # ---------------------------------------------------------------- left dock
     def build_left(self):
-        """FlexLogger-style navigator: Project Files tree + Data (recorded sessions)."""
-        self.mqtt = MqttClient(self)
-        self.mqtt_panel = ThemedMqttPanel(self.mqtt, "daq3", "")
-        form = self.mqtt_panel.layout()
-        form.setRowVisible(self.mqtt_panel.topic, False)            # topics live in
-        form.setRowVisible(self.mqtt_panel.qos.parentWidget(), False)  # the project
-        self.conn_dlg = ConnectionDialog(self, self.mqtt_panel)
-
-        return self._build_project_files()      # "Data" is its own dock below (build_right)
+        """Navigator: project tree (the Data dock with recorded sessions sits below it)."""
+        return self._build_project_files()
 
     def _nav_bar(self, buttons) -> QFrame:
         bar = QFrame(); bar.setObjectName("navBar")
@@ -421,12 +401,16 @@ class DaqWindow(AppWindow):
         return bar
 
     def _build_project_files(self):
-        bar = self._nav_bar([("Add topic (Ctrl+T)", "plus", self._add_topic),
-                             ("Edit selected topic", "pencil", self._nav_edit),
-                             ("Delete selected topic", "trash", self._nav_delete),
+        add = QMenu(self)
+        for k, d in DRIVERS.items():
+            a = add.addAction(d["label"] + "...", lambda kk=k: self.add_device(kk))
+            self.reg_icon(a, d["icon"])
+        bar = self._nav_bar([("Add device", "server", lambda: add.exec(self.cursor().pos())),
+                             ("Add tag (Ctrl+T)", "tag", self._add_tag_current),
+                             ("New view", "layout", self._new_view),
                              (None, None, None),
                              ("Expand all", "expand", lambda: self.ptree.expandAll()),
-                             ("Collapse topics", "collapse", self._collapse_topics)])
+                             ("Collapse", "collapse", self._collapse_tree)])
         self.nav_filter = QLineEdit()
         self.nav_filter.setPlaceholderText("Filter")
         self.nav_filter.setClearButtonEnabled(True)
@@ -443,8 +427,8 @@ class DaqWindow(AppWindow):
         self.ptree.itemClicked.connect(lambda it, _c: self._nav_open(it))
         self.ptree.itemActivated.connect(lambda it, _c: self._nav_open(it))
         self.ptree.itemDoubleClicked.connect(self._nav_double_clicked)
-        self.ptree_topics: dict[str, QTreeWidgetItem] = {}
-        self._dot_cache: dict[str, str] = {}
+        self.ptree_devices: dict[str, QTreeWidgetItem] = {}
+        self._dot_cache: dict[str, object] = {}
 
         w = QWidget(); v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0); v.setSpacing(6)
@@ -485,8 +469,8 @@ class DaqWindow(AppWindow):
         self.doc_tabs.tabBar().setDrawBase(False)     # no line under / beside the tabs
         for key, w, title, short, icon in (
                 ("screen", self._build_screen(), "Quick View", "Quick", "chart"),
-                ("channels", self._build_channel_spec(), "Channel Specification", "Channels", "share"),
-                ("logging", self._build_logging_spec(), "Logging Specification", "Logging", "file-text"),
+                ("connectivity", self._build_connectivity(), "Connectivity", "Tags", "network"),
+                ("logging", self._build_logging_spec(), "Logging", "Logging", "file-text"),
                 ("alarms", self._build_alarms(), "Alarms", "Alarms", "bell"),
                 ("variables", self._build_variables(), "Variables", "Vars", "variable")):
             self.docs[key] = (w, title, short, icon)
@@ -499,18 +483,19 @@ class DaqWindow(AppWindow):
         self.glw = pg.GraphicsLayoutWidget()
         self.screen_stack = QStackedWidget()
         self.screen_stack.addWidget(EmptyState(
-            "🧩", "No topics enabled", "Add an MQTT topic in Channel Specification, "
-            "or enable one, to see its waveforms here.", "Add topic", self._add_topic))
+            "🧩", "No tags enabled", "Add a device and its tags in Connectivity, or enable one, "
+            "to see them here.", "Open Connectivity", lambda: self._show_doc("connectivity")))
         self.screen_stack.addWidget(EmptyState(
-            "📡", "Waiting for data", "Connect to the broker. Enabled topics are subscribed "
-            "automatically and their waveforms appear here.", "Connect", self._connect_from_empty))
+            "📡", "Waiting for data", "Start communication: every enabled device connects and its "
+            "tags appear here.", "Start", self._start_all))
         self.screen_stack.addWidget(self.glw)
 
         bar = QFrame(); bar.setObjectName("bottomBar")
         bl = QHBoxLayout(bar); bl.setContentsMargins(10, 6, 10, 6); bl.setSpacing(10)
-        self.window_s = QDoubleSpinBox(minimum=0.2, maximum=MAX_WINDOW_S, value=5,
-                                       singleStep=1, suffix=" s")
-        self.layout_mode = QComboBox(); self.layout_mode.addItems(["Per topic", "Per channel"])
+        self.window_s = QDoubleSpinBox(minimum=0.2, maximum=MAX_PLOT_S, value=60,
+                                       singleStep=10, suffix=" s")
+        self.window_s.setToolTip("Time window of the plots (and of statistics set to 'Quick View window')")
+        self.layout_mode = QComboBox(); self.layout_mode.addItems(["Per device", "Per tag"])
         self.autoscale = QCheckBox("Auto-scale Y", checked=True)
         self.lay_group = QButtonGroup(self)
         lay_btns = []
@@ -520,10 +505,10 @@ class DaqWindow(AppWindow):
             self.lay_group.addButton(b, i); lay_btns.append(b)
         lay_btns[0].setChecked(True)
         self.lay_group.idClicked.connect(lambda i: (setattr(self, "_grid", i == 1), self._rebuild_plots()))
-        self.qv_btn = QToolButton(); self.qv_btn.setText("Channels")
+        self.qv_btn = QToolButton(); self.qv_btn.setText("Tags")
         self.qv_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.qv_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.qv_btn.setToolTip("Choose the channels plotted in Quick View (logging is not affected)")
+        self.qv_btn.setToolTip("Choose the tags plotted in Quick View (logging is not affected)")
         self.reg_icon(self.qv_btn, "columns")
         self.qv_menu = QMenu(self.qv_btn)
         self.qv_menu.aboutToShow.connect(self._fill_quick_menu)
@@ -548,69 +533,18 @@ class DaqWindow(AppWindow):
         v.addWidget(self.screen_stack, 1); v.addWidget(bar)
         return w
 
-    def _build_channel_spec(self):
-        bar = QFrame(); bar.setObjectName("docBar")
-        bl = QHBoxLayout(bar); bl.setContentsMargins(8, 4, 8, 4); bl.setSpacing(4)
-        self.btn_add, self.btn_edit, self.btn_del = QToolButton(), QToolButton(), QToolButton()
-        self.btn_edit_ch = QToolButton()
-        for b, text, icon, slot in ((self.btn_add, "Add topic", "plus", self._add_topic),
-                                    (self.btn_edit, "Edit topic", "pencil", self._edit_topic),
-                                    (self.btn_del, "Delete topic", "trash", self._delete_topic),
-                                    (self.btn_edit_ch, "Edit channel", "sliders", self._edit_channel)):
-            b.setText(text)
-            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            self.reg_icon(b, icon)
-            b.clicked.connect(slot)
-            bl.addWidget(b)
-        bl.addStretch(1)
-        self.spec_hint = label("", muted=True, small=True)
-        bl.addWidget(self.spec_hint)
-        self.window_s.valueChanged.connect(lambda _: self._update_spec_hint())
-        self.btn_cols = QToolButton(); self.btn_cols.setText("Columns")
-        self.btn_cols.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.btn_cols.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.reg_icon(self.btn_cols, "columns")
-        bl.addWidget(self.btn_cols)
-
-        self.tree = QTreeWidget()
-        self.tree.setColumnCount(len(SPEC_COLS))
-        self.tree.setHeaderLabels(SPEC_COLS)
-        for col in range(len(SPEC_COLS)):
-            if SPEC_COLS[col] in STAT_COLS or col == 3:
-                self.tree.headerItem().setTextAlignment(col, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.tree.setAlternatingRowColors(True)
-        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)   # edit via dialogs
-        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self._spec_menu)
-        hh = self.tree.header()
-        for col, w in enumerate((200, 220, 60, 110) + (78,) * len(STAT_COLS)):
-            hh.resizeSection(col, w)
-        hh.setStretchLastSection(True)
-        hh.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        hh.customContextMenuRequested.connect(lambda pos: self._columns_menu().exec(hh.mapToGlobal(pos)))
-        hidden = QSettings().value("spec_hidden_cols", ["RMS", "P-P"])
-        hidden = [hidden] if isinstance(hidden, str) else list(hidden or [])
-        for col, name in enumerate(SPEC_COLS):
-            self.tree.setColumnHidden(col, name in hidden)
-        self.btn_cols.setMenu(self._columns_menu())
-        self.tree.itemChanged.connect(self._tree_item_changed)
-        self.tree.itemDoubleClicked.connect(self._tree_double_clicked)
-        self.tree.currentItemChanged.connect(lambda *_: self._update_lock())
-        self.tree_items: dict[str, tuple[QTreeWidgetItem, dict[int, QTreeWidgetItem]]] = {}
-
-        w = QWidget(); v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
-        v.addWidget(bar); v.addWidget(self.tree, 1)
-        return w
+    def _build_connectivity(self):
+        self.conn_page = ConnectivityPage(self)
+        return self.conn_page
 
     def _build_logging_spec(self):
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(16, 14, 16, 14); v.setSpacing(10)
-        v.addWidget(label("Logging Specification", name="h1"))
+        v.addWidget(label("Logging", name="h1"))
         intro = label("Each Record run creates a new session folder inside the log folder, "
                       "containing the data files and project.json (configuration, start/end "
-                      "time, packet counts). Only enabled topics and channels are logged.",
+                      "time, value counts). Only enabled devices and tags are logged.",
                       muted=True)
         intro.setWordWrap(True)
         v.addWidget(intro)
@@ -643,7 +577,7 @@ class DaqWindow(AppWindow):
         bar = QFrame(); bar.setObjectName("subBar")
         bl = QHBoxLayout(bar); bl.setContentsMargins(6, 3, 6, 3); bl.setSpacing(4)
         self.lp_btns = []
-        for text, icon, slot in (("Add signal", "activity", lambda: self._add_log_profile("signal")),
+        for text, icon, slot in (("Add data", "activity", lambda: self._add_log_profile("signal")),
                                  ("Add statistic", "sigma", lambda: self._add_log_profile("statistic")),
                                  ("Add variable", "function-square", None),
                                  ("Edit", "pencil", lambda: self._edit_log_profile()),
@@ -654,19 +588,19 @@ class DaqWindow(AppWindow):
             self.reg_icon(b, icon)
             if slot:
                 b.clicked.connect(slot)
-            else:                                    # Add variable: logged by "All channels" profiles
+            else:                                    # Add variable: logged by "All tags" profiles
                 b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-                b.setToolTip("Add a calculated channel (variable) - it is logged by profiles set to "
-                             "'All enabled channels', or tick it in a profile")
-                vm = QMenu(b)
+                b.setToolTip("Add a calculated tag (variable) - it is logged by profiles set to "
+                             "'All enabled tags', or tick it in a profile")
+                vm_ = QMenu(b)
                 for k, txt in vr.KINDS.items():
-                    vm.addAction(txt + "...", lambda kk=k: self.var_page.add_variable(kk))
-                b.setMenu(vm)
+                    vm_.addAction(txt + "...", lambda kk=k: self.var_page.add_variable(kk))
+                b.setMenu(vm_)
             bl.addWidget(b); self.lp_btns.append(b)
         bl.addStretch(1)
         bl.addWidget(label("tick = enabled · double-click to edit", muted=True, small=True))
         self.lp_tree = QTreeWidget()
-        self.lp_tree.setHeaderLabels(["Profile", "Type", "Format", "Channels", "Details"])
+        self.lp_tree.setHeaderLabels(["Profile", "Type", "Format", "Tags", "Details"])
         self.lp_tree.setRootIsDecorated(False)
         self.lp_tree.setAlternatingRowColors(True)
         self.lp_tree.setMinimumHeight(120)
@@ -702,12 +636,12 @@ class DaqWindow(AppWindow):
         self.var_page = VariablesPage(self)
         return self.var_page
 
-    # ---------------------------------------------------------------- right dock
+    # ---------------------------------------------------------------- right dock: Properties
     def build_right(self):
         self._build_side_docks()
-        s = QWidget(); v = QVBoxLayout(s)
-        v.setContentsMargins(16, 14, 16, 14); v.setSpacing(10)
-        v.addWidget(label("Status", name="h1"))
+        rt = QFrame(); rt.setObjectName("propHead")
+        v = QVBoxLayout(rt); v.setContentsMargins(10, 8, 10, 8); v.setSpacing(6)
+        v.addWidget(label("Runtime", name="sectionTitle"))
         chips = QHBoxLayout()
         self.chip_conn, self.chip_rec = Chip(), Chip()
         for c in (self.chip_conn, self.chip_rec):
@@ -715,40 +649,24 @@ class DaqWindow(AppWindow):
             chips.addWidget(c)
         chips.addStretch(1)
         v.addLayout(chips)
-        grid = QGridLayout(); grid.setSpacing(8)
+        grid = QGridLayout(); grid.setSpacing(6)
         self.cards: dict[str, Card] = {}
         for i, (k, t) in enumerate([("elapsed", "Recording time"), ("size", "Data on disk"),
-                                    ("samples", "Samples/ch logged"),
-                                    ("packets", "Packets logged"),
-                                    ("rx", "Packets received"), ("lost", "Lost / CRC / bad")]):
+                                    ("rx", "Values received / s"), ("lost", "Errors / lost")]):
             self.cards[k] = Card(t)
             grid.addWidget(self.cards[k], i // 2, i % 2)
         v.addLayout(grid)
-        v.addWidget(label("Topics", name="sectionTitle"))
-        self.topic_table = QTableWidget(0, 5)
-        self.topic_table.setHorizontalHeaderLabels(["Topic", "Packets/s", "Sample rate", "Lost", "CRC/bad"])
-        self.topic_table.verticalHeader().hide()
-        self.topic_table.setAlternatingRowColors(True)
-        self.topic_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.topic_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.topic_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.topic_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.topic_table.setMinimumHeight(110)
-        v.addWidget(self.topic_table, 1)
         self.last_session = label("", muted=True, small=True)
         self.last_session.setWordWrap(True)
         self.last_session.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.last_session)
-        sc = QScrollArea()                       # short laptop screens: scroll, don't squash
-        sc.setWidgetResizable(True)
-        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        sc.setWidget(s)
+        self.props = PropertiesPanel(self.reg_icon, footer=rt)
         self.lbl_topics = self.add_status_label("")
         self.lbl_rx = self.add_status_label("")
-        return sc
+        return self.props
 
     def _build_side_docks(self):
-        """Data dock under Project Files, Log dock under the documents."""
+        """Data dock under the Project tree, Log dock under the documents."""
         self.data_dock = QDockWidget("Data", self)
         self.data_dock.setObjectName("dockData")
         self.data_dock.setWidget(self._build_data_tab())
@@ -768,8 +686,59 @@ class DaqWindow(AppWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
         self.resizeDocks([self.log_dock], [130], Qt.Orientation.Vertical)
 
+    # ---------------------------------------------------------------- Properties: selection
+    def select_object(self, ref):
+        """Something was selected (project tree, Connectivity, view): show its properties."""
+        t = None
+        if ref:
+            kind = ref[0]
+            if kind == "device":
+                t = props.device_target(self, ref[1])
+            elif kind == "group":
+                t = props.group_target(self, ref[1], ref[2])
+            elif kind == "tag":
+                t = props.tag_target(self, ref[1], ref[2])
+            elif kind == "tags":
+                t = props.tags_target(self, ref[1], ref[2])
+            elif kind == "project":
+                t = props.project_target(self)
+        self.show_properties(t)
+
+    def show_properties(self, t):
+        self._prop_key = t.key if t is not None else None
+        self.props.show_target(t)
+
+    def _refresh_properties(self):
+        """The model changed under the panel: rebuild what it shows (same object)."""
+        k = self._prop_key
+        if not k:
+            return
+        if k[0] in ("device", "group", "tag", "tags", "project"):
+            ref = k if k[0] != "tags" else ("tags", k[1], list(k[2]))
+            self.select_object(ref)
+        elif k[0] in ("view", "tile", "cell", "line"):
+            page = self.doc_tabs.currentWidget()
+            if isinstance(page, dv.ViewPage):
+                self.view_selected(page, page.selected)
+
+    def view_selected(self, page, sel):
+        """A view's selection changed (host API of views.py)."""
+        if page is self.doc_tabs.currentWidget():
+            self.show_properties(props.selection_target(self, page, sel))
+
+    def _doc_changed(self, _i):
+        page = self.doc_tabs.currentWidget()
+        if isinstance(page, dv.ViewPage):
+            self.view_selected(page, page.selected)
+        elif page is self.docs.get("connectivity", (None,))[0] and self._prop_key is None:
+            pass
+        self._draw(force=True)
+        if page is self.docs.get("connectivity", (None,))[0]:
+            self.conn_page.update_live()
+
     # ================================================================ project
     def _set_project(self, p: Project, path: str | None):
+        self.drivers.stop_all()
         self.project, self.project_path = p, path
         self._loading = True
         self.p_name.setText(p.name)
@@ -778,20 +747,29 @@ class DaqWindow(AppWindow):
         self.p_file.setText(_brk(path) if path else "Not saved yet")
         self.log_folder.setText(p.logging.folder)
         self._loading = False
-        self.streams.clear(); self.t_ref = None
+        self.streams.clear(); self.t_ref = None; self._scan_seq.clear()
         self.variable_engine.reset()
         self.dirty = False
         self.alarm_engine.states.clear()
         self.alarm_engine.reset_data_loss()
         self.alarm_engine.clear_log()
-        self._topics_changed()
-        self._update_logging_help()
+        self._structure_changed()
         self._update_title()
         self._refresh_sessions()
         self._load_views()
         self.var_page.refresh()
+        self.conn_page.refresh(())
+        self.show_properties(props.project_target(self))
+        self._sync_comm()
         if p.ml_log.get("autostart") and self.ml_logger is None:   # unattended 24/7 logging
             QTimer.singleShot(0, self._ml_start)
+        if p.migrated_from:
+            self.banners.post("proj", f"Opened a {p.migrated_from} project: every MQTT topic is now an MQTT "
+                                      f"device (wavepacket mode). Save it as {PROJECT_EXT} to keep the new "
+                                      "format.", "info", "Save as...", self._save_project_as)
+
+    def mark_dirty(self):
+        self._mark_dirty()
 
     def _mark_dirty(self):
         if not self._loading:
@@ -813,6 +791,17 @@ class DaqWindow(AppWindow):
         if key == "name":
             self._rebuild_project_tree()
 
+    def project_props_changed(self, key):
+        """Edited in the Properties panel: mirror into the Logging page."""
+        self._loading = True
+        self.p_name.setText(self.project.name); self.p_operator.setText(self.project.operator)
+        if key == "description":
+            self.p_desc.setPlainText(self.project.description)
+        self._loading = False
+        self._update_logging_help()
+        self._update_title()
+        self._rebuild_project_tree()
+
     def _edit_logging(self, key, value):
         if self._loading:
             return
@@ -820,21 +809,848 @@ class DaqWindow(AppWindow):
         self._mark_dirty()
         self._update_logging_help()
 
+    def _confirm_discard(self) -> bool:
+        if not self.dirty:
+            return True
+        r = QMessageBox.question(self, APP_NAME, f"Save changes to '{self.project.name}'?",
+                                 QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
+                                 QMessageBox.StandardButton.Cancel)
+        if r == QMessageBox.StandardButton.Save:
+            return self._save_project()
+        return r == QMessageBox.StandardButton.Discard
+
+    def _new_project(self):
+        if self._recording_guard() and self._confirm_discard():
+            p = Project(name="Untitled project", logging_profiles=[new_log_profile("signal")],
+                        alarm_profiles=[ar.new_profile("popup", "Popup + sound")])
+            self._set_project(p, None)
+            self.toast.popup("New project - add a device in Connectivity")
+            self._show_doc("connectivity")
+
+    def _open_project(self):
+        if not (self._recording_guard() and self._confirm_discard()):
+            return
+        exts = " ".join(f"*{e}" for e in (PROJECT_EXT, *OLD_PROJECT_EXTS))
+        path, _ = QFileDialog.getOpenFileName(self, "Open project", self._project_dir(),
+                                              f"{APP_NAME} project ({exts});;All files (*)")
+        if path:
+            try:
+                self._load_project(path)
+                self.toast.popup(f"Opened {os.path.basename(path)}")
+            except Exception as e:
+                self.banners.post("proj", f"Could not open project: {e}", "bad")
+
+    @staticmethod
+    def _legacy_broker() -> dict:
+        """Broker of the old global connection form (QSettings, else config.ini) - for v1 files."""
+        s, c = QSettings(), config.get().mqtt
+        g = lambda k, d: s.value(f"{LEGACY_BROKER}/{k}", d)    # noqa: E731
+        try:
+            port = int(g("port", c.get("port") or 1883))
+        except (TypeError, ValueError):
+            port = 1883
+        return {"host": g("host", c.get("host") or "broker.emqx.io"), "port": port,
+                "transport": g("transport", c.get("transport") or "TCP"),
+                "username": g("user", c.get("username", "")), "password": c.get("password", ""),
+                "client_id": g("client_id", c.get("client_id", ""))}
+
+    def _load_project(self, path: str):
+        with self._waiting(), open(path, encoding="utf-8") as f:
+            p = Project.from_dict(json.load(f), broker=self._legacy_broker())
+        if p.migrated_from:                      # an old file is never overwritten in the new format
+            path = None
+        self._set_project(p, path)
+        if path:
+            QSettings().setValue("last_project", path)
+        self._log(f"Project opened: {path or '(converted, not saved yet)'}")
+
+    def _project_dir(self) -> str:
+        if self.project_path:
+            return os.path.dirname(self.project_path)
+        d = paths.projects_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d)
+
+    def _save_project(self) -> bool:
+        if not self.project_path:
+            return self._save_project_as()
+        try:
+            with self._waiting(), open(self.project_path, "w", encoding="utf-8") as f:
+                json.dump(self.project.to_dict(), f, indent=2, ensure_ascii=False)
+        except OSError as e:
+            self.banners.post("proj", f"Could not save project: {e}", "bad")
+            return False
+        QSettings().setValue("last_project", self.project_path)
+        self.dirty = False
+        self.project.migrated_from = ""
+        self.banners.dismiss("proj")
+        self._update_title()
+        self.p_file.setText(_brk(self.project_path))
+        self._rebuild_project_tree()
+        self.toast.popup("Project saved")
+        return True
+
+    def _save_project_as(self) -> bool:
+        os.makedirs(self.project.logging.folder, exist_ok=True)
+        start = os.path.join(self._project_dir(), dl.safe_name(self.project.name) + PROJECT_EXT)
+        path, _ = QFileDialog.getSaveFileName(self, "Save project", start,
+                                              f"{APP_NAME} project (*{PROJECT_EXT})")
+        if not path:
+            return False
+        if not path.endswith(PROJECT_EXT):
+            path += PROJECT_EXT
+        self.project_path = path
+        return self._save_project()
+
+    # ================================================================ devices + tags (host API)
+    @property
+    def recording(self) -> bool:
+        return self.recorder is not None
+
+    def _recording_guard(self) -> bool:
+        if self.recorder is not None:
+            self.toast.popup("Stop recording to change the project")
+            return False
+        return True
+
+    def _structure_changed(self):
+        """Devices / tags changed: scaling, formula names, alarms, plots, logging, statistics."""
+        self._rebuild_scalers()
+        self._variables_reload()                 # tag names are formula names
+        self._rebuild_plots()
+        self._alarms_reload()
+        self._update_logging_help()
+        self._update_lock()
+        self._ml_restart()                       # new device folders / names in meta.json
+        self._stat_dirty = True
+        self._rebuild_project_tree()
+
+    def device_changed(self, did: str, restart: bool = True, structure: bool = False):
+        """A device's properties changed: restart its driver if it runs, refresh views."""
+        self._mark_dirty()
+        dev = self.project.device(did)
+        if structure and dev is not None:        # MQTT mode switch: tags change kind
+            for t in dev.tags:
+                t.kind = "array" if dev.wave else "number"
+            self.streams.pop(did, None)
+        if restart and self.drivers.running(did):
+            self.drivers.stop(did)
+            if dev is not None and dev.enabled:
+                self.drivers.start(dev)
+        QTimer.singleShot(0, lambda: (self._structure_changed(), self.conn_page.refresh(),
+                                      self._refresh_properties()))
+
+    def tags_changed(self, did: str, restart: bool = False):
+        self._mark_dirty()
+        if restart and self.drivers.running(did):
+            self.drivers.start(self.project.device(did))
+        QTimer.singleShot(0, lambda: (self._structure_changed(), self.conn_page.refresh(),
+                                      self._refresh_properties()))
+
+    def device_state(self, did: str) -> tuple[str, str]:
+        return self.drivers.state(did)
+
+    def tag_live(self, did: str, idx: int):
+        """(value text, quality text, good True / False / None, time text) for tables."""
+        st = self.streams.get(did)
+        t = self.project.tag(did, idx)
+        if st is None or idx not in st.last_vals or t is None:
+            run = self.drivers.running(did)
+            return "", ("Waiting" if run else ""), None, ""
+        good = st.good.get(idx, True)
+        val = st.last_vals[idx]
+        age = time.time() - st.stamp.get(idx, 0)
+        dev = self.project.device(did)
+        stale = dev is not None and not dev.wave and age > max(5.0, 3 * dev.scan_ms / 1000)
+        text = f"{val:.{int(t.decimals)}f}" if good else "-"
+        qual = "Bad" if not good else ("Stale" if stale else "Good")
+        return text, qual, (False if not good else (None if stale else True)), \
+            time.strftime("%H:%M:%S", time.localtime(st.stamp.get(idx, 0)))
+
+    def _unique_name(self, base: str, taken: set[str]) -> str:
+        return base if base not in taken else next(f"{base} {i}" for i in range(2, 999) if f"{base} {i}" not in taken)
+
+    def add_device(self, driver: str):
+        if not self._recording_guard():
+            return
+        dev = new_device(driver, self._unique_name(driver_label(driver).split(" (")[0],
+                                                    {d.name for d in self.project.devices}))
+        if driver == "mqtt":                     # start from the broker used so far
+            dev.settings.update({k: v for k, v in self._legacy_broker().items() if v not in ("", None)})
+        dlg = DeviceDialog(self, dev, {d.name for d in self.project.devices}, new=True)
+        if not dlg.exec():
+            return
+        dlg.apply(dev)
+        if dev.driver != driver and dev.driver != "sim":
+            dev.tags = []                        # the starter tags of the simulator don't fit
+        if dev.wave and not dev.tags:
+            dev.tags = [TagCfg(i, f"CH{i + 1}", kind="array") for i in range(4)]
+        self.project.devices.append(dev)
+        self._mark_dirty()
+        self._structure_changed()
+        self.conn_page.refresh(("device", dev.id))
+        self._show_doc("connectivity")
+        self.select_object(("device", dev.id))
+        self.set_status(f"Device '{dev.name}' added - add its tags, then Start", "ok")
+        if self.drivers.any_running and dev.enabled and dev.driver not in PLANNED:
+            self.drivers.start(dev)
+
+    def edit_device(self, did: str):
+        dev = self.project.device(did)
+        if dev is None or not self._recording_guard():
+            return
+        dlg = DeviceDialog(self, dev, {d.name for d in self.project.devices if d is not dev})
+        if dlg.exec():
+            was_wave = dev.wave
+            dlg.apply(dev)
+            self.device_changed(did, structure=was_wave != dev.wave)
+
+    def delete_device(self, did: str):
+        dev = self.project.device(did)
+        if dev is None or not self._recording_guard():
+            return
+        if QMessageBox.question(self, "Delete device", f"Delete device '{dev.name}' and its "
+                                                       f"{len(dev.tags)} tag(s)?") != QMessageBox.StandardButton.Yes:
+            return
+        self.drivers.stop(did)
+        self.project.devices.remove(dev)
+        self.streams.pop(did, None)
+        self._mark_dirty()
+        self._structure_changed()
+        self.conn_page.refresh(())
+        self.show_properties(None)
+        self.toast.popup(f"Deleted '{dev.name}'")
+
+    def _add_tag_current(self):
+        """Ctrl+T: add a tag to the device selected in Connectivity (or the first one)."""
+        sel = self.conn_page._sel
+        did = sel[1] if len(sel) > 1 else (self.project.devices[0].id if self.project.devices else None)
+        if did is None:
+            self._show_doc("connectivity")
+            self.toast.popup("Add a device first")
+            return
+        self.add_tags(did, sel[2] if sel and sel[0] == "group" else "", False)
+
+    def add_tags(self, did: str, group: str, bulk: bool):
+        dev = self.project.device(did)
+        if dev is None or not self._recording_guard():
+            return
+        if dev.wave and len(dev.tags) >= wp.MAX_CH:
+            self.toast.popup("A waveform packet has at most 8 channels")
+            return
+        if bulk:
+            dlg = AddTagsDialog(self, dev, group)
+            if not dlg.exec():
+                return
+            new = dlg.tags()
+        else:
+            t = new_tag(dev, "", group)
+            t.name = self._unique_name(t.name, {x.name for x in dev.tags})
+            new = [t]
+        dev.tags.extend(new)
+        dev.tags.sort(key=lambda t: t.index) if dev.wave else None
+        self._show_doc("connectivity")
+        self.tags_changed(did, restart=True)
+        QTimer.singleShot(0, lambda: (self.conn_page.select_tag(did, new[-1].index),
+                                      self.select_object(("tag", did, new[-1].index))))
+
+    def edit_tag(self, did: str, idx: int):
+        dev = self.project.device(did)
+        t = dev.tag(idx) if dev else None
+        if t is None or not self._recording_guard():
+            return
+        st = self.streams.get(did)
+        dlg = TagDialog(self, dev, t, COLORS[t.index % len(COLORS)],
+                        lambda: st.raw_mean.get(idx) if st else None)
+        if dlg.exec():
+            dlg.apply(t)
+            self.tags_changed(did, restart=True)
+            self.set_status(f"Tag '{t.name}' updated", "ok")
+
+    def delete_tags(self, did: str, idxs: list[int]):
+        dev = self.project.device(did)
+        if dev is None or not idxs or not self._recording_guard():
+            return
+        names = [t.name for t in dev.tags if t.index in idxs]
+        if QMessageBox.question(self, "Delete tags", f"Delete {len(names)} tag(s): "
+                                f"{', '.join(names[:5])}{' ...' if len(names) > 5 else ''}?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        dev.tags = [t for t in dev.tags if t.index not in idxs]
+        st = self.streams.get(did)
+        for i in idxs:
+            if st:
+                st.rings.pop(i, None); st.last_vals.pop(i, None)
+        self.show_properties(None)
+        self.tags_changed(did, restart=True)
+
+    def set_tags_enabled(self, did: str, idxs: list[int], on: bool):
+        dev = self.project.device(did)
+        if dev is None or not self._recording_guard():
+            return
+        for t in dev.tags:
+            if t.index in idxs:
+                t.enabled = on
+        self.tags_changed(did, restart=True)
+
+    def move_tags(self, did: str, idxs: list[int], group: str):
+        dev = self.project.device(did)
+        if dev is None or not self._recording_guard():
+            return
+        for t in dev.tags:
+            if t.index in idxs:
+                t.group = group
+        self.tags_changed(did)
+
+    def add_group(self, did: str, parent: str):
+        dev = self.project.device(did)
+        if dev is None or not self._recording_guard():
+            return
+        name, ok = QInputDialog.getText(self, "Add group", f"Group name{' in ' + parent if parent else ''}:")
+        name = "/".join(p.strip() for p in name.split("/") if p.strip())
+        if ok and name:
+            path = f"{parent}/{name}" if parent else name
+            if path not in dev.groups:
+                dev.groups.append(path)
+            self._mark_dirty()
+            self.conn_page.refresh(("group", did, path))
+            self.select_object(("group", did, path))
+
+    def rename_group(self, did: str, path: str, name: str):
+        dev = self.project.device(did)
+        name = name.strip().replace("/", "-")
+        if dev is None or not name or not self._recording_guard():
+            return
+        new = (path.rsplit("/", 1)[0] + "/" + name) if "/" in path else name
+        fix = lambda g: new + g[len(path):] if g == path or g.startswith(path + "/") else g   # noqa: E731
+        dev.groups = sorted({fix(g) for g in dev.groups})
+        for t in dev.tags:
+            t.group = fix(t.group)
+        self._mark_dirty()
+        self.conn_page.refresh(("group", did, new))
+        self.select_object(("group", did, new))
+
+    def delete_group(self, did: str, path: str):
+        dev = self.project.device(did)
+        if dev is None or not self._recording_guard():
+            return
+        inside = [t for t in dev.tags if t.group == path or t.group.startswith(path + "/")]
+        if inside:
+            r = QMessageBox.question(self, "Delete group", f"Group '{path}' has {len(inside)} tag(s). "
+                                     "Delete the tags too? (No = keep them, without a group)",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No |
+                                     QMessageBox.StandardButton.Cancel)
+            if r == QMessageBox.StandardButton.Cancel:
+                return
+            if r == QMessageBox.StandardButton.Yes:
+                dev.tags = [t for t in dev.tags if t not in inside]
+            else:
+                parent = path.rsplit("/", 1)[0] if "/" in path else ""
+                for t in inside:
+                    t.group = parent
+        dev.groups = [g for g in dev.groups if not (g == path or g.startswith(path + "/"))]
+        self.show_properties(None)
+        self.conn_page.refresh(("device", did))
+        self.tags_changed(did, restart=bool(inside))
+
+    def write_tag(self, did: str, idx: int):
+        t = self.project.tag(did, idx)
+        if t is None:
+            return
+        if self.drivers.state(did)[0] != "online":
+            self.toast.popup("The device is not online")
+            return
+        cur = self.last_value(did, idx)[0]
+        val, ok = QInputDialog.getDouble(self, f"Write {t.name}", "Value (sent as is - before scaling):",
+                                         cur if cur is not None else 0.0, -1e12, 1e12, 6)
+        if ok:
+            self.drivers.write(did, idx, val)
+            self._log(f"Write {t.name} ← {val:g}")
+
+    def browse_opcua(self, did: str, group: str):
+        dev = self.project.device(did)
+        if dev is None or not self._recording_guard():
+            return
+        dlg = OpcUaBrowseDialog(self, dict(dev.settings), dev.all_groups(), group)
+        if not dlg.exec():
+            return
+        picked = dlg.selected()
+        have = {t.address.get("node") for t in dev.tags}
+        new = []
+        for node, name in picked:
+            if node in have:
+                continue
+            t = new_tag(dev, self._unique_name(name, {x.name for x in dev.tags}), dlg.group_path(), node=node)
+            dev.tags.append(t); new.append(t)
+        if new:
+            self.tags_changed(did, restart=True)
+            self.toast.popup(f"{len(new)} tag(s) added")
+
+    def import_tags(self, did: str):
+        dev = self.project.device(did)
+        if dev is None or not self._recording_guard():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Import tags", self._project_dir(), "CSV (*.csv);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8-sig", newline="") as f:
+                rows = list(csv.DictReader(f))
+        except (OSError, csv.Error) as e:
+            self.banners.post("proj", f"Could not read {path}: {e}", "bad")
+            return
+        added = 0
+        for r in rows:
+            if not (r.get("name") or "").strip() or (r.get("device") and r["device"] != dev.name
+                                                    and any(x.get("device") == dev.name for x in rows)):
+                continue
+            t = tag_from_row(dev, r)
+            t.name = self._unique_name(t.name, {x.name for x in dev.tags})
+            dev.tags.append(t); added += 1
+        self.tags_changed(did, restart=True)
+        self.toast.popup(f"{added} tag(s) imported")
+
+    def export_tags(self, did: str):
+        dev = self.project.device(did)
+        if dev is None:
+            return
+        start = os.path.join(self._project_dir(), dl.safe_name(dev.name) + "_tags.csv")
+        path, _ = QFileDialog.getSaveFileName(self, "Export tags", start, "CSV (*.csv)")
+        if not path:
+            return
+        from nxlogger.core.tags import CSV_COLS
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, CSV_COLS)
+            w.writeheader(); w.writerows(tags_to_rows(dev))
+        self.toast.popup(f"{len(dev.tags)} tag(s) exported")
+
+    # ---- communication
+    def start_device(self, did: str):
+        dev = self.project.device(did)
+        if dev is None:
+            return
+        if dev.driver in PLANNED:
+            self.toast.popup(f"{driver_label(dev.driver)} cannot connect yet")
+            return
+        self.drivers.start(dev)
+        self._log(f"{dev.name}: starting ({driver_label(dev.driver)}, {dev.topic})")
+        self._sync_comm(); self.conn_page.update_states(); self._refresh_properties()
+
+    def stop_device(self, did: str):
+        self.drivers.stop(did)
+        self._sync_comm(); self.conn_page.update_states(); self._refresh_properties()
+
+    def _start_all(self):
+        devs = [d for d in self.project.devices if d.enabled and d.driver not in PLANNED]
+        if not devs:
+            self._show_doc("connectivity")
+            self.toast.popup("No enabled device - add one in Connectivity")
+            return
+        for d in devs:
+            if not self.drivers.running(d.id):
+                self.drivers.start(d)
+        self._log(f"Communication started: {len(devs)} device(s)")
+        self._sync_comm(); self.conn_page.update_states(); self._refresh_properties()
+
+    def _stop_all(self):
+        with self._waiting():
+            self.drivers.stop_all()
+        self._log("Communication stopped")
+        self._sync_comm(); self.conn_page.update_states(); self._refresh_properties()
+
+    def _toggle_comm(self):
+        self._stop_all() if self.drivers.any_running else self._start_all()
+
+    def _sync_comm(self):
+        on = self.drivers.any_running
+        text = "Stop" if on else "Start"
+        if self.act_connect.text() != text:
+            self.act_connect.setText(text)
+            self.act_connect.setIcon(make_icon("square" if on else "play", T["bad" if on else "ok"]))
+            self.act_connect.setToolTip(("Stop communication with all devices" if on else
+                                         "Start communication: connect all enabled devices") + "  (Ctrl+K)")
+
+    # ================================================================ navigator (left dock)
+    @staticmethod
+    def _dot(token: str) -> QIcon:
+        pm = QPixmap(20, 20); pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(T[token]))
+        p.drawEllipse(5, 5, 10, 10); p.end()
+        pm.setDevicePixelRatio(2)
+        return QIcon(pm)
+
+    def _device_token(self, d: DeviceCfg) -> str:
+        if not d.enabled:
+            return "muted"
+        return STATE_TOKEN.get(self.drivers.state(d.id)[0], "muted")
+
+    def _rebuild_project_tree(self, *_):
+        tree = getattr(self, "ptree", None)
+        if tree is None:
+            return
+        expanded = {did for did, it in self.ptree_devices.items() if it.isExpanded()}
+        tree.clear(); self.ptree_devices.clear(); self._dot_cache.clear()
+        muted = QBrush(QColor(T["muted"]))
+        fname = os.path.basename(self.project_path) if self.project_path else f"{self.project.name}{PROJECT_EXT}"
+        root = QTreeWidgetItem([fname + (" *" if self.dirty else "")])
+        root.setIcon(0, make_icon("folder", T["text"]))
+        root.setToolTip(0, self.project_path or "Not saved yet")
+        root.setData(0, Qt.ItemDataRole.UserRole, ("project",))
+        tree.addTopLevelItem(root)
+
+        def node(parent, text, icon, data, tip=""):
+            it = QTreeWidgetItem([text]); it.setIcon(0, icon)
+            it.setData(0, Qt.ItemDataRole.UserRole, data)
+            if tip:
+                it.setToolTip(0, tip)
+            parent.addChild(it)
+            return it
+
+        node(root, "Quick View", make_icon("chart", T["text"]), ("doc", "screen"),
+             "Live plots of every enabled tag - choose them with the Tags button")
+        self.nav_conn = node(root, "Connectivity", make_icon("network", T["text"]), ("doc", "connectivity"),
+                             "Devices and tags: Simulation, Modbus TCP / RTU, MQTT, OPC UA")
+        for d in self.project.devices:
+            tok = self._device_token(d)
+            di = node(self.nav_conn, f"{d.name}  ({len(d.tags)})", self._dot(tok), ("device", d.id),
+                      f"{driver_label(d.driver)} · {d.topic}" + ("" if d.enabled else "  ·  disabled"))
+            self._dot_cache[d.id] = tok
+            if not d.enabled:
+                di.setForeground(0, muted)
+            for t in d.tags[:200]:                   # the Connectivity table shows them all
+                ti = node(di, t.name + (f"  ({t.unit})" if t.unit else ""), swatch(tag_color(t)),
+                          ("tag", d.id, t.index), (t.group + " · " if t.group else "") + t.description)
+                if not (t.enabled and d.enabled):
+                    ti.setForeground(0, muted)
+            di.setExpanded(d.id in expanded)
+            self.ptree_devices[d.id] = di
+        self.nav_conn.setExpanded(True)
+        logn = node(root, "Logging", make_icon("file-text", T["text"]), ("doc", "logging"),
+                    "Test properties, log folder and logging profiles")
+        for pr in self.project.logging_profiles:
+            stat = pr["type"] == "statistic"
+            li = node(logn, pr["name"], make_icon("sigma" if stat else "activity", T["muted"]), ("lprof", pr["id"]),
+                      (f"Statistic · every {fmt_interval(pr['interval_s'])}" if stat else "Data")
+                      + f" · {pr['format']}" + ("" if pr["enabled"] else " · disabled"))
+            if not pr["enabled"]:
+                li.setForeground(0, muted)
+        logn.setExpanded(True)
+        self.nav_alarms = node(root, "Alarms", make_icon("bell", T["text"]), ("alarms",),
+                               "4-level alarms, active list, alarm log - right-click to add")
+        self.ptree_alarms = {}
+        for a in self.project.alarms:
+            ai = node(self.nav_alarms, a["name"], level_icon(0, 5), ("alarm", a["id"]),
+                      ", ".join(x for x in (ar.describe_level(lv) for lv in a["levels"]) if x)
+                      + ("" if a["enabled"] else "  ·  disabled"))
+            if not a["enabled"]:
+                ai.setForeground(0, muted)
+            self.ptree_alarms[a["id"]] = ai
+        profs = node(self.nav_alarms, "Notification profiles", make_icon("send", T["muted"]), ("aprofs",),
+                     "Where alarm events are sent: log, popup, REST API, MQTT")
+        for pf in self.project.alarm_profiles:
+            pi = node(profs, pf["name"], make_icon("send", T["muted"]), ("aprof", pf["id"]),
+                      f"{ar.PROFILE_KINDS.get(pf['kind'])} · {ap.target_text(pf)}"
+                      + ("" if pf["enabled"] else "  ·  disabled"))
+            if not pf["enabled"]:
+                pi.setForeground(0, muted)
+        self.nav_alarms.setExpanded(True)
+        varn = node(root, "Variables", make_icon("variable", T["text"]), ("vars",),
+                    "Calculated tags: formulas, statistics, signal processing - right-click to add")
+        for v in self.project.variables:
+            err = self.variable_engine.errors.get(v["id"])
+            vi = node(varn, v["name"], swatch(self.var_color(v)), ("var", v["id"]),
+                      vr.describe(v) + (f"\n{err}" if err else "") + ("" if v["enabled"] else "  ·  disabled"))
+            if not v["enabled"]:
+                vi.setForeground(0, muted)
+            elif err:
+                vi.setForeground(0, QBrush(QColor(T["bad"])))
+        varn.setExpanded(True)
+        views = node(root, "Views", make_icon("layout", T["text"]), ("views",),
+                     "Screens: grids of headers, trends, numbers, gauges, tables - right-click for New view")
+        for vw in self.project.views:
+            node(views, vw["name"], make_icon("layout", T["muted"]), ("view", vw["id"]))
+        views.setExpanded(True)
+        root.setExpanded(True)
+        self._update_nav_dots(force=True)
+        self._apply_nav_filter(self.nav_filter.text())
+
+    def _update_nav_dots(self, force: bool = False):
+        eng = self.alarm_engine
+        for aid, it in getattr(self, "ptree_alarms", {}).items():
+            lvl = eng.alarm_state(aid)
+            a = eng.by_id.get(aid)
+            key = f"__a{aid}"
+            state = lvl if lvl else (-1 if a is None or not a["enabled"] else 0)
+            if force or self._dot_cache.get(key) != state:
+                self._dot_cache[key] = state
+                it.setIcon(0, level_icon(lvl, 5) if lvl else self._dot("ok" if state == 0 else "muted"))
+        if getattr(self, "nav_alarms", None) is not None:
+            act = eng.count()
+            text = "Alarms" + (f"  ·  {act} active" if act else "")
+            if self.nav_alarms.text(0) != text:
+                self.nav_alarms.setText(0, text)
+                self.nav_alarms.setForeground(0, QBrush(QColor(T["bad"])) if act else QBrush())
+        for d in self.project.devices:
+            it = self.ptree_devices.get(d.id)
+            tok = self._device_token(d)
+            if it is not None and (force or self._dot_cache.get(d.id) != tok):
+                it.setIcon(0, self._dot(tok)); self._dot_cache[d.id] = tok
+        if getattr(self, "nav_conn", None) is not None:
+            n = sum(1 for d in self.project.devices if self.drivers.state(d.id)[0] == "online")
+            text = "Connectivity" + (f"  ·  {n} online" if self.drivers.any_running else "")
+            if self.nav_conn.text(0) != text:
+                self.nav_conn.setText(0, text)
+
+    def _apply_nav_filter(self, text: str):
+        text = text.strip().lower()
+
+        def walk(it) -> bool:
+            kids = [walk(it.child(i)) for i in range(it.childCount())]
+            show = not text or text in it.text(0).lower() or any(kids)
+            it.setHidden(not show)
+            if text and any(kids):
+                it.setExpanded(True)
+            return show
+        for i in range(self.ptree.topLevelItemCount()):
+            walk(self.ptree.topLevelItem(i))
+
+    def _collapse_tree(self):
+        for it in self.ptree_devices.values():
+            it.setExpanded(False)
+
+    def _nav_data(self, it):
+        return it.data(0, Qt.ItemDataRole.UserRole) if it is not None else None
+
+    def _nav_open(self, it):
+        d = self._nav_data(it)
+        if not d:
+            return
+        if d[0] == "doc":
+            self._show_doc(d[1])
+        elif d[0] == "project":
+            self.show_properties(props.project_target(self))
+        elif d[0] == "view":
+            self._show_doc(f"view:{d[1]}")
+            page = self.view_pages.get(d[1])
+            if page is not None:
+                self.show_properties(props.view_target(self, page))
+        elif d[0] == "device":
+            self._show_doc("connectivity")
+            self.conn_page.refresh(("device", d[1]))
+            self.select_object(("device", d[1]))
+        elif d[0] == "tag":
+            self._show_doc("connectivity")
+            self.conn_page.select_tag(d[1], d[2])
+            self.select_object(("tag", d[1], d[2]))
+        elif d[0] == "lprof":
+            self._show_doc("logging")
+            self._select_log_profile(d[1])
+            pr = self._log_profile(d[1])
+            if pr:
+                self.show_properties(props.simple_target(
+                    pr["name"], "file-text", "Logging profile - edit in its dialog",
+                    {"Type": "Statistic" if pr["type"] == "statistic" else "Data", "Format": pr["format"],
+                     "Enabled": "Yes" if pr["enabled"] else "No"},
+                    [("Edit...", "pencil", lambda: self._edit_log_profile(d[1]))], key=("lprof", d[1])))
+        elif d[0] == "alarms":
+            self._show_doc("alarms")
+            self.alarm_page.tabs.setCurrentIndex(0)
+        elif d[0] == "alarm":
+            self._show_doc("alarms")
+            self.alarm_page.select_alarm(d[1])
+        elif d[0] in ("aprofs", "aprof"):
+            self._show_doc("alarms")
+            self.alarm_page.tabs.setCurrentIndex(3)
+            if d[0] == "aprof":
+                self.alarm_page.select_profile(d[1])
+        elif d[0] in ("vars", "var"):
+            self._show_doc("variables")
+            if d[0] == "var":
+                self.var_page.select(d[1])
+
+    def _nav_double_clicked(self, it, _col):
+        d = self._nav_data(it)
+        if d and d[0] == "device":
+            QTimer.singleShot(0, lambda: self.edit_device(d[1]))     # dialogs rebuild trees
+        elif d and d[0] == "tag":
+            QTimer.singleShot(0, lambda: self.edit_tag(d[1], d[2]))
+        elif d and d[0] == "lprof":
+            QTimer.singleShot(0, lambda: self._edit_log_profile(d[1]))
+        elif d and d[0] == "alarm":
+            QTimer.singleShot(0, lambda: self.alarm_page.edit_alarm(d[1]))
+        elif d and d[0] == "aprof":
+            QTimer.singleShot(0, lambda: self.alarm_page.edit_profile(d[1]))
+        elif d and d[0] == "var":
+            QTimer.singleShot(0, lambda: self.var_page.edit_variable(d[1]))
+
+    def _nav_menu(self, pos):
+        it = self.ptree.itemAt(pos)
+        d = self._nav_data(it) or ("none",)
+        m = QMenu(self)
+        if d[0] == "device":
+            dev = self.project.device(d[1])
+            run = self.drivers.running(d[1])
+            m.addAction("Edit device...", lambda: QTimer.singleShot(0, lambda: self.edit_device(d[1])))
+            m.addAction("Stop" if run else "Start", lambda: (self.stop_device if run else self.start_device)(d[1]))
+            m.addAction("Add tag", lambda: self.add_tags(d[1], "", False))
+            m.addAction("Add tags...", lambda: self.add_tags(d[1], "", True))
+            if dev and dev.driver == "opcua":
+                m.addAction("Browse server...", lambda: self.browse_opcua(d[1], ""))
+            m.addSeparator()
+            m.addAction("Delete device", lambda: self.delete_device(d[1]))
+        elif d[0] == "tag":
+            m.addAction("Edit tag...", lambda: QTimer.singleShot(0, lambda: self.edit_tag(d[1], d[2])))
+            t = self.project.tag(d[1], d[2])
+            if t is not None:
+                m.addAction("Disable" if t.enabled else "Enable",
+                            lambda: self.set_tags_enabled(d[1], [d[2]], not t.enabled))
+            m.addAction("Add alarm for this tag...", lambda: self.add_alarm_for((d[1], d[2])))
+            m.addAction("Add statistic variable of this tag...", lambda: self._var_action("add", [d[1], d[2]]))
+            m.addSeparator()
+            m.addAction("Delete tag", lambda: self.delete_tags(d[1], [d[2]]))
+        elif d[0] in ("views", "view"):
+            if d[0] == "view":
+                page = self.view_pages.get(d[1])
+                m.addAction("Open", lambda: self._show_doc(f"view:{d[1]}"))
+                m.addAction("View properties...", lambda: self.view_properties(page))
+                m.addAction("Delete view", lambda: self.delete_view(page))
+                m.addSeparator()
+            m.addAction("New view...", self._new_view)
+        elif d[0] == "lprof" or tuple(d[:2]) == ("doc", "logging"):
+            self._log_profile_menu(m, self._log_profile(d[1]) if d[0] == "lprof" else None)
+        elif d[0] in ("alarms", "alarm", "aprofs", "aprof"):
+            pg_ = self.alarm_page
+            if d[0] == "alarm":
+                a = next((x for x in self.project.alarms if x["id"] == d[1]), None)
+                m.addAction("Edit alarm...", lambda: QTimer.singleShot(0, lambda: pg_.edit_alarm(d[1])))
+                m.addAction("Disable" if a and a["enabled"] else "Enable", lambda: pg_.toggle_alarm(d[1]))
+                m.addAction("Delete alarm", lambda: (pg_.select_alarm(d[1]), pg_.delete_alarm()))
+                m.addSeparator()
+            elif d[0] == "aprof":
+                pf = next((x for x in self.project.alarm_profiles if x["id"] == d[1]), None)
+                m.addAction("Edit profile...", lambda: QTimer.singleShot(0, lambda: pg_.edit_profile(d[1])))
+                m.addAction("Disable" if pf and pf["enabled"] else "Enable", lambda: pg_.toggle_profile(d[1]))
+                m.addAction("Send test", lambda: pf and self.test_profile(pf))
+                m.addAction("Delete profile", lambda: (pg_.select_profile(d[1]), pg_.delete_profile()))
+                m.addSeparator()
+            if d[0] in ("aprofs", "aprof"):
+                add = m.addMenu("Add notification profile")
+                for k, text in ar.PROFILE_KINDS.items():
+                    add.addAction(text, lambda kk=k: (self._show_doc("alarms"), pg_.add_profile(kk)))
+            else:
+                m.addAction("Add alarm...", lambda: self._alarm_action("add"))
+        elif d[0] in ("vars", "var"):
+            vp = self.var_page
+            if d[0] == "var":
+                v = next((x for x in self.project.variables if x["id"] == d[1]), None)
+                m.addAction("Edit variable...", lambda: QTimer.singleShot(0, lambda: vp.edit_variable(d[1])))
+                m.addAction("Disable" if v and v["enabled"] else "Enable", lambda: vp.toggle(d[1]))
+                m.addAction("Delete variable", lambda: (self._show_doc("variables"), vp.select(d[1]),
+                                                        vp.delete_variable()))
+                m.addAction("Add alarm for this variable...",
+                            lambda: self._alarm_action("add", list(vr.var_key(d[1]))))
+                m.addSeparator()
+            add = m.addMenu("Add variable")
+            for k, text in vr.KINDS.items():
+                add.addAction(text + "...", lambda kk=k: (self._show_doc("variables"), vp.add_variable(kk)))
+        else:
+            add = m.addMenu("Add device")
+            for k, dd in DRIVERS.items():
+                add.addAction(dd["label"] + "...", lambda kk=k: self.add_device(kk))
+            m.addAction("New view...", self._new_view)
+        free = ("views", "view", "alarms", "alarm", "aprofs", "aprof")
+        for a in m.actions():
+            a.setEnabled(a.isEnabled() and (self.recorder is None or d[0] in free
+                                            or a.text().startswith(("Add alarm", "Start", "Stop"))))
+        m.exec(self.ptree.viewport().mapToGlobal(pos))
+
+    # ---------------------------------------------------------------- sessions (Data tab)
+    def _refresh_sessions(self):
+        tree = getattr(self, "stree", None)
+        if tree is None:
+            return
+        tree.clear()
+        folder = self.project.logging.folder
+        rows = []
+        try:
+            entries = [e for e in os.scandir(folder) if e.is_dir()]
+        except OSError:
+            entries = []
+        for e in entries:
+            pj = os.path.join(e.path, "project.json")
+            if not os.path.isfile(pj):
+                continue
+            try:
+                with open(pj, encoding="utf-8") as f:
+                    info = json.load(f)
+            except (OSError, ValueError):
+                continue
+            rows.append((info.get("start_unix", 0), e, info))
+        for start, e, info in sorted(rows, key=lambda r: r[0], reverse=True):
+            running = info.get("running")
+            dur = "recording..." if running else time.strftime("%H:%M:%S", time.gmtime(info.get("duration_s", 0)))
+            it = QTreeWidgetItem([info.get("project", {}).get("name", e.name),
+                                  time.strftime("%d %b %H:%M", time.localtime(start)) if start else "-",
+                                  dur])
+            it.setData(0, Qt.ItemDataRole.UserRole, e.path)
+            tip = f"{e.path}\nFormat: {info.get('format', '-')}" + (" + raw .wpk" if info.get("keep_raw") else "")
+            for c in range(3):
+                it.setToolTip(c, tip)
+            it.setIcon(0, make_icon("database", T["muted"]))
+            if running:
+                it.setIcon(0, self._dot("bad"))
+            tree.addTopLevelItem(it)
+        if not rows:
+            it = QTreeWidgetItem(["No recordings yet", "", ""])
+            it.setForeground(0, QBrush(QColor(T["muted"])))
+            it.setFlags(Qt.ItemFlag.NoItemFlags)
+            it.setToolTip(0, folder)
+            tree.addTopLevelItem(it)
+
+    def _session_menu(self, pos):
+        it = self.stree.itemAt(pos)
+        path = it.data(0, Qt.ItemDataRole.UserRole) if it else None
+        if not path:
+            return
+        m = QMenu(self)
+        m.addAction("Open folder", lambda: self._open_path(path))
+        m.addAction("Copy path", lambda: QApplication.clipboard().setText(path))
+        m.exec(self.stree.viewport().mapToGlobal(pos))
+
+    def _browse_log_folder(self):
+        d = QFileDialog.getExistingDirectory(self, "Log folder", self.project.logging.folder)
+        if d:
+            self.log_folder.setText(d)
+            self._edit_logging("folder", d)
+
+    def _open_log_folder(self):
+        d = self.recorder.dir if self.recorder else self.project.logging.folder
+        os.makedirs(d, exist_ok=True)
+        self._open_path(d)
+
+    @staticmethod
+    def _open_path(path):
+        if path and os.path.exists(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    # ================================================================ logging profiles
     def _profile_topics(self, pr: dict) -> list[dict]:
-        """Recorder topic list for one logging profile (enabled topics / channels only)."""
+        """Recorder device list for one logging profile (enabled devices / tags only)."""
         sel = None if pr.get("channels") is None else {tuple(x) for x in pr["channels"]}
         out = []
-        for t in self.project.topics:
-            if not t.enabled:
+        for d in self.project.devices:
+            if not d.enabled:
                 continue
-            chans = [(c.index, c.name, c.unit) for c in t.channels
-                     if c.enabled and (sel is None or (t.id, c.index) in sel)]
+            chans = [(t.index, t.name, t.unit) for t in d.tags
+                     if t.enabled and (sel is None or (d.id, t.index) in sel)]
             if chans:
-                out.append({"id": t.id, "name": t.name, "topic": t.topic, "channels": chans})
-        # variables: one virtual topic per base topic and rate (waveform / one value per block)
-        names = {t.id: t.name for t in self.project.topics}
+                out.append({"id": d.id, "name": d.name, "topic": d.topic, "channels": chans,
+                            "virtual": not d.wave, "driver": d.driver})
+        # variables: one group per base device and rate (waveform / one value per block)
+        names = {d.id: d.name for d in self.project.devices}
+        byid = {v["id"]: v for v in self.project.variables}
         for gid, vids in self._var_groups.items():
-            byid = {v["id"]: v for v in self.project.variables}
             chans = [(i, byid[vid]["name"], byid[vid].get("unit", "")) for i, vid in enumerate(vids)
                      if vid in byid and (byid[vid].get("log", True) if sel is None else vr.var_key(vid) in sel)]
             if chans:
@@ -854,33 +1670,32 @@ class DaqWindow(AppWindow):
             pn, fmt = dl.safe_name(pr["name"]), pr["format"]
             topics = self._profile_topics(pr)
             if not topics:
-                files.append(f"({pr['name']}: no enabled channels)")
+                files.append(f"({pr['name']}: no enabled tags)")
                 continue
-            if fmt == "TDMS":
-                files.append(f"{name}_{pn}.tdms")
-            else:
-                files += [f"{pn}_{dl.safe_name(t['name'])}{dl.FORMATS[fmt][1]}" for t in topics]
-            if pr["type"] == "signal" and pr.get("keep_raw") and fmt != "WPK":
-                files += [f"{pn}_{dl.safe_name(t['name'])}.wpk" for t in topics]
+            for t in topics:
+                wpk = fmt == "WPK" and not t["virtual"] and pr["type"] == "signal"
+                files.append(f"{pn}_{dl.safe_name(t['name'])}{'.wpk' if wpk else '.csv'}")
+                if pr["type"] == "signal" and pr.get("keep_raw") and fmt != "WPK" and not t["virtual"]:
+                    files.append(f"{pn}_{dl.safe_name(t['name'])}.wpk")
         if len(files) == 1:
             files.append("(no enabled logging profile - Record is not possible)")
         self.session_preview.setText(
             _brk(f"{os.path.join(lg.folder, name + '_<yyyymmdd_hhmmss>')}{os.sep}") + "\n    " +
             "\n    ".join(files))
         self.fmt_help.setText(
-            "Signal profiles log every sample: CSV (one row per sample, Excel / pandas, large), "
-            "TDMS (NI DIAdem / LabVIEW / npTDMS, waveform properties) or raw .wpk packets (smallest, "
-            "lossless, daq_logging.read_wpk()). Statistic profiles log one row per interval with the "
-            "chosen statistics per channel (CSV or TDMS) - small files for long-term trends and "
-            "reports. All enabled profiles run together on Record and write into the same session "
-            "folder; each can use its own channels.")
+            "Data profiles log every value: CSV with one row per scan for number tags (Excel, pandas, "
+            "NX Viewer), one row per sample for waveforms - or raw .wpk packets for waveform devices "
+            "(smallest, lossless). Statistic profiles log one row per interval with the chosen statistics "
+            "per tag - small files for long-term trends and reports. All enabled profiles run together on "
+            "Record and write into the same session folder; each can use its own tags. The layout is "
+            "described in docs/recording-format.md.")
         self._fill_log_profiles()
 
     def _fill_log_profiles(self):
         tree = getattr(self, "lp_tree", None)
         if tree is None:
             return
-        names = {(t.id, c.index): c.name for t in self.project.topics for c in t.channels}
+        names = {(d.id, t.index): t.name for d in self.project.devices for t in d.tags}
         cur = tree.currentItem().data(0, Qt.ItemDataRole.UserRole) if tree.currentItem() else None
         locked = self.recorder is not None
         tree.blockSignals(True); tree.clear()
@@ -894,7 +1709,7 @@ class DaqWindow(AppWindow):
             details = (f"every {fmt_interval(pr['interval_s'])} · "
                        + ", ".join(dl.STAT_LABELS[k] for k in pr.get("stats", [])) if stat
                        else ("+ raw .wpk" if pr.get("keep_raw") and pr["format"] != "WPK" else ""))
-            it = QTreeWidgetItem([pr["name"], "Statistic" if stat else "Signal", pr["format"], chans, details])
+            it = QTreeWidgetItem([pr["name"], "Statistic" if stat else "Data", pr["format"], chans, details])
             it.setIcon(0, make_icon("sigma" if stat else "activity", T["text" if pr["enabled"] else "muted"]))
             it.setData(0, Qt.ItemDataRole.UserRole, pr["id"])
             flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
@@ -910,7 +1725,6 @@ class DaqWindow(AppWindow):
                 tree.setCurrentItem(it)
         tree.blockSignals(False)
 
-    # ---------------------------------------------------------------- logging profiles
     def _log_profile(self, pid: str | None = None) -> dict | None:
         if pid is None:
             it = self.lp_tree.currentItem()
@@ -930,7 +1744,7 @@ class DaqWindow(AppWindow):
     def _add_log_profile(self, kind: str):
         if not self._recording_guard():
             return
-        base = "Waveform" if kind == "signal" else "Statistics"
+        base = "Data" if kind == "signal" else "Statistics"
         taken = {x["name"] for x in self.project.logging_profiles}
         name = next(n for n in [base] + [f"{base} {i}" for i in range(2, 99)] if n not in taken)
         pr = self._profile_dialog(new_log_profile(kind, name))
@@ -997,7 +1811,7 @@ class DaqWindow(AppWindow):
             m.addAction("Duplicate", lambda: self._dup_log_profile(pr["id"]))
             m.addAction("Delete profile", lambda: self._delete_log_profile(pr["id"]))
             m.addSeparator()
-        m.addAction("Add signal profile...", lambda: self._add_log_profile("signal"))
+        m.addAction("Add data profile...", lambda: self._add_log_profile("signal"))
         m.addAction("Add statistic profile...", lambda: self._add_log_profile("statistic"))
 
     def _lp_menu(self, pos):
@@ -1010,657 +1824,16 @@ class DaqWindow(AppWindow):
             a.setEnabled(self.recorder is None)
         m.exec(self.lp_tree.viewport().mapToGlobal(pos))
 
-    def _confirm_discard(self) -> bool:
-        if not self.dirty:
-            return True
-        r = QMessageBox.question(self, APP_NAME, f"Save changes to '{self.project.name}'?",
-                                 QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
-                                 QMessageBox.StandardButton.Cancel)
-        if r == QMessageBox.StandardButton.Save:
-            return self._save_project()
-        return r == QMessageBox.StandardButton.Discard
-
-    def _new_project(self):
-        if self._recording_guard() and self._confirm_discard():
-            self._set_project(Project(name="Untitled project", logging_profiles=[new_log_profile("signal")],
-                                      alarm_profiles=[ar.new_profile("popup", "Popup + sound")]), None)
-            self.toast.popup("New project")
-
-    def _open_project(self):
-        if not (self._recording_guard() and self._confirm_discard()):
-            return
-        path, _ = QFileDialog.getOpenFileName(self, "Open project", self._project_dir(),
-                                              f"{APP_NAME} project (*{PROJECT_EXT} *{OLD_PROJECT_EXT});;All files (*)")
-        if path:
-            try:
-                self._load_project(path)
-                self.toast.popup(f"Opened {os.path.basename(path)}")
-            except Exception as e:
-                self.banners.post("proj", f"Could not open project: {e}", "bad")
-
-    def _load_project(self, path: str):
-        with self._waiting(), open(path, encoding="utf-8") as f:
-            self._set_project(Project.from_dict(json.load(f)), path)
-        QSettings().setValue("last_project", path)
-        self._log(f"Project opened: {path}")
-
-    def _project_dir(self) -> str:
-        if self.project_path:
-            return os.path.dirname(self.project_path)
-        d = paths.projects_dir()
-        d.mkdir(parents=True, exist_ok=True)
-        return str(d)
-
-    def _save_project(self) -> bool:
-        if not self.project_path:
-            return self._save_project_as()
-        try:
-            with self._waiting(), open(self.project_path, "w", encoding="utf-8") as f:
-                json.dump(self.project.to_dict(), f, indent=2, ensure_ascii=False)
-        except OSError as e:
-            self.banners.post("proj", f"Could not save project: {e}", "bad")
-            return False
-        QSettings().setValue("last_project", self.project_path)
-        self.dirty = False
-        self._update_title()
-        self.p_file.setText(_brk(self.project_path))
-        self._rebuild_project_tree()
-        self.toast.popup("Project saved")
-        return True
-
-    def _save_project_as(self) -> bool:
-        os.makedirs(self.project.logging.folder, exist_ok=True)
-        start = os.path.join(self._project_dir(), dl.safe_name(self.project.name) + PROJECT_EXT)
-        path, _ = QFileDialog.getSaveFileName(self, "Save project", start,
-                                              f"{APP_NAME} project (*{PROJECT_EXT})")
-        if not path:
-            return False
-        if not path.endswith(PROJECT_EXT):
-            path += PROJECT_EXT
-        self.project_path = path
-        return self._save_project()
-
-    # ================================================================ topics
-    def _selected_topic(self) -> TopicCfg | None:
-        it = self.tree.currentItem()
-        if it is None:
-            return None
-        tid = it.data(0, Qt.ItemDataRole.UserRole)[1]
-        return next((t for t in self.project.topics if t.id == tid), None)
-
-    def _add_topic(self):
-        if not self._recording_guard():
-            return
-        dlg = TopicDialog(self, None, {t.topic for t in self.project.topics})
-        if dlg.exec():
-            cfg = dlg.apply(None)
-            self.project.topics.append(cfg)
-            self._mark_dirty(); self._topics_changed()
-            self._show_doc("channels")
-            self.set_status(f"Topic '{cfg.name}' added", "ok")
-
-    def _edit_topic(self):
-        cfg = self._selected_topic()
-        if cfg is None or not self._recording_guard():
-            return
-        dlg = TopicDialog(self, cfg, {t.topic for t in self.project.topics if t is not cfg})
-        if dlg.exec():
-            dlg.apply(cfg)
-            self.streams.pop(cfg.id, None)
-            self._mark_dirty(); self._topics_changed()
-
-    def _delete_topic(self):
-        cfg = self._selected_topic()
-        if cfg is None or not self._recording_guard():
-            return
-        if QMessageBox.question(self, "Delete topic",
-                                f"Delete topic '{cfg.name}' ({cfg.topic}) from the project?") \
-                != QMessageBox.StandardButton.Yes:
-            return
-        self.project.topics.remove(cfg)
-        self.streams.pop(cfg.id, None)
-        self._mark_dirty(); self._topics_changed()
-        self.toast.popup(f"Deleted '{cfg.name}'")
-
-    def _topics_changed(self):
-        """Structure changed: subscriptions, routes, tree, plots."""
-        self._routes.clear()
-        self.mqtt.set_subscriptions([(t.topic, t.qos) for t in self.project.topics if t.enabled])
-        self._variables_reload()                 # channel names are formula names
-        self._rebuild_tree()
-        self._rebuild_plots()
-        self._alarms_reload()
-        self._update_logging_help()
-        self._update_lock()
-        self._ml_restart()                       # new topic folders / names in meta.json
-
-    def _rebuild_tree(self):
-        locked = self.recorder is not None
-        self.tree.blockSignals(True)
-        sel = self._selected_topic()
-        self.tree.clear(); self.tree_items.clear()
-        for t in self.project.topics:
-            top = QTreeWidgetItem([t.name, t.topic] + [""] * (len(SPEC_COLS) - 2))
-            top.setData(0, Qt.ItemDataRole.UserRole, ("topic", t.id))
-            flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-            if not locked:
-                flags |= Qt.ItemFlag.ItemIsUserCheckable
-            top.setFlags(flags)
-            top.setCheckState(0, Qt.CheckState.Checked if t.enabled else Qt.CheckState.Unchecked)
-            f = top.font(0); f.setBold(True)
-            for c in range(len(SPEC_COLS)):
-                top.setFont(c, f)
-            kids = {}
-            for c in t.channels:
-                it = QTreeWidgetItem([c.name, f"CH{c.index + 1}", c.unit] + [""] * (len(SPEC_COLS) - 3))
-                if c.description:
-                    it.setToolTip(0, c.description)
-                it.setData(0, Qt.ItemDataRole.UserRole, ("ch", t.id, c.index))
-                it.setFlags(flags)
-                it.setCheckState(0, Qt.CheckState.Checked if c.enabled else Qt.CheckState.Unchecked)
-                it.setIcon(0, swatch(ch_color(c)))
-                for col in range(3, COL_DETAILS):
-                    it.setTextAlignment(col, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                top.addChild(it)
-                kids[c.index] = it
-            self.tree.addTopLevelItem(top)
-            top.setExpanded(True)
-            self.tree_items[t.id] = (top, kids)
-            if sel is not None and sel.id == t.id:
-                self.tree.setCurrentItem(top)
-        self.tree.blockSignals(False)
-        self._rebuild_scalers()
-        self._update_tree_values()
-        self._rebuild_project_tree()
-
-    def _tree_double_clicked(self, item, col):
-        kind = item.data(0, Qt.ItemDataRole.UserRole)[0]
-        # the dialogs rebuild the tree: never inside the click itself
-        QTimer.singleShot(0, self._edit_topic if kind == "topic" else self._edit_channel)
-
-    def _tree_item_changed(self, item, col):
-        if self.recorder is not None:
-            return
-        data = item.data(0, Qt.ItemDataRole.UserRole)
-        cfg = next((t for t in self.project.topics if t.id == data[1]), None)
-        if cfg is None:
-            return
-        target = cfg if data[0] == "topic" else cfg.channel(data[2])
-        if col == 0:
-            on = item.checkState(0) == Qt.CheckState.Checked
-            name = item.text(0).strip() or target.name
-            changed_enable = on != target.enabled
-            target.enabled, target.name = on, name
-            if data[0] == "topic" and changed_enable:
-                # Never rebuild the tree inside itemChanged: Qt is still inside this
-                # item's setData(), and deleting it there segfaults. Defer it.
-                self._mark_dirty()
-                QTimer.singleShot(0, self._topics_changed)
-                return
-        elif col == 2 and data[0] == "ch":
-            target.unit = item.text(2).strip()
-        elif col == 1 and data[0] == "ch":
-            self.tree.blockSignals(True); item.setText(1, f"CH{target.index + 1}")
-            self.tree.blockSignals(False)
-            return
-        self._mark_dirty()
-        self._rebuild_plots()
-        self._update_logging_help()
-        self._rebuild_project_tree()
-
-    def _update_tree_values(self):
-        for t in self.project.topics:
-            entry = self.tree_items.get(t.id)
-            if entry is None:
-                continue
-            top, kids = entry
-            st = self.streams.get(t.id)
-            if not t.enabled:
-                details = "disabled"
-            elif st is None or st.fs is None:
-                details = f"QoS {t.qos} · waiting for data" if self.mqtt.is_connected \
-                    else f"QoS {t.qos} · not connected"
-            else:
-                details = (f"QoS {t.qos} · {st.fs:g} S/s · {st.pps:.1f} pkt/s · "
-                           f"block {st.last.n} · lost {st.lost}")
-            self.tree.blockSignals(True)
-            top.setText(COL_DETAILS, details)
-            win = self.window_s.value()
-            for c in t.channels:
-                it = kids.get(c.index)
-                if it is None:
-                    continue
-                d = int(c.decimals)
-                sc = cm.describe_scale(c.scale)
-                if st and c.index in st.last_vals:
-                    val = st.last_vals[c.index]
-                    lvl, typ = self.alarm_engine.channel_state(t.id, c.index)
-                    mark = ("▲ " if typ in ar.UP_TYPES else "▼ " if typ in ar.DOWN_TYPES else "⚠ ") if lvl else ""
-                    it.setText(3, mark + f"{val:.{d}f} {c.unit}".strip())
-                    it.setForeground(3, QBrush(QColor(level_color(lvl))) if lvl else QBrush())
-                    it.setToolTip(3, f"Alarm Level {lvl} ({typ}) active" if lvl else "")
-                    for col, v in zip(range(4, 4 + len(STAT_COLS)), self._stats(st, c.index, win)):
-                        it.setText(col, "-" if v is None else f"{v:.{d}f}")
-                    it.setText(COL_DETAILS, "  ·  ".join(x for x in (
-                        sc, f"{st.scales[c.index]:.3g} {c.unit or 'units'}/LSB") if x))
-                else:
-                    it.setText(3, "-")
-                    for col in range(4, 4 + len(STAT_COLS)):
-                        it.setText(col, "")
-                    it.setText(COL_DETAILS, sc)
-            self.tree.blockSignals(False)
-
     def _update_lock(self):
         rec = self.recorder is not None
-        has_sel = self._selected_topic() is not None
-        self.btn_add.setEnabled(not rec)
-        self.btn_edit.setEnabled(not rec and has_sel)
-        self.btn_del.setEnabled(not rec and has_sel)
-        self.btn_edit_ch.setEnabled(not rec and self._selected_channel() is not None)
         for w in (self.log_folder, self.p_name, self.p_operator, self.p_desc, *self.lp_btns):
             w.setEnabled(not rec)
         self.act_rec.setEnabled(not rec)
         self.act_stop.setEnabled(rec)
         if hasattr(self, "var_page"):                 # variables are locked while recording too
             self.var_page.refresh()
-
-    def _recording_guard(self) -> bool:
-        if self.recorder is not None:
-            self.toast.popup("Stop recording to change the project")
-            return False
-        return True
-
-    def _browse_log_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "Log folder", self.project.logging.folder)
-        if d:
-            self.log_folder.setText(d)
-            self._edit_logging("folder", d)
-
-    def _open_log_folder(self):
-        d = self.recorder.dir if self.recorder else self.project.logging.folder
-        os.makedirs(d, exist_ok=True)
-        self._open_path(d)
-
-    @staticmethod
-    def _open_path(path):
-        if path and os.path.exists(path):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-
-    # ================================================================ navigator (left dock)
-    def _show_connection(self):
-        self.conn_dlg.show(); self.conn_dlg.raise_(); self.conn_dlg.activateWindow()
-
-    @staticmethod
-    def _dot(token: str) -> QIcon:
-        pm = QPixmap(20, 20); pm.fill(Qt.GlobalColor.transparent)
-        p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(T[token]))
-        p.drawEllipse(5, 5, 10, 10); p.end()
-        pm.setDevicePixelRatio(2)
-        return QIcon(pm)
-
-    def _topic_state(self, t: TopicCfg) -> str:
-        if not t.enabled or not self.mqtt.is_connected:
-            return "muted"
-        st = self.streams.get(t.id)
-        return "ok" if st and st.pps > 0 else "warn"
-
-    def _rebuild_project_tree(self, *_):
-        tree = getattr(self, "ptree", None)
-        if tree is None:
-            return
-        expanded = {tid for tid, it in self.ptree_topics.items() if it.isExpanded()}
-        first = not self.ptree_topics and tree.topLevelItemCount() == 0
-        tree.clear(); self.ptree_topics.clear(); self._dot_cache.clear()
-        muted = QBrush(QColor(T["muted"]))
-        fname = os.path.basename(self.project_path) if self.project_path else f"{self.project.name}{PROJECT_EXT}"
-        root = QTreeWidgetItem([fname + (" *" if self.dirty else "")])
-        root.setIcon(0, make_icon("folder", T["text"]))
-        root.setToolTip(0, self.project_path or "Not saved yet")
-        root.setData(0, Qt.ItemDataRole.UserRole, ("project",))
-        tree.addTopLevelItem(root)
-
-        def node(parent, text, icon, data, tip=""):
-            it = QTreeWidgetItem([text]); it.setIcon(0, icon)
-            it.setData(0, Qt.ItemDataRole.UserRole, data)
-            if tip:
-                it.setToolTip(0, tip)
-            parent.addChild(it)
-            return it
-
-        node(root, "Quick View", make_icon("chart", T["text"]), ("doc", "screen"),
-             "Live plots of every topic - choose the channels with the Channels button")
-        chans = node(root, "Channel Specification", make_icon("share", T["text"]), ("doc", "channels"),
-                     "Topics and channels")
-        for t in self.project.topics:
-            state = self._topic_state(t)
-            ti = node(chans, t.name, self._dot(state), ("topic", t.id),
-                      f"{t.topic}  ·  QoS {t.qos}" + ("" if t.enabled else "  ·  disabled"))
-            self._dot_cache[t.id] = state
-            if not t.enabled:
-                ti.setForeground(0, muted)
-            for c in t.channels:
-                ci = node(ti, c.name + (f"  ({c.unit})" if c.unit else ""),
-                          swatch(ch_color(c)), ("ch", t.id, c.index),
-                          f"CH{c.index + 1}")
-                if not (c.enabled and t.enabled):
-                    ci.setForeground(0, muted)
-            ti.setExpanded(t.id in expanded or first)
-            self.ptree_topics[t.id] = ti
-        logn = node(root, "Logging Specification", make_icon("file-text", T["text"]), ("doc", "logging"),
-                    "Test properties, log folder and logging profiles")
-        for pr in self.project.logging_profiles:
-            stat = pr["type"] == "statistic"
-            li = node(logn, pr["name"], make_icon("sigma" if stat else "activity", T["muted"]), ("lprof", pr["id"]),
-                      (f"Statistic · every {fmt_interval(pr['interval_s'])}" if stat else "Signal")
-                      + f" · {pr['format']}" + ("" if pr["enabled"] else " · disabled"))
-            if not pr["enabled"]:
-                li.setForeground(0, muted)
-        logn.setExpanded(True)
-        self.nav_alarms = node(root, "Alarms", make_icon("bell", T["text"]), ("alarms",),
-                               "4-level alarms, active list, alarm log - right-click to add")
-        self.ptree_alarms = {}
-        for a in self.project.alarms:
-            ai = node(self.nav_alarms, a["name"], level_icon(0, 5), ("alarm", a["id"]),
-                      ", ".join(x for x in (ar.describe_level(lv) for lv in a["levels"]) if x)
-                      + ("" if a["enabled"] else "  ·  disabled"))
-            if not a["enabled"]:
-                ai.setForeground(0, muted)
-            self.ptree_alarms[a["id"]] = ai
-        profs = node(self.nav_alarms, "Notification profiles", make_icon("send", T["muted"]), ("aprofs",),
-                     "Where alarm events are sent: log, popup, REST API, MQTT")
-        for pf in self.project.alarm_profiles:
-            pi = node(profs, pf["name"], make_icon("send", T["muted"]), ("aprof", pf["id"]),
-                      f"{ar.PROFILE_KINDS.get(pf['kind'])} · {ap.target_text(pf)}"
-                      + ("" if pf["enabled"] else "  ·  disabled"))
-            if not pf["enabled"]:
-                pi.setForeground(0, muted)
-        self.nav_alarms.setExpanded(True)
-        varn = node(root, "Variables", make_icon("variable", T["text"]), ("vars",),
-                    "Calculated channels: formulas, statistics, signal processing - right-click to add")
-        for v in self.project.variables:
-            err = self.variable_engine.errors.get(v["id"])
-            vi = node(varn, v["name"], swatch(self.var_color(v)), ("var", v["id"]),
-                      vr.describe(v) + (f"\n{err}" if err else "") + ("" if v["enabled"] else "  ·  disabled"))
-            if not v["enabled"]:
-                vi.setForeground(0, muted)
-            elif err:
-                vi.setForeground(0, QBrush(QColor(T["bad"])))
-        varn.setExpanded(True)
-        views = node(root, "Views", make_icon("layout", T["text"]), ("views",),
-                     "Custom screens - right-click for New view")
-        for vw in self.project.views:
-            node(views, vw["name"], make_icon("layout", T["muted"]), ("view", vw["id"]))
-        views.setExpanded(True)
-        self.nav_conn = node(root, "Connection", self._dot("muted"), ("conn",), "Broker settings")
-        root.setExpanded(True); chans.setExpanded(True)
-        self._update_nav_dots(force=True)
-        self._apply_nav_filter(self.nav_filter.text())
-
-    def _update_nav_dots(self, force: bool = False):
-        eng = self.alarm_engine
-        for aid, it in getattr(self, "ptree_alarms", {}).items():
-            lvl = eng.alarm_state(aid)
-            a = eng.by_id.get(aid)
-            key = f"__a{aid}"
-            state = lvl if lvl else (-1 if a is None or not a["enabled"] else 0)
-            if force or self._dot_cache.get(key) != state:
-                self._dot_cache[key] = state
-                it.setIcon(0, level_icon(lvl, 5) if lvl else self._dot("ok" if state == 0 else "muted"))
-        if getattr(self, "nav_alarms", None) is not None:
-            act = eng.count()
-            text = "Alarms" + (f"  ·  {act} active" if act else "")
-            if self.nav_alarms.text(0) != text:
-                self.nav_alarms.setText(0, text)
-                self.nav_alarms.setForeground(0, QBrush(QColor(T["bad"])) if act else QBrush())
-        for t in self.project.topics:
-            it = self.ptree_topics.get(t.id)
-            state = self._topic_state(t)
-            if it is not None and (force or self._dot_cache.get(t.id) != state):
-                it.setIcon(0, self._dot(state)); self._dot_cache[t.id] = state
-        if getattr(self, "nav_conn", None) is not None:
-            want = self.mqtt_panel.btn.text() == "Disconnect"
-            state = "ok" if self.mqtt.is_connected else ("warn" if want else "muted")
-            text = (f"Connection · {self.mqtt_panel.host.currentText()}"
-                    if self.mqtt.is_connected else "Connection · offline")
-            if force or self._dot_cache.get("__conn") != state or self.nav_conn.text(0) != text:
-                self.nav_conn.setIcon(0, self._dot(state)); self.nav_conn.setText(0, text)
-                self._dot_cache["__conn"] = state
-
-    def _apply_nav_filter(self, text: str):
-        text = text.strip().lower()
-
-        def walk(it) -> bool:
-            kids = [walk(it.child(i)) for i in range(it.childCount())]
-            show = not text or text in it.text(0).lower() or any(kids)
-            it.setHidden(not show)
-            if text and any(kids):
-                it.setExpanded(True)
-            return show
-        for i in range(self.ptree.topLevelItemCount()):
-            walk(self.ptree.topLevelItem(i))
-
-    def _collapse_topics(self):
-        for it in self.ptree_topics.values():
-            it.setExpanded(False)
-
-    def _nav_data(self, it):
-        return it.data(0, Qt.ItemDataRole.UserRole) if it is not None else None
-
-    def _select_in_spec(self, tid: str, idx: int | None = None):
-        entry = self.tree_items.get(tid)
-        if entry is None:
-            return
-        it = entry[0] if idx is None else entry[1].get(idx, entry[0])
-        self.tree.setCurrentItem(it)
-        self.tree.scrollToItem(it)
-
-    def _nav_open(self, it):
-        d = self._nav_data(it)
-        if not d:
-            return
-        if d[0] == "doc":
-            self._show_doc(d[1])
-        elif d[0] == "project":
-            self._show_doc("logging")
-        elif d[0] == "view":
-            self._show_doc(f"view:{d[1]}")
-        elif d[0] in ("topic", "ch"):
-            self._show_doc("channels")
-            self._select_in_spec(d[1], d[2] if d[0] == "ch" else None)
-        elif d[0] == "conn":
-            self._show_connection()
-        elif d[0] == "lprof":
-            self._show_doc("logging")
-            self._select_log_profile(d[1])
-        elif d[0] == "alarms":
-            self._show_doc("alarms")
-            self.alarm_page.tabs.setCurrentIndex(0)
-        elif d[0] == "alarm":
-            self._show_doc("alarms")
-            self.alarm_page.select_alarm(d[1])
-        elif d[0] in ("aprofs", "aprof"):
-            self._show_doc("alarms")
-            self.alarm_page.tabs.setCurrentIndex(3)
-            if d[0] == "aprof":
-                self.alarm_page.select_profile(d[1])
-        elif d[0] in ("vars", "var"):
-            self._show_doc("variables")
-            if d[0] == "var":
-                self.var_page.select(d[1])
-
-    def _nav_double_clicked(self, it, _col):
-        d = self._nav_data(it)
-        if d and d[0] == "topic":
-            self._select_in_spec(d[1])
-            QTimer.singleShot(0, self._edit_topic)       # rebuilds trees: not inside the click
-        elif d and d[0] == "ch":
-            self._select_in_spec(d[1], d[2])
-            QTimer.singleShot(0, self._edit_channel)
-        elif d and d[0] == "lprof":
-            QTimer.singleShot(0, lambda: self._edit_log_profile(d[1]))
-        elif d and d[0] == "alarm":
-            QTimer.singleShot(0, lambda: self.alarm_page.edit_alarm(d[1]))
-        elif d and d[0] == "aprof":
-            QTimer.singleShot(0, lambda: self.alarm_page.edit_profile(d[1]))
-        elif d and d[0] == "var":
-            QTimer.singleShot(0, lambda: self.var_page.edit_variable(d[1]))
-
-    def _nav_topic(self) -> TopicCfg | None:
-        d = self._nav_data(self.ptree.currentItem())
-        if not d or d[0] not in ("topic", "ch"):
-            return None
-        self._select_in_spec(d[1])
-        return self._selected_topic()
-
-    def _nav_edit(self):
-        if self._nav_topic():
-            QTimer.singleShot(0, self._edit_topic)
-
-    def _nav_delete(self):
-        if self._nav_topic():
-            QTimer.singleShot(0, self._delete_topic)
-
-    def _toggle_enabled(self, tid: str, idx: int | None):
-        if not self._recording_guard():
-            return
-        t = next((x for x in self.project.topics if x.id == tid), None)
-        if t is None:
-            return
-        target = t if idx is None else t.channel(idx)
-        target.enabled = not target.enabled
-        self._mark_dirty()
-        QTimer.singleShot(0, self._topics_changed)
-
-    def _nav_menu(self, pos):
-        it = self.ptree.itemAt(pos)
-        d = self._nav_data(it) or ("none",)
-        m = QMenu(self)
-        if d[0] == "topic":
-            t = next(x for x in self.project.topics if x.id == d[1])
-            self.ptree.setCurrentItem(it)
-            m.addAction("Edit topic...", self._nav_edit)
-            m.addAction("Disable" if t.enabled else "Enable", lambda: self._toggle_enabled(t.id, None))
-            m.addSeparator()
-            m.addAction("Delete topic", self._nav_delete)
-        elif d[0] == "ch":
-            t = next(x for x in self.project.topics if x.id == d[1])
-            c = t.channel(d[2])
-            m.addAction("Edit channel...", lambda: self._nav_double_clicked(it, 0))
-            m.addAction("Disable channel" if c.enabled else "Enable channel",
-                        lambda: self._toggle_enabled(t.id, c.index))
-        elif d[0] == "conn":
-            m.addAction(self.act_connect)
-            m.addAction("Connection settings...", self._show_connection)
-        elif d[0] in ("views", "view"):
-            if d[0] == "view":
-                page = self.view_pages.get(d[1])
-                m.addAction("Open", lambda: self._show_doc(f"view:{d[1]}"))
-                m.addAction("View properties...", lambda: self.view_properties(page))
-                m.addAction("Delete view", lambda: self.delete_view(page))
-                m.addSeparator()
-            m.addAction("New view...", self._new_view)
-        elif d[0] == "lprof" or tuple(d[:2]) == ("doc", "logging"):
-            self._log_profile_menu(m, self._log_profile(d[1]) if d[0] == "lprof" else None)
-        elif d[0] in ("alarms", "alarm", "aprofs", "aprof"):
-            pg_ = self.alarm_page
-            if d[0] == "alarm":
-                a = next((x for x in self.project.alarms if x["id"] == d[1]), None)
-                m.addAction("Edit alarm...", lambda: QTimer.singleShot(0, lambda: pg_.edit_alarm(d[1])))
-                m.addAction("Disable" if a and a["enabled"] else "Enable", lambda: pg_.toggle_alarm(d[1]))
-                m.addAction("Delete alarm", lambda: (pg_.select_alarm(d[1]), pg_.delete_alarm()))
-                m.addSeparator()
-            elif d[0] == "aprof":
-                pf = next((x for x in self.project.alarm_profiles if x["id"] == d[1]), None)
-                m.addAction("Edit profile...", lambda: QTimer.singleShot(0, lambda: pg_.edit_profile(d[1])))
-                m.addAction("Disable" if pf and pf["enabled"] else "Enable", lambda: pg_.toggle_profile(d[1]))
-                m.addAction("Send test", lambda: pf and self.test_profile(pf))
-                m.addAction("Delete profile", lambda: (pg_.select_profile(d[1]), pg_.delete_profile()))
-                m.addSeparator()
-            if d[0] in ("aprofs", "aprof"):
-                add = m.addMenu("Add notification profile")
-                for k, text in ar.PROFILE_KINDS.items():
-                    add.addAction(text, lambda kk=k: (self._show_doc("alarms"), pg_.add_profile(kk)))
-            else:
-                m.addAction("Add alarm...", lambda: self._alarm_action("add"))
-        elif d[0] in ("vars", "var"):
-            vp = self.var_page
-            if d[0] == "var":
-                v = next((x for x in self.project.variables if x["id"] == d[1]), None)
-                m.addAction("Edit variable...", lambda: QTimer.singleShot(0, lambda: vp.edit_variable(d[1])))
-                m.addAction("Disable" if v and v["enabled"] else "Enable", lambda: vp.toggle(d[1]))
-                m.addAction("Delete variable", lambda: (self._show_doc("variables"), vp.select(d[1]),
-                                                        vp.delete_variable()))
-                m.addAction("Add alarm for this variable...",
-                            lambda: self._alarm_action("add", list(vr.var_key(d[1]))))
-                m.addSeparator()
-            add = m.addMenu("Add variable")
-            for k, text in vr.KINDS.items():
-                add.addAction(text + "...", lambda kk=k: (self._show_doc("variables"), vp.add_variable(kk)))
-        else:
-            m.addAction("Add topic...", self._add_topic)
-        if d[0] == "ch":
-            m.addAction("Add alarm for this channel...", lambda: self._alarm_action("add", (d[1], d[2])))
-            m.addAction("Add statistic variable of this channel...",
-                        lambda: self._var_action("add", [d[1], d[2]]))
-        free = ("conn", "views", "view", "alarms", "alarm", "aprofs", "aprof")
-        for a in m.actions():
-            a.setEnabled(a.isEnabled() and (self.recorder is None or d[0] in free
-                                            or a.text().startswith("Add alarm")))
-        m.exec(self.ptree.viewport().mapToGlobal(pos))
-
-    # ---------------------------------------------------------------- sessions (Data tab)
-    def _refresh_sessions(self):
-        tree = getattr(self, "stree", None)
-        if tree is None:
-            return
-        tree.clear()
-        folder = self.project.logging.folder
-        rows = []
-        try:
-            entries = [e for e in os.scandir(folder) if e.is_dir()]
-        except OSError:
-            entries = []
-        for e in entries:
-            pj = os.path.join(e.path, "project.json")
-            if not os.path.isfile(pj):
-                continue
-            try:
-                with open(pj, encoding="utf-8") as f:
-                    info = json.load(f)
-            except (OSError, ValueError):
-                continue
-            rows.append((info.get("start_unix", 0), e, info))
-        for start, e, info in sorted(rows, key=lambda r: r[0], reverse=True):
-            running = info.get("running")
-            dur = "recording..." if running else time.strftime("%H:%M:%S", time.gmtime(info.get("duration_s", 0)))
-            it = QTreeWidgetItem([info.get("project", {}).get("name", e.name),
-                                  time.strftime("%d %b %H:%M", time.localtime(start)) if start else "-",
-                                  dur])
-            it.setData(0, Qt.ItemDataRole.UserRole, e.path)
-            tip = f"{e.path}\nFormat: {info.get('format', '-')}" + (" + raw .wpk" if info.get("keep_raw") else "")
-            for c in range(3):
-                it.setToolTip(c, tip)
-            it.setIcon(0, make_icon("database", T["muted"]))
-            if running:
-                it.setIcon(0, self._dot("bad"))
-            tree.addTopLevelItem(it)
-        if not rows:
-            it = QTreeWidgetItem(["No recordings yet", "", ""])
-            it.setForeground(0, QBrush(QColor(T["muted"])))
-            it.setFlags(Qt.ItemFlag.NoItemFlags)
-            it.setToolTip(0, folder)
-            tree.addTopLevelItem(it)
-
-    def _session_menu(self, pos):
-        it = self.stree.itemAt(pos)
-        path = it.data(0, Qt.ItemDataRole.UserRole) if it else None
-        if not path:
-            return
-        m = QMenu(self)
-        m.addAction("Open folder", lambda: self._open_path(path))
-        m.addAction("Copy path", lambda: QApplication.clipboard().setText(path))
-        m.exec(self.stree.viewport().mapToGlobal(pos))
+        if hasattr(self, "conn_page"):
+            self.conn_page.update_states()
 
     # ================================================================ recording
     def _start_recording(self):
@@ -1673,18 +1846,9 @@ class DaqWindow(AppWindow):
                 profiles.append({**copy.deepcopy(pr), "topics": tps})
         if not profiles:
             self.banners.post("rec", "Nothing to record: enable a logging profile and at least one "
-                                     "topic with an enabled channel.", "warn",
+                                     "device with an enabled tag.", "warn",
                               "Open", lambda: self._show_doc("logging"))
             return
-        for pr in profiles:
-            if pr["format"] != "TDMS":
-                continue
-            for tp in pr["topics"]:
-                ch = [c[1] for c in tp["channels"]]
-                if len(set(ch)) != len(ch) or "Time" in ch or "Samples" in ch:
-                    self.banners.post("rec", f"Profile '{pr['name']}', topic '{tp['name']}': channel names "
-                                             "must be unique and not 'Time' / 'Samples' for TDMS.", "warn")
-                    return
         lg = self.project.logging
         try:
             os.makedirs(lg.folder, exist_ok=True)
@@ -1698,15 +1862,14 @@ class DaqWindow(AppWindow):
         self.banners.dismiss("rec")
         if self.ml_logger is not None:
             self.ml_logger.event("record_start", "Record", rec.dir)
-        self._rebuild_tree(); self._update_lock(); self._fill_log_profiles()
+        self._update_lock(); self._fill_log_profiles()
         self._refresh_sessions()
         self._log(f"Recording started -> {rec.dir}  ({len(profiles)} profile(s): " +
                   ", ".join(f"{p['name']} [{p['type']}, {p['format']}]" for p in profiles) + ")")
         self.set_status(f"Recording to {rec.dir}", "ok")
-        if not self.mqtt.is_connected:
-            self.banners.post("rec", "Recording, but not connected to the broker - "
-                                     "nothing is being received.", "warn",
-                              "Connect", self._connect_from_empty)
+        if not self.drivers.any_running:
+            self.banners.post("rec", "Recording, but communication is stopped - nothing is being "
+                                     "received.", "warn", "Start", self._start_all)
         self._update_stats()
 
     def _stop_recording(self):
@@ -1719,10 +1882,9 @@ class DaqWindow(AppWindow):
         self.busy(False)
         if self.ml_logger is not None:
             self.ml_logger.event("record_stop", "Record", rec.dir)
-        self._rebuild_tree(); self._update_lock(); self._fill_log_profiles()
+        self._update_lock(); self._fill_log_profiles()
         dur = time.strftime("%H:%M:%S", time.gmtime(rec.elapsed))
-        msg = (f"Saved {rec.packets} packets, {rec.samples:,} samples/channel in {dur} "
-               f"({_fmt_bytes(rec.disk_bytes())})")
+        msg = (f"Saved {rec.packets:,} blocks / scans in {dur} ({_fmt_bytes(rec.disk_bytes())})")
         self._log(f"Recording stopped. {msg} -> {rec.dir}")
         self.last_session.setText(f"Last recording: {_brk(rec.dir)}")
         self._refresh_sessions()
@@ -1745,14 +1907,14 @@ class DaqWindow(AppWindow):
     def _ml_start(self):
         if self.ml_logger is not None:
             return
-        topics = [{"id": t.id, "name": t.name, "topic": t.topic,
-                   "channels": [(c.index, c.name, c.unit) for c in t.channels if c.enabled]}
-                  for t in self.project.topics if t.enabled]
+        topics = [{"id": d.id, "name": d.name, "topic": d.topic, "virtual": not d.wave,
+                   "channels": [(t.index, t.name, t.unit) for t in d.tags if t.enabled]}
+                  for d in self.project.devices if d.enabled]
         topics = [t for t in topics if t["channels"]]
         s = self.project.ml_log
         if not topics:
-            self.banners.post("ml", "AI/ML data log: nothing to log - enable a topic with at least one "
-                                    "enabled channel.", "warn", "Open", lambda: self._show_doc("channels"))
+            self.banners.post("ml", "AI/ML data log: nothing to log - enable a device with at least one "
+                                    "enabled tag.", "warn", "Open", lambda: self._show_doc("connectivity"))
             self._ml_update_ui()
             return
         try:
@@ -1765,7 +1927,7 @@ class DaqWindow(AppWindow):
             return
         self.ml_logger = lg
         self.banners.dismiss("ml")
-        self._log(f"AI/ML data log started -> {lg.root}  ({len(topics)} topic(s), "
+        self._log(f"AI/ML data log started -> {lg.root}  ({len(topics)} device(s), "
                   f"{fmt_interval(lg.period)} files, {lg.compression})")
         if lg.compression != s["compression"]:
             self._log("zstd is not available (needs Python 3.14+ or 'pip install zstandard') - using gzip")
@@ -1778,14 +1940,14 @@ class DaqWindow(AppWindow):
             with self._waiting():
                 lg.stop()                        # closes and compresses the open files
             self._log(f"AI/ML data log stopped. {lg.files} files, {_fmt_bytes(lg.disk_bytes)}, "
-                      f"{lg.packets:,} packets -> {lg.root}")
+                      f"{lg.packets:,} blocks -> {lg.root}")
             if lg.error or lg.dropped:
-                self.banners.post("ml", f"AI/ML data log finished with problems: {lg.dropped} packets "
+                self.banners.post("ml", f"AI/ML data log finished with problems: {lg.dropped} blocks "
                                         f"dropped. {lg.error or ''}", "bad")
         self._ml_update_ui()
 
     def _ml_restart(self):
-        """Project, topics or settings changed while logging: new files, new meta.json."""
+        """Project, devices or settings changed while logging: new files, new meta.json."""
         if self.ml_logger is not None:
             self._ml_stop()
             self._ml_start()
@@ -1826,119 +1988,111 @@ class DaqWindow(AppWindow):
         os.makedirs(d, exist_ok=True)
         self._open_path(d)
 
-    # ================================================================ MQTT
-    def _connect_from_empty(self):
-        if self.mqtt_panel.btn.text() != "Disconnect":
-            self.mqtt_panel.btn.click()
-
-    def _on_connected(self):
-        self.banners.dismiss("conn")
-        self.toast.popup(f"Connected to {self.mqtt_panel.host.currentText()}")
-        self._sync_conn()
-
-    def _on_mqtt_status(self, s: str):
-        self._log(s)
-        low = s.lower()
-        if s.startswith(("Connected", "Subscribed")):
-            self.set_status(s, "ok")
-        elif any(k in low for k in ("refused", "cannot", "no reply", "error", "failed")):
-            self.set_status(s, "bad")
-            if not low.startswith("connect attempt"):
-                self.banners.post("conn", s, "bad", "Connection settings", self._show_connection)
-        else:
-            self.set_status(s)
-        self._sync_conn()
-
-    def _sync_conn(self, *_):
-        want = self.mqtt_panel.btn.text() == "Disconnect"
-        if self.act_connect.text() != ("Disconnect" if want else "Connect"):
-            self.act_connect.setText("Disconnect" if want else "Connect")
-            self._set_tip(self.act_connect)
-        busy = want and not self.mqtt.is_connected
-        if busy != self._busy_on:
-            self._busy_on = busy
-            self.busy(busy)
-            if busy:                                    # arrow + spinner while connecting
-                QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
-            else:
-                QApplication.restoreOverrideCursor()
-        if not want:
-            self.banners.dismiss("conn")
-
-    def _on_payload_net_thread(self, topic: str, payload: bytes):
-        """paho thread: timestamp and queue only."""
-        try:
-            self.q.put_nowait((time.time(), topic, bytes(payload)))
-        except queue.Full:
-            self.overflow += 1
-
-    def _route(self, topic: str) -> list[TopicCfg]:
-        ids = self._routes.get(topic)
-        if ids is None:
-            ids = self._routes[topic] = [
-                t.id for t in self.project.topics
-                if t.enabled and (t.topic == topic or mqtt.topic_matches_sub(t.topic, topic))]
-        return [t for t in self.project.topics if t.id in ids]
-
     # ================================================================ processing
     def _drain_and_draw(self):
+        """GUI timer: drain the driver queue - scans, waveform packets, status, write results."""
         n, new_ch = 0, False
-        while n < 3000:
+        q = self.drivers.q
+        while n < 4000:
             try:
-                rx, topic, buf = self.q.get_nowait()
+                msg = q.get_nowait()
             except queue.Empty:
                 break
             n += 1
-            cfgs = self._route(topic)
-            if not cfgs:
+            kind, did = msg[0], msg[1]
+            dev = self.project.device(did)
+            if kind == "status":
+                self._on_device_status(dev, msg[2], msg[3])
                 continue
-            try:
-                blk = wp.decode(buf)
-            except wp.PacketError as e:
-                for cfg in cfgs:
-                    st = self.streams.setdefault(cfg.id, TopicStream())
+            if kind == "write":
+                self._log(f"{dev.name if dev else did}: write {'OK' if msg[2] else 'FAILED'} - {msg[3]}")
+                if not msg[2]:
+                    self.toast.popup(f"Write failed: {msg[3]}")
+                continue
+            if dev is None or not dev.enabled:
+                continue
+            if kind == "scan":
+                _, _, t, dt, idx, vals = msg
+                if not idx:
+                    continue
+                seq = self._scan_seq[did] = self._scan_seq.get(did, -1) + 1
+                raw = np.array([np.nan if v is None else v for v in vals], dtype=float)
+                blk = ScanBlock(seq, t, dt, idx, raw)
+                self._ingest(dev, t, b"", blk)
+            elif kind == "wave":
+                rx, buf = msg[2], msg[3]
+                try:
+                    blk = wp.decode(buf)
+                except wp.PacketError as e:
+                    st = self.streams.setdefault(did, TopicStream())
                     if "CRC" in str(e):
                         st.crc += 1
                     else:
                         st.bad += 1
-                continue
-            if self.t_ref is None:
-                self.t_ref = blk.t0
-            for cfg in cfgs:
-                st = self.streams.setdefault(cfg.id, TopicStream())
-                for row, ch in enumerate(blk.channels):
-                    st.raw_mean[ch] = float(blk.y[row].mean())
-                sblk = self._scaled(cfg, blk)            # engineering values (plots, files)
-                st.feed(sblk, self.t_ref)
-                for row, ch in enumerate(sblk.channels):  # alarms see every sample of the block
-                    self.alarm_engine.feed(cfg.id, ch, rx, sblk.y[row])
-                self._compute_variables(cfg.id, rx, sblk)
-                for ch in blk.channels:                  # auto-add unseen channels
-                    if cfg.channel(ch) is None:
-                        cfg.channels.append(ChannelCfg(ch, f"CH{ch + 1}"))
-                        cfg.channels.sort(key=lambda c: c.index)
+                    continue
+                self._ingest(dev, rx, buf, blk)
+                for ch in blk.channels:                  # auto-add unseen packet channels
+                    if dev.tag(ch) is None:
+                        dev.tags.append(TagCfg(ch, f"CH{ch + 1}", kind="array"))
+                        dev.tags.sort(key=lambda c: c.index)
                         new_ch = True
-                if self.recorder is not None:
-                    self.recorder.put(cfg.id, rx, buf, sblk)
-                if self.ml_logger is not None:
-                    self.ml_logger.put(cfg.id, rx, buf, sblk)
         if new_ch:
             self._mark_dirty()
             if self.recorder is None:
-                self._rebuild_tree(); self._rebuild_plots()
+                self._structure_changed(); self.conn_page.refresh()
         self._draw()
 
+    def _ingest(self, dev: DeviceCfg, rx: float, payload: bytes, blk):
+        """One block of a device: scale, buffer, alarms, variables, statistics, files."""
+        if self.t_ref is None:
+            self.t_ref = blk.t0
+        st = self.streams.setdefault(dev.id, TopicStream())
+        for row, ch in enumerate(blk.channels):
+            yr = blk.y[row]
+            m = yr[np.isfinite(yr)]
+            if m.size:
+                st.raw_mean[ch] = float(m.mean())
+        sblk = self._scaled(dev, blk)                    # engineering values (plots, files)
+        st.feed(sblk, self.t_ref)
+        t_abs = None
+        for row, ch in enumerate(sblk.channels):         # alarms see every sample of the block
+            self.alarm_engine.feed(dev.id, ch, rx, sblk.y[row])
+            if self.stats.wants((dev.id, ch)):
+                if t_abs is None:
+                    t_abs = sblk.t0 + np.arange(sblk.n) * sblk.dt
+                self.stats.feed((dev.id, ch), t_abs, sblk.y[row])
+        self._compute_variables(dev.id, rx, sblk)
+        if self.recorder is not None:
+            self.recorder.put(dev.id, rx, payload, sblk)
+        if self.ml_logger is not None:
+            self.ml_logger.put(dev.id, rx, payload, sblk)
+
+    def _on_device_status(self, dev, state: str, text: str):
+        if dev is None:
+            return
+        self._log(f"{dev.name}: {state}" + (f" - {text}" if text else ""))
+        if state == "error":
+            self.banners.post(f"dev:{dev.id}", f"{dev.name}: {text}", "bad", "Device",
+                              lambda: (self._show_doc("connectivity"), self.conn_page.refresh(("device", dev.id))))
+        elif state == "online":
+            self.banners.dismiss(f"dev:{dev.id}")
+            self.set_status(f"{dev.name} online - {text}", "ok")
+        self.conn_page.update_states()
+        self._update_nav_dots()
+        if self._prop_key == ("device", dev.id):
+            self._refresh_properties()
+
     def _draw(self, force: bool = False):
-        enabled = [t for t in self.project.topics if t.enabled]
-        has_data = any(self.streams.get(t.id) and self.streams[t.id].rings for t in enabled)
+        enabled = [(d, t) for d in self.project.devices if d.enabled for t in d.tags if t.enabled]
+        has_data = any(self.streams.get(d.id) and self.streams[d.id].rings for d, _ in enabled)
         want = 0 if not enabled else (2 if has_data else 1)
         if self.screen_stack.currentIndex() != want:
             self.screen_stack.setCurrentIndex(want)
         if not has_data or (self.act_pause.isChecked() and not force):
             return
         win = self.window_s.value()
-        t_end = max((r.ordered()[0][-1] for t in enabled if t.id in self.streams
-                     for r in self.streams[t.id].rings.values() if r.count), default=0)
+        t_end = max((r.ordered()[0][-1] for st in self.streams.values()
+                     for r in st.rings.values() if r.count), default=0)
         page = self.doc_tabs.currentWidget()
         if isinstance(page, dv.ViewPage):           # only the visible document is redrawn
             page.draw(t_end, win)
@@ -1958,7 +2112,7 @@ class DaqWindow(AppWindow):
                 p.setXRange(t_end - win, t_end, padding=0)
 
     def _on_manual_range(self, *_):
-        """User zoomed / panned a Screen plot: hold the range until Reset zoom."""
+        """User zoomed / panned a Quick View plot: hold the range until Reset zoom."""
         if not self._zoomed:
             self._zoomed = True
             self.zoom_btn.setVisible(True)
@@ -1988,18 +2142,18 @@ class DaqWindow(AppWindow):
         self.glw.setBackground(T["panel"])
         self.glw.clear(); self.plots.clear(); self.curves.clear()
         self._fixed_y = {}
-        per_topic = self.layout_mode.currentText() == "Per topic"
-        groups = []          # [(title, [(topic, channel)])]
+        per_dev = self.layout_mode.currentText() == "Per device"
+        groups = []          # [(title, [(device, tag)])]
         hidden = {tuple(x) for x in self.project.quick_hidden}
-        for t in self.project.topics:
-            chans = [c for c in t.channels if c.enabled and (t.id, c.index) not in hidden] if t.enabled else []
-            if not chans:
+        for d in self.project.devices:
+            tags = [t for t in d.tags if t.enabled and (d.id, t.index) not in hidden] if d.enabled else []
+            if not tags:
                 continue
-            if per_topic:
-                groups.append((t.name, [(t, c) for c in chans]))
+            if per_dev:
+                groups.append((d.name, [(d, t) for t in tags]))
             else:
-                groups += [(c.name, [(t, c)]) for c in chans]
-        if not per_topic:   # prefix the topic only where channel names clash
+                groups += [(t.name, [(d, t)]) for t in tags]
+        if not per_dev:   # prefix the device only where tag names clash
             names = [g[0] for g in groups]
             groups = [((f"{m[0][0].name}·{n}" if names.count(n) > 1 else n), m)
                       for n, m in groups]
@@ -2009,31 +2163,32 @@ class DaqWindow(AppWindow):
             row = i // cols
             p = self.glw.addPlot(row=row, col=i % cols)
             self._style_plot(p)
-            if per_topic:
+            if per_dev:
                 p.setTitle(title, color=T["text"], size="10pt")
                 dv.add_legend(p)
-                units = {c.unit for _, c in members if c.unit}
+                units = {t.unit for _, t in members if t.unit}
                 if len(units) == 1:
                     p.setLabel("left", units.pop(), color=T["muted"])
             else:
-                t, c = members[0]
-                p.setLabel("left", f"{title}" + (f" ({c.unit})" if c.unit else ""),
-                           color=ch_color(c))
+                d, t = members[0]
+                p.setLabel("left", f"{title}" + (f" ({t.unit})" if t.unit else ""), color=tag_color(t))
             if first is None:
                 first = p
             else:
                 p.setXLink(first)
             if i >= len(groups) - cols:                 # x axis only on the last row
-                p.setLabel("bottom", "Time since first sample", "s", color=T["text"])
+                p.setLabel("bottom", "Time since first value", "s", color=T["text"])
             else:
                 p.hideAxis("bottom")
-            fixed = [(c.y_min, c.y_max) for _, c in members if c.y_min is not None]
-            if len(fixed) == len(members):               # every channel fixed -> union range
+            fixed = [(t.y_min, t.y_max) for _, t in members if t.y_min is not None]
+            if len(fixed) == len(members):               # every tag fixed -> union range
                 self._fixed_y[id(p)] = (min(a for a, _ in fixed), max(b for _, b in fixed))
-            for t, c in members:
-                label_txt = c.name + (f" [{c.unit}]" if c.unit else "")
-                self.curves[(t.id, c.index)] = p.plot(
-                    pen=pg.mkPen(ch_color(c), width=1.5), name=label_txt)
+            for d, t in members:
+                label_txt = t.name + (f" [{t.unit}]" if t.unit else "")
+                self.curves[(d.id, t.index)] = p.plot(
+                    pen=pg.mkPen(tag_color(t), width=1.5), name=label_txt,
+                    symbol="o" if t.kind == "number" and d.scan_ms >= 1000 else None, symbolSize=3,
+                    symbolPen=None, symbolBrush=tag_color(t))
             self.plots.append(p)
         self._zoomed = False
         self.zoom_btn.setVisible(False)
@@ -2043,23 +2198,23 @@ class DaqWindow(AppWindow):
         self._draw(force=True)
 
     def _fill_quick_menu(self):
-        """Quick View > Channels: one check per enabled channel, plus show / hide all."""
+        """Quick View > Tags: one check per enabled tag, plus show / hide all."""
         m = self.qv_menu
         m.clear()
         hidden = {tuple(x) for x in self.project.quick_hidden}
         m.addAction("Show all", lambda: self._set_quick_hidden([]))
         m.addAction("Hide all", lambda: self._set_quick_hidden(
-            [[t.id, c.index] for t in self.project.topics for c in t.channels]))
-        for t in self.project.topics:
-            if not t.enabled:
+            [[d.id, t.index] for d in self.project.devices for t in d.tags]))
+        for d in self.project.devices:
+            if not d.enabled:
                 continue
-            m.addSection(t.name)
-            for c in t.channels:
-                if not c.enabled:
+            m.addSection(d.name)
+            for t in d.tags:
+                if not t.enabled:
                     continue
-                a = m.addAction(swatch(ch_color(c)), c.name + (f"  [{c.unit}]" if c.unit else ""))
-                a.setCheckable(True); a.setChecked((t.id, c.index) not in hidden)
-                a.toggled.connect(lambda on, k=(t.id, c.index): self._toggle_quick(k, on))
+                a = m.addAction(swatch(tag_color(t)), t.name + (f"  [{t.unit}]" if t.unit else ""))
+                a.setCheckable(True); a.setChecked((d.id, t.index) not in hidden)
+                a.toggled.connect(lambda on, k=(d.id, t.index): self._toggle_quick(k, on))
 
     def _toggle_quick(self, key, on: bool):
         hidden = [x for x in self.project.quick_hidden if tuple(x) != key]
@@ -2080,35 +2235,27 @@ class DaqWindow(AppWindow):
             else:
                 p.enableAutoRange(axis="y", enable=self.autoscale.isChecked())
 
-    # ================================================================ stats
+    # ================================================================ stats (twice a second)
     def _update_stats(self):
         now = time.perf_counter()
         dt = now - getattr(self, "_stat_t", now - 0.5) or 0.5
         self._stat_t = now
-        enabled = [t for t in self.project.topics if t.enabled]
-        rx = lost = errs = 0
-        self.topic_table.setRowCount(len(enabled))
-        for row, t in enumerate(enabled):
-            st = self.streams.get(t.id)
-            if st:
-                st.pps, st.win_pkts = st.win_pkts / dt, 0
-                rx += st.pkts; lost += st.lost; errs += st.crc + st.bad
-            vals = [t.name, f"{st.pps:.1f}" if st else "-",
-                    f"{st.fs:g} S/s" if st and st.fs else "-",
-                    str(st.lost) if st else "-", f"{st.crc}/{st.bad}" if st else "-"]
-            for col, v in enumerate(vals):
-                it = QTableWidgetItem(v)
-                if col:
-                    it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.topic_table.setItem(row, col, it)
-
+        if self._stat_dirty:
+            self._stat_require()
+        rate = errs = lost = 0
+        for st in self.streams.values():
+            st.pps, st.win_pkts = st.win_pkts / dt, 0
+            rate += st.pps * max(1, len(st.rings))
+            lost += st.lost; errs += st.crc + st.bad
+        for d in self.project.devices:
+            drv = self.drivers.driver(d.id)
+            if drv is not None:
+                errs += drv.errors
         rec = self.recorder
         c = self.cards
         if rec:
             c["elapsed"].set_value(time.strftime("%H:%M:%S", time.gmtime(rec.elapsed)))
             c["size"].set_value(_fmt_bytes(rec.disk_bytes()))
-            c["samples"].set_value(f"{rec.samples:,}")
-            c["packets"].set_value(f"{rec.packets:,}")
             self.rec_label.setText(f"● REC  {time.strftime('%H:%M:%S', time.gmtime(rec.elapsed))}")
             set_prop(self.rec_label, "level", "rec")
             self.chip_rec.set(f"Recording ×{len(rec.profiles)}" if len(rec.profiles) > 1 else "Recording", "bad")
@@ -2120,81 +2267,64 @@ class DaqWindow(AppWindow):
                 self.rec_label.setText("Ready")
                 set_prop(self.rec_label, "level", "")
             self.chip_rec.set("Not recording", "info")
+            c["elapsed"].set_value("-")
+            c["size"].set_value("-")
         lg = self.ml_logger
         if lg:
             self.ml_label.setText(f"AI log  {lg.files} file{'' if lg.files == 1 else 's'} · {_fmt_bytes(lg.disk_bytes)}")
-            self.ml_label.setToolTip(f"AI/ML data log -> {lg.root}\n{lg.packets:,} packets, "
+            self.ml_label.setToolTip(f"AI/ML data log -> {lg.root}\n{lg.packets:,} blocks, "
                                      f"{lg.dropped} dropped, {lg.late} late" +
                                      (f"\nLast file: {lg.last_file}" if lg.last_file else ""))
             if lg.error:
                 self.banners.post("ml", f"AI/ML data log write error: {lg.error}", "bad")
-        c["rx"].set_value(f"{rx:,}")
-        c["lost"].set_value(f"{lost} / {sum(s.crc for s in self.streams.values())} / "
-                            f"{sum(s.bad for s in self.streams.values())}")
-        if not self.mqtt.is_connected:
-            self.chip_conn.set("Disconnected", "info")
-        elif any(self.streams.get(t.id) and self.streams[t.id].pps > 0 for t in enabled):
-            self.chip_conn.set("Live", "ok")
+        c["rx"].set_value(f"{rate:,.0f}")
+        c["lost"].set_value(f"{errs} / {lost}")
+        states = [self.drivers.state(d.id)[0] for d in self.project.devices if self.drivers.running(d.id)]
+        if not states:
+            self.chip_conn.set("Stopped", "info")
+        elif all(s == "online" for s in states):
+            self.chip_conn.set(f"Online ×{len(states)}", "ok")
+        elif any(s == "error" for s in states):
+            self.chip_conn.set(f"{states.count('error')} error(s)", "bad")
         else:
-            self.chip_conn.set("Waiting for data", "warn")
-        narrow = self.topic_table.width() < 380          # laptop: keep the columns that matter
-        for col in (2, 4):
-            self.topic_table.setColumnHidden(col, narrow)
-        self.lbl_topics.setText(f"{len(enabled)}/{len(self.project.topics)} topics enabled")
-        self.lbl_rx.setText(f"{rx:,} packets" + (f" · {self.overflow} queue drops" if self.overflow else ""))
+            self.chip_conn.set("Connecting", "warn")
+        n_tags = sum(1 for d in self.project.devices if d.enabled for t in d.tags if t.enabled)
+        self.lbl_topics.setText(f"{len(states)}/{len(self.project.devices)} devices · {n_tags} tags")
+        self.lbl_rx.setText(f"{rate:,.0f} values/s" + (f" · {self.drivers.q.qsize()} queued" if
+                                                      self.drivers.q.qsize() > 1000 else ""))
         self.alarm_engine.tick(time.time())
         self._drain_notifier()
         self._update_alarm_indicator()
         self.alarm_page.update_live()
         self.var_page.update_live()
-        self._update_tree_values()
         self._update_nav_dots()
         page = self.doc_tabs.currentWidget()
         if isinstance(page, dv.ViewPage):
             page.update_values()
-        self._sync_conn()
+        elif page is self.conn_page:
+            self.conn_page.update_live()
+            self.conn_page.update_states()
+        self._sync_comm()
 
     def _log(self, s: str):
         self.log.appendPlainText(time.strftime("%H:%M:%S  ") + s)
 
-    # ================================================================ channels: edit, scaling, stats, alarms
-    def _selected_channel(self):
-        it = self.tree.currentItem() if hasattr(self, "tree") else None
-        d = it.data(0, Qt.ItemDataRole.UserRole) if it else None
-        if not d or d[0] != "ch":
-            return None
-        t = next((x for x in self.project.topics if x.id == d[1]), None)
-        return (t, t.channel(d[2])) if t else None
-
-    def _edit_channel(self):
-        sel = self._selected_channel()
-        if sel is None or not self._recording_guard():
-            return
-        t, c = sel
-        st = self.streams.get(t.id)
-        dlg = ChannelDialog(self, t.name, c, COLORS[c.index % len(COLORS)],
-                               lambda: st.raw_mean.get(c.index) if st else None, t.topic, alarms=False)
-        if dlg.exec():
-            dlg.apply(c)
-            self._mark_dirty()
-            QTimer.singleShot(0, self._topics_changed)     # tree, plots, views, scalers
-            self.set_status(f"Channel '{c.name}' updated", "ok")
-
+    # ================================================================ scaling
     def _rebuild_scalers(self):
         self._scalers = {}
-        for t in self.project.topics:
-            for c in t.channels:
+        for d in self.project.devices:
+            for t in d.tags:
                 try:
-                    f = cm.make_scaler(c.scale)
+                    f = cm.make_scaler(t.scale)
                 except ValueError as e:
-                    self._log(f"{t.name} · {c.name}: scaling ignored - {e}")
+                    self._log(f"{d.name} · {t.name}: scaling ignored - {e}")
                     f = None
                 if f is not None:
-                    self._scalers[(t.id, c.index)] = f
+                    self._scalers[(d.id, t.index)] = f
 
-    def _scaled(self, cfg, blk):
-        rows = [(r, self._scalers[(cfg.id, ch)]) for r, ch in enumerate(blk.channels)
-                if (cfg.id, ch) in self._scalers]
+    def _scaled(self, dev, blk):
+        rows = [(r, self._scalers[(dev.id, ch)]) for r, ch in enumerate(blk.channels)
+                if (dev.id, ch) in self._scalers]
         if not rows:
             return blk
         out = copy.copy(blk)
@@ -2204,29 +2334,25 @@ class DaqWindow(AppWindow):
                 out.y[r] = f(out.y[r])
             except Exception as e:                       # never let a formula stop acquisition
                 out.y[r] = np.nan
-                self._log(f"{cfg.name} CH{blk.channels[r] + 1}: formula error - {e}")
+                self._log(f"{dev.name} tag {blk.channels[r]}: formula error - {e}")
         return out
 
-    def _stats(self, st, idx: int, win: float):
+    def _stats_ring(self, st, idx: int, win: float, keys):
         ring = st.rings.get(idx)
         if ring is None or ring.count == 0:
-            return [None] * len(STAT_COLS)
+            return None
         t, y = ring.ordered()
-        y = y[np.searchsorted(t, t[-1] - win, side="left"):]
-        y = y[np.isfinite(y)]
-        if y.size == 0:
-            return [None] * len(STAT_COLS)
-        mn, mx = float(y.min()), float(y.max())
-        return [float(y.mean()), mn, mx, float(y.std()), float(np.sqrt(np.mean(y * y))), mx - mn]
+        i = np.searchsorted(t, t[-1] - win, side="left")
+        return {an.STAT_LABEL[k]: v for k, v in an.stats(y[i:], an.sample_rate(t[i:]), keys).items()}
 
-    # ================================================================ alarms (daq_alarms.py)
+    # ================================================================ alarms (alarm_rules.py)
     def _alarm_describe(self, tid: str, idx: int):
         if vr.is_var(tid):
             v = self._var(tid)
             return (f"Variables · {v['name']}" if v else "(deleted variable)"), (v.get("unit", "") if v else "")
-        t = next((x for x in self.project.topics if x.id == tid), None)
-        c = t.channel(idx) if t else None
-        return (f"{t.name} · {c.name}" if c else "(deleted channel)"), (c.unit if c else "")
+        d = self.project.device(tid)
+        t = d.tag(idx) if d else None
+        return (f"{d.name} · {t.name}" if t else "(deleted tag)"), (t.unit if t else "")
 
     def _alarms_reload(self):
         """Definitions / profiles / settings changed (or the project): engine, page, tree."""
@@ -2247,6 +2373,9 @@ class DaqWindow(AppWindow):
         self._show_doc("alarms")
         if what == "add":
             QTimer.singleShot(0, lambda: self.alarm_page.add_alarm(channel))
+
+    def add_alarm_for(self, key):
+        self._alarm_action("add", tuple(key))
 
     def _on_alarm_event(self, ev: dict):
         unit = "s" if ev["type"] == "D" else ev["unit"]
@@ -2329,49 +2458,6 @@ class DaqWindow(AppWindow):
         self.act_alarms.setIcon(make_icon("bell", T[level or "text"]))
         self._set_tip(self.act_alarms)
 
-    def _columns_menu(self) -> QMenu:
-        m = QMenu(self)
-        for col, name in enumerate(SPEC_COLS):
-            a = m.addAction(name); a.setCheckable(True)
-            a.setChecked(not self.tree.isColumnHidden(col))
-            a.setEnabled(name not in LOCKED_COLS)
-            a.toggled.connect(lambda on, c=col: self._set_column(c, on))
-        m.aboutToShow.connect(lambda: [a.setChecked(not self.tree.isColumnHidden(i))
-                                       for i, a in enumerate(m.actions())])
-        return m
-
-    def _set_column(self, col: int, visible: bool):
-        self.tree.setColumnHidden(col, not visible)
-        QSettings().setValue("spec_hidden_cols",
-                             [n for i, n in enumerate(SPEC_COLS) if self.tree.isColumnHidden(i)])
-
-    def _spec_menu(self, pos):
-        it = self.tree.itemAt(pos)
-        if it is None:
-            return
-        self.tree.setCurrentItem(it)
-        d = it.data(0, Qt.ItemDataRole.UserRole)
-        m = QMenu(self)
-        if d[0] == "ch":
-            c = self._selected_channel()[1]
-            m.addAction("Edit channel...", lambda: QTimer.singleShot(0, self._edit_channel))
-            m.addAction("Disable" if c.enabled else "Enable", lambda: self._toggle_enabled(d[1], d[2]))
-        else:
-            t = self._selected_topic()
-            m.addAction("Edit topic...", lambda: QTimer.singleShot(0, self._edit_topic))
-            m.addAction("Disable" if t.enabled else "Enable", lambda: self._toggle_enabled(d[1], None))
-            m.addSeparator()
-            m.addAction("Delete topic", lambda: QTimer.singleShot(0, self._delete_topic))
-        m.addSeparator()
-        m.addMenu(self._columns_menu()).setText("Columns")
-        for a in m.actions()[:3]:
-            a.setEnabled(self.recorder is None)
-        m.exec(self.tree.viewport().mapToGlobal(pos))
-
-    def _update_spec_hint(self):
-        self.spec_hint.setText(f"Statistics over the last {self.window_s.value():g} s · "
-                               "double-click to edit · tick to enable")
-
     # ================================================================ documents (closable tabs)
     def _add_doc_tab(self, key: str, index: int | None = None):
         w, title, short, icon = self.docs[key]
@@ -2381,7 +2467,7 @@ class DaqWindow(AppWindow):
         i = self.doc_tabs.addTab(w, make_icon(icon, T["muted"]), text) if index is None \
             else self.doc_tabs.insertTab(index, w, make_icon(icon, T["muted"]), text)
         close = QToolButton(); close.setObjectName("tabClose"); close.setText("×")
-        close.setToolTip("Close tab (reopen from Project Files or the Project menu)")
+        close.setToolTip("Close tab (reopen from the Project tree or the Project menu)")
         close.clicked.connect(lambda _=False, wid=w: self._close_doc(wid))
         self.doc_tabs.tabBar().setTabButton(i, self.doc_tabs.tabBar().ButtonPosition.RightSide, close)
 
@@ -2403,6 +2489,9 @@ class DaqWindow(AppWindow):
             i = self.doc_tabs.indexOf(w)
             if i >= 0:
                 self.doc_tabs.setTabIcon(i, make_icon(icon, T["muted"]))
+        if hasattr(self, "act_connect"):
+            self.act_connect.setText("")             # re-tint the Start / Stop icon
+            self._sync_comm()
 
     @contextmanager
     def _waiting(self):
@@ -2414,14 +2503,14 @@ class DaqWindow(AppWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
-    # ================================================================ custom views (host API)
+    # ================================================================ views (host API of views.py)
     def channel_choices(self):
         out = []
-        for t in self.project.topics:
-            for c in t.channels:
-                out.append((t.id, c.index, f"{t.name} · {c.name}" + (f" [{c.unit}]" if c.unit else ""),
-                            ch_color(c), c.unit))
-        for v in self.project.variables:             # calculated channels
+        for d in self.project.devices:
+            for t in d.tags:
+                out.append((d.id, t.index, f"{d.name} · {t.name}" + (f" [{t.unit}]" if t.unit else ""),
+                            tag_color(t), t.unit))
+        for v in self.project.variables:             # calculated tags
             if v["enabled"]:
                 u = v.get("unit", "")
                 out.append((*vr.var_key(v["id"]), f"Variables · {v['name']}" + (f" [{u}]" if u else ""),
@@ -2434,39 +2523,124 @@ class DaqWindow(AppWindow):
         return ring.ordered() if ring is not None and ring.count else None
 
     def last_value(self, tid: str, idx: int):
+        """(latest engineering value or None when missing / bad quality, unit)."""
         st = self.streams.get(tid)
         val = st.last_vals.get(idx) if st else None
+        if val is not None and val != val:
+            val = None
         if vr.is_var(tid):
             v = self._var(tid)
             return val, (v.get("unit", "") if v else "")
-        t = next((x for x in self.project.topics if x.id == tid), None)
-        c = t.channel(idx) if t else None
-        return val, (c.unit if c else "")
+        t = self.project.tag(tid, idx)
+        return val, (t.unit if t else "")
 
     def view_changed(self):
         self._mark_dirty()
+        self._stat_dirty = True
+        QTimer.singleShot(0, self._refresh_properties)
 
-    def stat_values(self, tid: str, idx: int, win: float | None = None, keys=None):
-        """{column label: value} of analysis.STATS over the window (default: Screen window)."""
+    def stat_values(self, tid: str, idx: int, win=None, keys=None):
+        """{column label: value} of analysis.STATS. win: a tile / variable dict with a statistics
+        window (buffered by StatHub), seconds, or None = the Quick View window (plot ring)."""
         st = self.streams.get(tid)
         if st is None or idx not in st.last_vals:
             return None
-        h = self._history((tid, idx), win or self.window_s.value())
-        if h is None:
-            return None
         keys = [k for k in (keys or an.STAT_KEYS) if k != "value"]
-        vals = {an.STAT_LABEL[k]: v for k, v in an.stats(h[1], an.sample_rate(h[0]), keys).items()}
-        vals["Value"] = st.last_vals[idx]
+        spec = sb.spec_of(win) if isinstance(win, dict) else None
+        if spec is not None:
+            vals = self.stats.values((tid, idx), spec, keys) if keys else {}
+            if vals is None:
+                vals = {}
+                if (( tid, idx), spec) not in self.stats.buffers:
+                    self._stat_dirty = True              # a new window: collect it from now on
+        else:
+            secs = float(win) if isinstance(win, (int, float)) and win else self.window_s.value()
+            vals = (self._stats_ring(st, idx, secs, keys) if keys else {}) or {}
+        vals["Value"] = self.last_value(tid, idx)[0]
         return vals
 
+    def _stat_require(self):
+        """Collect every statistics window in use (views, variables) for the StatHub."""
+        self._stat_dirty = False
+        want = set()
+        for vw in self.project.views:
+            for t in vw.get("tiles", []):
+                spec = sb.spec_of(t)
+                if spec is None:
+                    continue
+                if t["kind"] in ("value", "gauge", "led") and t.get("quantity", "value") != "value" and t.get("channel"):
+                    want.add((tuple(t["channel"]), spec))
+                elif t["kind"] == "stats":
+                    want |= {(tuple(k), spec) for k in t.get("channels", [])}
+        for v in self.project.variables:
+            spec = sb.spec_of(v)
+            if v.get("kind") == "statistic" and v.get("enabled") and spec and v.get("source"):
+                want.add((tuple(v["source"]), spec))
+        self.stats.require(want)
+
+    def _window_stat(self, key, spec, stat: str):
+        if (tuple(key), spec) not in self.stats.buffers:
+            self._stat_dirty = True
+            return None
+        vals = self.stats.values(tuple(key), spec, [stat]) or {}
+        return vals.get(an.STAT_LABEL.get(stat, stat))
+
+    def tag_rows(self, keys, decimals: int = 3) -> list[dict]:
+        """Rows of a tag table component."""
+        out = []
+        names = {(tid, idx): lbl for tid, idx, lbl, _, _ in self.channel_choices()}
+        for key in keys:
+            tid, idx = key
+            lbl = names.get((tid, idx), "(deleted)")
+            dev, _, name = lbl.partition(" · ")
+            if vr.is_var(tid):
+                val, unit = self.last_value(tid, idx)
+                out.append({"Tag": name.split(" [")[0], "Value": "-" if val is None else f"{val:.{decimals}f}",
+                            "Unit": unit, "Quality": "Good" if val is not None else "No data", "Time": "",
+                            "Device": "Variables", "Description": "", "_good": val is not None})
+                continue
+            t = self.project.tag(tid, idx)
+            text, qual, good, stamp = self.tag_live(tid, idx)
+            val = self.last_value(tid, idx)[0]
+            out.append({"Tag": t.name if t else name, "Value": "-" if val is None else f"{val:.{decimals}f}",
+                        "Unit": t.unit if t else "", "Quality": qual or "No data", "Time": stamp,
+                        "Device": dev, "Description": t.description if t else "", "_good": good is not False})
+        return out
+
     def _history(self, key, win: float):
-        """(t, y) of the newest `win` seconds of a channel / variable, or None."""
+        """(t, y) of the newest `win` seconds of a tag / variable, or None."""
         s = self.series(*key)
         if s is None:
             return None
         t, y = s
         i = np.searchsorted(t, t[-1] - win, side="left") if win else 0
         return t[i:], y[i:]
+
+    def pick_keys(self, cfg: dict, field: str, multi: bool, page):
+        """Properties panel: choose the tag(s) of a component."""
+        chosen = cfg.get(field) or []
+        dlg = PickDialog(self, self.channel_choices(), chosen if multi else [chosen], multi,
+                         "Choose tags" if multi else "Choose a tag")
+        if dlg.exec():
+            keys = dlg.result_keys()
+            if keys is None:
+                return
+            if cfg.get("kind") == "plot" and cfg.get("plot") == "stft" and multi:
+                keys = keys[:1]
+            cfg[field] = keys
+            page.tile_changed(cfg)
+            self.show_properties(props.tile_target(self, page, cfg))
+
+    def view_props_changed(self, page, key: str):
+        if key == "name":
+            key_ = f"view:{page.view['id']}"
+            self.docs[key_] = (page, page.name, page.name, "layout")
+            i = self.doc_tabs.indexOf(page)
+            if i >= 0:
+                self.doc_tabs.setTabText(i, page.name)
+            self._rebuild_project_tree()
+        page.apply_view()
+        self._mark_dirty()
 
     # ================================================================ variables (core/variables.py)
     def _var(self, tid: str) -> dict | None:
@@ -2480,12 +2654,12 @@ class DaqWindow(AppWindow):
         return COLORS[(i + 4) % len(COLORS)]
 
     def _channel_ids(self) -> dict:
-        """Formula names of the channels: <topic>_<channel>."""
-        return {cm.identifier(f"{t.name}_{c.name}"): (t.id, c.index)
-                for t in self.project.topics for c in t.channels}
+        """Formula names of the tags: <device>_<tag>."""
+        return {cm.identifier(f"{d.name}_{t.name}"): (d.id, t.index)
+                for d in self.project.devices for t in d.tags}
 
     def _variables_reload(self):
-        """Definitions or channel names changed: recompile, regroup for logging."""
+        """Definitions or tag names changed: recompile, regroup for logging."""
         eng = self.variable_engine
         eng.set_variables(self.project.variables)
         groups: dict[str, list[str]] = {}
@@ -2506,6 +2680,7 @@ class DaqWindow(AppWindow):
         self.var_page.refresh()
         self._rebuild_project_tree()
         self._alarms_reload()
+        self._stat_dirty = True
         for page in self.view_pages.values():
             page.restyle()
 
@@ -2518,6 +2693,8 @@ class DaqWindow(AppWindow):
             key = vr.var_key(v["id"])
             self.streams.setdefault(key[0], TopicStream()).feed(vb, self.t_ref)
             self.alarm_engine.feed(key[0], 0, rx, vb.y[0])
+            if self.stats.wants(key):
+                self.stats.feed(key, vb.t0 + np.arange(vb.n) * vb.dt, vb.y[0])
             rows[v["id"]] = vb
         if self.recorder is None:
             return
@@ -2533,7 +2710,7 @@ class DaqWindow(AppWindow):
                                                         channels=list(range(len(vids)))))
 
     def _new_variable_key(self):
-        """Add a variable from another dialog -> (its key, new channel choices) or None."""
+        """Add a variable from another dialog -> (its key, new choices) or None."""
         before = {v["id"] for v in self.project.variables}
         self.var_page.add_variable("formula")
         new = [v for v in self.project.variables if v["id"] not in before]
@@ -2586,6 +2763,7 @@ class DaqWindow(AppWindow):
         self.view_pages.clear()
         for vw in self.project.views:
             self._open_view_page(vw, editing=False, show=False)
+        self._stat_dirty = True
         self._rebuild_project_tree()
 
     def _open_view_page(self, vw: dict, editing: bool, show: bool = True):
@@ -2602,12 +2780,13 @@ class DaqWindow(AppWindow):
         name, ok = QInputDialog.getText(self, "New view", "View name:", text=f"View {n}")
         if not ok or not name.strip():
             return
-        vw = new_view(name.strip())
+        vw = vmod.new_view(name.strip())
         self.project.views.append(vw)
-        self._open_view_page(vw, editing=True)
+        page = self._open_view_page(vw, editing=True)
         self._mark_dirty()
         self._rebuild_project_tree()
-        self.toast.popup("Edit mode - add plots, text or numeric tiles")
+        self.show_properties(props.view_target(self, page))
+        self.toast.popup("Edit mode - select a cell and insert a component")
 
     def view_properties(self, page):
         if page is None:
@@ -2617,15 +2796,26 @@ class DaqWindow(AppWindow):
         if not dlg.exec():
             return
         dlg.apply(page.view)
-        key = f"view:{page.view['id']}"
-        self.docs[key] = (page, page.name, page.name, "layout")
-        i = self.doc_tabs.indexOf(page)
-        if i >= 0:
-            self.doc_tabs.setTabText(i, page.name)
-            self.doc_tabs.setTabToolTip(i, page.view.get("description", ""))
-        page.apply_view()
+        self.view_props_changed(page, "name")
+        self._refresh_properties()
+
+    def delete_view(self, page):
+        if page is None:
+            return
+        if QMessageBox.question(self, "Delete view", f"Delete view '{page.name}'?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        vid = page.view["id"]
+        self.project.views = [v for v in self.project.views if v["id"] != vid]
+        key = f"view:{vid}"
+        self._close_doc(page)
+        self.docs.pop(key, None)
+        self.view_pages.pop(vid, None)
+        page.deleteLater()
         self._mark_dirty()
+        self._stat_dirty = True
         self._rebuild_project_tree()
+        self.show_properties(None)
 
     # ================================================================ help
     def _build_help_menu(self):
@@ -2695,16 +2885,14 @@ class DaqWindow(AppWindow):
             i = self.doc_tabs.indexOf(w)
             if i >= 0:
                 self.doc_tabs.setTabText(i, abbr if short else full)
-        self.spec_hint.setVisible(not short)
-        self._update_spec_hint()
 
-        # status panel: auto-hide when narrow, bring back when there is room again
+        # Properties panel: auto-hide when narrow, bring back when there is room again
         if short:
             if self.right_dock.isVisible() and not self.right_dock.isFloating():
                 self.right_dock.hide()
                 self._auto_hidden_right = True
                 if prev is not None:
-                    self.toast.popup("Status panel hidden - Ctrl+Shift+P shows it")
+                    self.toast.popup("Properties panel hidden - Ctrl+Shift+P shows it")
         elif self._auto_hidden_right:
             self.right_dock.show()
             self._auto_hidden_right = False
@@ -2741,7 +2929,7 @@ class DaqWindow(AppWindow):
         if not self._confirm_discard():
             e.ignore(); return
         self._ml_stop()
-        self.mqtt.disconnect_from()
+        self.drivers.stop_all()
         super().closeEvent(e)
 
 
