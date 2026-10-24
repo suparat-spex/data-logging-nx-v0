@@ -1176,6 +1176,10 @@ class ViewPage(QWidget):
         self.select(("tile", cfg))
 
     def edit_tile(self, tile: Tile):
+        """All settings of a component: an editor tab when the host has them, else a pop-up."""
+        if hasattr(self.host, "edit_component"):
+            self.host.edit_component(self, tile.cfg)
+            return
         dlg = TileDialog(self, tile.cfg, self.host.channel_choices())
         if dlg.exec():
             tile.cfg.update(dlg.result_cfg())
@@ -1221,6 +1225,8 @@ class ViewPage(QWidget):
         self.select(("tile", cfg))
 
     def delete_tile(self, tile: Tile):
+        if tile not in self.canvas.tiles:
+            return
         self.canvas.tiles.remove(tile)
         self.view["tiles"] = [x for x in self.view["tiles"] if x is not tile.cfg]
         tile.deleteLater()

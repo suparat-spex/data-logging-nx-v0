@@ -1,14 +1,16 @@
 """Small helpers shared by the dialogs: spin box, channel tree, colour button, form pages,
-schema forms (driver settings / tag addresses)."""
+schema forms (driver settings / tag addresses), and the pop-up standard: confirm(),
+ask_unsaved(), ActionDialog (see docs/ui-guidelines.md)."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFormLayout, QLineEdit,
-                               QMenu, QSpinBox, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
+                               QDoubleSpinBox, QFormLayout, QLabel, QLineEdit, QMenu, QMessageBox, QSpinBox,
+                               QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from nxlogger.ui.icons import swatch
+from nxlogger.ui.theme.ui_kit import label
 
 
 def spin(val=0.0, lo=-1e9, hi=1e9, dec=4) -> QDoubleSpinBox:
@@ -194,3 +196,77 @@ class SchemaForm(QWidget):
     def set_visible(self, key: str, on: bool):
         if key in self.w:
             self.form.setRowVisible(self.w[key][1], on)
+
+
+# ====================================================================== pop-up standard
+# Pop-ups are for actions, never for editing a saved item (that is an editor tab, see
+# docs/ui-guidelines.md). Every pop-up looks the same: title, one line saying what happens,
+# the form, a message line, and [Cancel] [<Verb>] - the primary button names the action.
+def confirm(parent, title: str, text: str, verb: str = "Delete", detail: str = "",
+            danger: bool = True) -> bool:
+    """Yes / no question with an explicit verb button ("Delete 3 tags"). Destructive ones
+    default to Cancel, so Enter never deletes by accident."""
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setIcon(QMessageBox.Icon.Warning if danger else QMessageBox.Icon.Question)
+    box.setText(text)
+    if detail:
+        box.setInformativeText(detail)
+    ok = box.addButton(verb, QMessageBox.ButtonRole.DestructiveRole if danger else QMessageBox.ButtonRole.AcceptRole)
+    cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+    box.setDefaultButton(cancel if danger else ok)
+    box.setEscapeButton(cancel)
+    box.exec()
+    return box.clickedButton() is ok
+
+
+def ask_unsaved(parent, title: str, text: str, keep: str = "Save") -> str:
+    """Unsaved changes: 'keep' (Save / Apply), 'discard' or 'cancel'."""
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setText(text)
+    k = box.addButton(keep, QMessageBox.ButtonRole.AcceptRole)
+    d = box.addButton("Don't " + keep.lower(), QMessageBox.ButtonRole.DestructiveRole)
+    c = box.addButton(QMessageBox.StandardButton.Cancel)
+    box.setDefaultButton(k); box.setEscapeButton(c)
+    box.exec()
+    return {k: "keep", d: "discard"}.get(box.clickedButton(), "cancel")
+
+
+class ActionDialog(QDialog):
+    """Base of the action pop-ups: a one-line intro, a form (self.form), a message line and
+    [Cancel] [verb]. Subclasses fill self.form and override validate() -> "" or a message."""
+
+    def __init__(self, parent, title: str, intro: str, verb: str, width: int = 440):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(width)
+        v = QVBoxLayout(self); v.setSpacing(10)
+        if intro:
+            lbl = label(intro, muted=True, small=True); lbl.setWordWrap(True)
+            v.addWidget(lbl)
+        self.form = QFormLayout(); self.form.setSpacing(8)
+        v.addLayout(self.form)
+        self.err = QLabel(); self.err.setObjectName("statusMsg"); self.err.setWordWrap(True)
+        self.err.setProperty("level", "bad"); self.err.hide()
+        v.addWidget(self.err)
+        v.addStretch(1)
+        self.buttons = QDialogButtonBox()
+        self.ok = self.buttons.addButton(verb, QDialogButtonBox.ButtonRole.AcceptRole)
+        self.buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        self.ok.setProperty("primary", True); self.ok.setDefault(True)
+        self.buttons.accepted.connect(self._ok); self.buttons.rejected.connect(self.reject)
+        v.addWidget(self.buttons)
+
+    def validate(self) -> str:
+        return ""
+
+    def show_error(self, text: str):
+        self.err.setText(text); self.err.setVisible(bool(text))
+
+    def _ok(self):
+        msg = self.validate()
+        self.show_error(msg)
+        if not msg:
+            self.accept()

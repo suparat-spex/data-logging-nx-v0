@@ -48,7 +48,7 @@ from PySide6.QtCore import QEvent, QObject, QSettings, QSize, QTimer, QUrl, Qt
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDockWidget,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
-                               QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
+                               QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
                                QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
                                QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 import pyqtgraph as pg
@@ -66,7 +66,8 @@ from nxlogger.core import view_model as vmod
 from nxlogger.core import wavepacket as wp
 from nxlogger.core.project import (OLD_PROJECT_EXTS, PROJECT_EXT, Project, fmt_interval, new_log_profile)
 from nxlogger.core.ring import MAX_PLOT_S, TopicStream
-from nxlogger.core.tags import (COLORS, DRIVERS, PLANNED, DeviceCfg, ScanBlock, TagCfg, driver_label, new_device,
+from nxlogger.core.tags import (COLORS, DRIVERS, PLANNED, DeviceCfg, ScanBlock, TagCfg, describe_address,
+                                driver_label, new_device,
                                 new_tag, tag_from_row, tags_to_rows)
 from nxlogger.ui.dialogs.about_dialog import show_about
 from nxlogger.ui.dialogs.add_tags_dialog import AddTagsDialog
@@ -74,13 +75,18 @@ from nxlogger.ui.dialogs.alarm_dialog import AlarmDialog
 from nxlogger.ui.dialogs.alarm_profile_dialog import AlarmProfileDialog
 from nxlogger.ui.dialogs.device_dialog import DeviceDialog
 from nxlogger.ui.dialogs.group_dialog import GroupDialog
+from nxlogger.ui.dialogs.common import ask_unsaved, confirm
 from nxlogger.ui.dialogs.log_profile_dialog import LogProfileDialog
+from nxlogger.ui.dialogs.marker_dialog import MarkerDialog
 from nxlogger.ui.dialogs.ml_log_dialog import MlLogDialog
+from nxlogger.ui.dialogs.new_view_dialog import NewViewDialog
 from nxlogger.ui.dialogs.opcua_browse_dialog import OpcUaBrowseDialog
 from nxlogger.ui.dialogs.pick_dialog import PickDialog
 from nxlogger.ui.dialogs.tag_dialog import TagDialog
+from nxlogger.ui.dialogs.tile_dialog import TileDialog
 from nxlogger.ui.dialogs.variable_dialog import VariableDialog
 from nxlogger.ui.dialogs.view_dialog import ViewDialog
+from nxlogger.ui.dialogs.write_value_dialog import WriteValueDialog
 from nxlogger.ui.icons import check_icon_file, grip_icon_file, level_icon, swatch
 from nxlogger.ui.theme import ui_kit as ui
 from nxlogger.ui.theme.app_style import DENSE_QSS, EXTRA_QSS, blend, fusion_palette, fusion_qss
@@ -382,6 +388,7 @@ class DaqWindow(AppWindow):
         for a in (self.act_connect, None, self.act_rec, self.act_stop,
                   None, self.act_ml, self.act_marker, self.act_ml_settings):
             acq.addSeparator() if a is None else acq.addAction(a)
+        self.addAction(self.act("Close tab", self._close_current_tab, "Ctrl+W"))
         f = self.file_menu
         first = f.actions()[0]
         for a in (self.act("Save as...", self._save_project_as, "Ctrl+Shift+S"),):
@@ -472,6 +479,10 @@ class DaqWindow(AppWindow):
         self.doc_tabs.setMovable(True)
         self.doc_tabs.setElideMode(Qt.TextElideMode.ElideRight)
         self.doc_tabs.tabBar().setDrawBase(False)     # no line under / beside the tabs
+        bar = self.doc_tabs.tabBar()
+        bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        bar.customContextMenuRequested.connect(self._tab_menu)
+        bar.installEventFilter(self)                  # middle click closes a tab
         for key, w, title, short, icon in (
                 ("screen", self._build_screen(), "Quick View", "Quick", "chart"),
                 ("connectivity", self._build_connectivity(), "Connectivity", "Tags", "network"),
@@ -817,14 +828,24 @@ class DaqWindow(AppWindow):
         self._update_logging_help()
 
     def _confirm_discard(self) -> bool:
+        open_ = [w for w, *_ in self.docs.values() if isinstance(w, FormTab) and w.modified]
+        if open_:                                # unapplied editor tabs first
+            self.show_editor(open_[0])
+            r = ask_unsaved(self, APP_NAME, f"{len(open_)} editor(s) have changes that are not applied: "
+                            + ", ".join(w.title for w in open_[:4]) + ("..." if len(open_) > 4 else ""),
+                            keep="Apply")
+            if r == "cancel":
+                return False
+            if r == "keep" and not all(w.apply() for w in open_):
+                return False
+            for w in open_:
+                w.modified = False
         if not self.dirty:
             return True
-        r = QMessageBox.question(self, APP_NAME, f"Save changes to '{self.project.name}'?",
-                                 QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
-                                 QMessageBox.StandardButton.Cancel)
-        if r == QMessageBox.StandardButton.Save:
+        r = ask_unsaved(self, APP_NAME, f"Save changes to '{self.project.name}'?")
+        if r == "keep":
             return self._save_project()
-        return r == QMessageBox.StandardButton.Discard
+        return r == "discard"
 
     def _new_project(self):
         if self._recording_guard() and self._confirm_discard():
@@ -953,6 +974,52 @@ class DaqWindow(AppWindow):
             self.docs.pop(key, None)
         tab.deleteLater()
         return True
+
+    def show_editor(self, tab):
+        if self.doc_tabs.indexOf(tab) >= 0:
+            self.doc_tabs.setCurrentWidget(tab)
+
+    def _close_tab_widget(self, w) -> bool:
+        """Close one document tab: editors may ask (unapplied changes), pages just hide."""
+        if isinstance(w, FormTab):
+            return self.close_editor(w)
+        self._close_doc(w)
+        return True
+
+    def _close_current_tab(self):
+        w = self.doc_tabs.currentWidget()
+        if w is not None:
+            self._close_tab_widget(w)
+
+    def _tab_menu(self, pos):
+        bar = self.doc_tabs.tabBar()
+        i = bar.tabAt(pos)
+        if i < 0:
+            return
+        w = self.doc_tabs.widget(i)
+        tabs = [self.doc_tabs.widget(k) for k in range(self.doc_tabs.count())]
+        editors = [x for x in tabs if isinstance(x, FormTab)]
+        m = QMenu(self)
+        m.addAction("Close", lambda: self._close_tab_widget(w)).setShortcut(QKeySequence("Ctrl+W"))
+        m.addAction("Close others", lambda: [self._close_tab_widget(x) for x in tabs if x is not w])
+        m.addAction("Close tabs to the right", lambda: [self._close_tab_widget(x) for x in tabs[i + 1:]])
+        m.addSeparator()
+        a = m.addAction(f"Close all editors ({len(editors)})",
+                        lambda: [self._close_tab_widget(x) for x in editors])
+        a.setEnabled(bool(editors))
+        if isinstance(w, FormTab):
+            m.addSeparator()
+            m.addAction("Apply", w.apply).setEnabled(w.modified or bool(w.spec.get("is_new")))
+        m.exec(bar.mapToGlobal(pos))
+
+    def eventFilter(self, obj, ev):
+        if obj is self.doc_tabs.tabBar() and ev.type() == QEvent.Type.MouseButtonRelease \
+                and ev.button() == Qt.MouseButton.MiddleButton:
+            i = obj.tabAt(ev.position().toPoint())
+            if i >= 0:
+                self._close_tab_widget(self.doc_tabs.widget(i))
+                return True
+        return super().eventFilter(obj, ev)
 
     def _close_editors(self, prefix: str = "edit:"):
         """Model gone (project changed, item deleted): close its editors without asking."""
@@ -1158,8 +1225,7 @@ class DaqWindow(AppWindow):
         exists = lambda: any(x is a for x in self.project.alarms)                  # noqa: E731
 
         def delete():
-            if QMessageBox.question(self, "Delete alarm", f"Delete alarm '{a['name']}'?") \
-                    == QMessageBox.StandardButton.Yes:
+            if confirm(self, "Delete alarm", f"Delete alarm '{a['name']}'?", "Delete alarm"):
                 self.project.alarms[:] = [x for x in self.project.alarms if x is not a]
                 self.alarms_changed()
         spec["actions"] = [self._delete_action(spec, delete, exists)]
@@ -1189,8 +1255,8 @@ class DaqWindow(AppWindow):
         exists = lambda: any(x is p for x in self.project.alarm_profiles)          # noqa: E731
 
         def delete():
-            if QMessageBox.question(self, "Delete profile", f"Delete notification profile '{p['name']}'?") \
-                    == QMessageBox.StandardButton.Yes:
+            if confirm(self, "Delete notification profile", f"Delete notification profile '{p['name']}'?",
+                       "Delete profile", "Alarms that use it stop sending to it."):
                 self.project.alarm_profiles.remove(p)
                 for x in self.project.alarms:
                     x["profiles"] = [i for i in x["profiles"] if i != p["id"]]
@@ -1231,6 +1297,71 @@ class DaqWindow(AppWindow):
         spec["actions"] = [("Add alarm", "bell", lambda: self.add_alarm_for(vr.var_key(v["id"])) if exists() else None),
                            self._delete_action(spec, lambda: (self.var_page.select(v["id"]),
                                                               self.var_page.delete_variable()), exists)]
+        return spec
+
+    # ---- views and their components
+    def _spec_view(self, vid):
+        page = self.view_pages.get(vid)
+        if page is None:
+            return None
+        v = page.view
+        spec = {"key": f"edit:view:{vid}", "title": v["name"], "icon": "layout",
+                "path": f"Project / Views / {v['name']}", "kind": "view", "section": "View"}
+        spec["build"] = lambda: ViewDialog(self, v, {x["name"] for x in self.project.views if x is not v})
+
+        def apply(dlg):
+            dlg.apply(v)
+            self.view_props_changed(page, "name")
+            self._refresh_properties()
+            spec["tab"].set_identity(spec["key"], v["name"], f"Project / Views / {v['name']}")
+            return True
+        spec["apply"] = apply
+        spec["actions"] = [("Open view", "layout", lambda: self._show_doc(f"view:{vid}")),
+                           self._delete_action(spec, lambda: self.delete_view(page),
+                                               lambda: vid in self.view_pages)]
+        return spec
+
+    def _spec_tile(self, ident):
+        vid, tid = ident
+        page = self.view_pages.get(vid)
+        cfg = next((t for t in page.view["tiles"] if t["id"] == tid), None) if page else None
+        if cfg is None:
+            return None
+        name = lambda: cfg.get("title") or vmod.tile_title(cfg)                     # noqa: E731
+        spec = {"key": f"edit:tile:{vid}:{tid}", "title": name(), "icon": "sliders",
+                "path": f"Project / Views / {page.name} / {name()}", "kind": vmod.tile_title(cfg)}
+        spec["build"] = lambda: TileDialog(self, cfg, self.channel_choices())
+
+        def apply(dlg):
+            cfg.update(dlg.result_cfg())
+            page.tile_changed(cfg)
+            self._stat_dirty = True
+            self._refresh_properties()
+            spec["tab"].set_identity(spec["key"], name(), f"Project / Views / {page.name} / {name()}")
+            return True
+        spec["apply"] = apply
+        exists = lambda: vid in self.view_pages and any(t is cfg for t in page.view["tiles"])   # noqa: E731
+        spec["actions"] = [("Open view", "layout", lambda: self._show_doc(f"view:{vid}")),
+                           self._delete_action(spec, lambda: page.tile_of(cfg) and page.delete_tile(page.tile_of(cfg)),
+                                               exists)]
+        return spec
+
+    def _spec_mllog(self, _ident):
+        spec = {"key": "edit:mllog", "title": "AI/ML data log", "icon": "brain-circuit",
+                "path": "Project / Logging / AI/ML data log", "kind": "settings", "section": "AI/ML data log"}
+        spec["build"] = lambda: MlLogDialog(self, self.project.ml_log,
+                                            os.path.join(self.project.logging.folder, "AI_Data"))
+
+        def apply(dlg):
+            self.project.ml_log = dlg.result_settings()
+            self._mark_dirty()
+            self._ml_restart()
+            self.set_status("AI/ML data log settings applied" +
+                            (" - logging restarted" if self.ml_logger else ""), "ok")
+            return True
+        spec["apply"] = apply
+        spec["actions"] = [("Start / stop log", "brain-circuit", lambda: self._ml_toggle(self.ml_logger is None)),
+                           ("Open data folder", "folder-open", self._ml_open_folder)]
         return spec
 
     # ---- logging profiles
@@ -1363,8 +1494,8 @@ class DaqWindow(AppWindow):
         dev = self.project.device(did)
         if dev is None or not self._recording_guard():
             return
-        if QMessageBox.question(self, "Delete device", f"Delete device '{dev.name}' and its "
-                                                       f"{len(dev.tags)} tag(s)?") != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Delete device", f"Delete device '{dev.name}' and its {len(dev.tags)} tag(s)?",
+                       "Delete device", "Alarms, views and logging profiles that use its tags stop showing data."):
             return
         self.drivers.stop(did)
         self.project.devices.remove(dev)
@@ -1423,9 +1554,9 @@ class DaqWindow(AppWindow):
         if dev is None or not idxs or not self._recording_guard():
             return
         names = [t.name for t in dev.tags if t.index in idxs]
-        if QMessageBox.question(self, "Delete tags", f"Delete {len(names)} tag(s): "
-                                f"{', '.join(names[:5])}{' ...' if len(names) > 5 else ''}?") \
-                != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Delete tags", f"Delete {len(names)} tag(s) of {dev.name}?",
+                       f"Delete {len(names)} tag{'s' if len(names) > 1 else ''}",
+                       ", ".join(names[:8]) + (" ..." if len(names) > 8 else "")):
             return
         dev.tags = [t for t in dev.tags if t.index not in idxs]
         st = self.streams.get(did)
@@ -1477,13 +1608,18 @@ class DaqWindow(AppWindow):
             return
         inside = [t for t in dev.tags if t.group == path or t.group.startswith(path + "/")]
         if inside:
-            r = QMessageBox.question(self, "Delete group", f"Group '{path}' has {len(inside)} tag(s). "
-                                     "Delete the tags too? (No = keep them, without a group)",
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No |
-                                     QMessageBox.StandardButton.Cancel)
-            if r == QMessageBox.StandardButton.Cancel:
+            box = QMessageBox(self)
+            box.setWindowTitle("Delete group"); box.setIcon(QMessageBox.Icon.Warning)
+            box.setText(f"Group '{path}' holds {len(inside)} tag(s).")
+            box.setInformativeText("Keep the tags (they move up one level) or delete them with the group?")
+            keep = box.addButton("Keep tags", QMessageBox.ButtonRole.AcceptRole)
+            kill = box.addButton("Delete group and tags", QMessageBox.ButtonRole.DestructiveRole)
+            cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(keep); box.setEscapeButton(cancel)
+            box.exec()
+            if box.clickedButton() not in (keep, kill):
                 return
-            if r == QMessageBox.StandardButton.Yes:
+            if box.clickedButton() is kill:
                 dev.tags = [t for t in dev.tags if t not in inside]
             else:
                 parent = path.rsplit("/", 1)[0] if "/" in path else ""
@@ -1501,10 +1637,11 @@ class DaqWindow(AppWindow):
         if self.drivers.state(did)[0] != "online":
             self.toast.popup("The device is not online")
             return
-        cur = self.last_value(did, idx)[0]
-        val, ok = QInputDialog.getDouble(self, f"Write {t.name}", "Value (sent as is - before scaling):",
-                                         cur if cur is not None else 0.0, -1e12, 1e12, 6)
-        if ok:
+        dev = self.project.device(did)
+        dlg = WriteValueDialog(self, dev.name, t, self.last_value(did, idx)[0],
+                               describe_address(dev.driver, "", t))
+        if dlg.exec():
+            val = dlg.result_value()
             self.drivers.write(did, idx, val)
             self._log(f"Write {t.name} ← {val:g}")
 
@@ -2171,8 +2308,8 @@ class DaqWindow(AppWindow):
         pr = self._log_profile(pid)
         if pr is None or not self._recording_guard():
             return
-        if QMessageBox.question(self, "Delete logging profile",
-                                f"Delete logging profile '{pr['name']}'?") != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Delete logging profile", f"Delete logging profile '{pr['name']}'?",
+                       "Delete profile", "Recordings already made are not touched."):
             return
         self.project.logging_profiles.remove(pr)
         self._log_profiles_changed()
@@ -2356,25 +2493,20 @@ class DaqWindow(AppWindow):
         self.ml_label.setVisible(on)
 
     def _ml_settings(self):
-        dlg = MlLogDialog(self, self.project.ml_log, os.path.join(self.project.logging.folder, "AI_Data"))
-        if dlg.exec():
-            self.project.ml_log = dlg.result_settings()
-            self._mark_dirty()
-            self._ml_restart()
-            self.set_status("AI/ML data log settings saved" +
-                            (" - logging restarted" if self.ml_logger else ""), "ok")
+        self.open_editor("mllog", "settings")
 
     def _ml_marker(self, kind: str):
         """Event marker in events.csv - the AI app turns these into draft labels."""
         if self.ml_logger is None:
             return
         t = time.time()                          # the moment of the click, not of the OK
-        title = dict(MARKER_TYPES)[kind].split(" (")[0]
-        text, ok = QInputDialog.getText(self, f"Marker - {title}", "Note (optional):")
-        if not ok or self.ml_logger is None:
+        dlg = MarkerDialog(self, MARKER_TYPES, kind, t)
+        if not dlg.exec() or self.ml_logger is None:
             return
-        self.ml_logger.event(kind, self.project.operator or "operator", text.strip(), t)
-        self._log(f"Marker {kind}: {text.strip()}")
+        kind, text = dlg.result()
+        title = dict(MARKER_TYPES)[kind].split(" (")[0]
+        self.ml_logger.event(kind, self.project.operator or "operator", text, t)
+        self._log(f"Marker {kind}: {text}")
         self.toast.popup(f"Marker saved: {title}")
 
     def _ml_open_folder(self):
@@ -3174,10 +3306,14 @@ class DaqWindow(AppWindow):
 
     def _new_view(self):
         n = len(self.project.views) + 1
-        name, ok = QInputDialog.getText(self, "New view", "View name:", text=f"View {n}")
-        if not ok or not name.strip():
+        dlg = NewViewDialog(self, f"View {n}", {v["name"] for v in self.project.views},
+                            [(d.id, d.name) for d in self.project.devices if d.tags])
+        if not dlg.exec():
             return
-        vw = vmod.new_view(name.strip())
+        name, did = dlg.result()
+        dev = self.project.device(did) if did else None
+        vw = vmod.default_view(name, [(dev.id, t.index) for t in dev.tags if t.enabled][:8]) if dev \
+            else vmod.new_view(name)
         self.project.views.append(vw)
         page = self._open_view_page(vw, editing=True)
         self._mark_dirty()
@@ -3186,21 +3322,18 @@ class DaqWindow(AppWindow):
         self.toast.popup("Edit mode - add a header, graph, indicator or table")
 
     def view_properties(self, page):
-        if page is None:
-            return
-        taken = {v["name"] for v in self.project.views if v["id"] != page.view["id"]}
-        dlg = ViewDialog(self, page.view, taken)
-        if not dlg.exec():
-            return
-        dlg.apply(page.view)
-        self.view_props_changed(page, "name")
-        self._refresh_properties()
+        if page is not None:
+            self.open_editor("view", page.view["id"])
+
+    def edit_component(self, page, cfg: dict):
+        """A view component's "All settings..." (host API of views.py): an editor tab."""
+        self.open_editor("tile", (page.view["id"], cfg["id"]))
 
     def delete_view(self, page):
         if page is None:
             return
-        if QMessageBox.question(self, "Delete view", f"Delete view '{page.name}'?") \
-                != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Delete view", f"Delete view '{page.name}' and its {len(page.view['tiles'])} "
+                       "component(s)?", "Delete view"):
             return
         vid = page.view["id"]
         self.project.views = [v for v in self.project.views if v["id"] != vid]
@@ -3319,8 +3452,8 @@ class DaqWindow(AppWindow):
             run = [x for x, on in (("Recording", self.recorder), ("the AI/ML data log", self.ml_logger))
                    if on is not None]
             msg = " and ".join(run) + (" are" if len(run) > 1 else " is") + " running. Stop and exit?"
-            if QMessageBox.question(self, APP_NAME, msg[0].upper() + msg[1:]) \
-                    != QMessageBox.StandardButton.Yes:
+            if not confirm(self, APP_NAME, msg[0].upper() + msg[1:], "Stop and exit",
+                           "The files are closed properly before the program ends."):
                 e.ignore(); return
             self._stop_recording()
         if not self._confirm_discard():

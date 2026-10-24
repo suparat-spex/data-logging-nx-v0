@@ -47,7 +47,7 @@ class TileDialog(QDialog):
         v.addWidget(self.tabs, 1); v.addWidget(self.err); v.addWidget(bb)
 
     # ================================================================ shared rows
-    def _title_rows(self, f, placeholder="optional - default: the channel name"):
+    def _title_rows(self, f, placeholder="optional - default: the tag name"):
         self.title = QLineEdit(self.cfg.get("title", ""))
         self.title.setPlaceholderText(placeholder)
         self.show_title = QCheckBox("Show title bar", checked=bool(self.cfg.get("show_title", True)))

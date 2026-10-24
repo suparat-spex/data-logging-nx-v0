@@ -18,6 +18,7 @@ from nxlogger.core.alarm_rules import (ACTIVE_COLS, DEF_COLS, EVENTS, LEVELS, LO
                                        PROFILE_KINDS, PROF_COLS, describe_level, new_alarm,
                                        new_profile)
 from nxlogger.ui.dialogs.alarm_dialog import AlarmDialog
+from nxlogger.ui.dialogs.common import confirm
 from nxlogger.ui.dialogs.alarm_profile_dialog import AlarmProfileDialog
 from nxlogger.ui.icons import level_color, level_icon
 from nxlogger.ui.theme.ui_kit import T, label
@@ -414,8 +415,8 @@ class AlarmPage(QWidget):
         if not items:
             return
         names = ", ".join(it.text(0) for it in items[:5]) + (" ..." if len(items) > 5 else "")
-        if QMessageBox.question(self, "Delete alarm", f"Delete {len(items)} alarm(s): {names}?") \
-                != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Delete alarms", f"Delete {len(items)} alarm(s)?",
+                       f"Delete {len(items)} alarm{'s' if len(items) > 1 else ''}", names):
             return
         ids = {it.data(0, Qt.ItemDataRole.UserRole) for it in items}
         self.host.project.alarms[:] = [a for a in self.host.project.alarms if a["id"] not in ids]
@@ -487,8 +488,8 @@ class AlarmPage(QWidget):
             QMessageBox.warning(self, "Export alarm log", str(e))
 
     def clear_log(self):
-        if QMessageBox.question(self, "Clear alarm log", "Clear all entries of the alarm log?\n"
-                                "Active alarms are not affected.") == QMessageBox.StandardButton.Yes:
+        if confirm(self, "Clear alarm log", "Clear all entries of the alarm log?", "Clear log",
+                   "Active alarms are not affected. Export the log first to keep it."):
             self.host.alarm_engine.clear_log()
             self.rebuild_log()
 
@@ -522,8 +523,9 @@ class AlarmPage(QWidget):
 
     def delete_profile(self):
         p = self._sel_profile()
-        if p is None or QMessageBox.question(self, "Delete profile", f"Delete notification profile "
-                                             f"'{p['name']}'?") != QMessageBox.StandardButton.Yes:
+        if p is None or not confirm(self, "Delete notification profile",
+                                    f"Delete notification profile '{p['name']}'?", "Delete profile",
+                                    "Alarms that use it stop sending to it."):
             return
         self.host.project.alarm_profiles.remove(p)
         for a in self.host.project.alarms:

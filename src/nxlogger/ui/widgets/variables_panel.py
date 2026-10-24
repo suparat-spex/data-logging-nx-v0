@@ -6,11 +6,12 @@ import uuid
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QBrush, QColor
-from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox,
+from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QLabel, QMenu,
                                QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from nxlogger.core import variables as vr
 from nxlogger.core.channel_math import identifier
+from nxlogger.ui.dialogs.common import confirm
 from nxlogger.ui.dialogs.variable_dialog import VariableDialog
 from nxlogger.ui.icons import swatch
 from nxlogger.ui.theme.ui_kit import T, label
@@ -198,10 +199,10 @@ class VariablesPage(QWidget):
         if not ids or self.host.recorder is not None:
             return
         names = [v["name"] for v in self.host.project.variables if v["id"] in ids]
-        if QMessageBox.question(self, "Delete variable", f"Delete {len(names)} variable(s): "
-                                f"{', '.join(names[:5])}{' ...' if len(names) > 5 else ''}?\n"
-                                "Views, alarms and formulas that use them stop showing data.") \
-                != QMessageBox.StandardButton.Yes:
+        if not confirm(self, "Delete variables", f"Delete {len(names)} variable(s)?",
+                       f"Delete {len(names)} variable{'s' if len(names) > 1 else ''}",
+                       ", ".join(names[:8]) + (" ..." if len(names) > 8 else "") +
+                       "\nViews, alarms and formulas that use them stop showing data."):
             return
         self.host.project.variables[:] = [v for v in self.host.project.variables if v["id"] not in ids]
         self.host.variables_changed()

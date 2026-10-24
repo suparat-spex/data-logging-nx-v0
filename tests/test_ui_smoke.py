@@ -138,7 +138,6 @@ def test_tree_layout(win):
 
 
 def test_editor_tabs(win, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
     from nxlogger.ui.widgets.form_tab import FormTab
     dev = win.project.devices[0]
     n_dev, n_tags = len(win.project.devices), len(dev.tags)
@@ -172,12 +171,38 @@ def test_editor_tabs(win, monkeypatch):
                              ("tag", (dev.id, 0), {})):
         e = win.open_editor(kind, ident, **ctx)
         assert isinstance(e, FormTab) and e.dlg is not None, kind
-    # closing a modified editor asks; Discard closes
+    # closing a modified editor asks (Apply / Don't apply / Cancel)
+    import nxlogger.ui.widgets.form_tab as ft
     e = win.open_editor("tag", (dev.id, 0))
+    assert not e.btn_apply.isEnabled() and not e.btn_refresh.isEnabled()      # nothing to apply yet
     e._set_modified(True)
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Cancel)
+    assert e.btn_apply.isEnabled() and e.btn_refresh.isEnabled()
+    monkeypatch.setattr(ft, "ask_unsaved", lambda *a, **k: "cancel")
     assert not win.close_editor(e) and win.doc_tabs.indexOf(e) >= 0
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Discard)
+    monkeypatch.setattr(ft, "ask_unsaved", lambda *a, **k: "discard")
     assert win.close_editor(e)
+    # saved settings that used to be pop-ups are editor tabs too
+    page = next(iter(win.view_pages.values()))
+    for what, ident in (("view", page.view["id"]), ("tile", (page.view["id"], page.view["tiles"][1]["id"])),
+                        ("mllog", "settings")):
+        e = win.open_editor(what, ident)
+        assert isinstance(e, FormTab) and e.dlg is not None, what
+    win.edit_component(page, page.view["tiles"][1])
+    assert win.doc_tabs.currentWidget().key == f"edit:tile:{page.view['id']}:{page.view['tiles'][1]['id']}"
     win._close_editors()
     assert not any(k.startswith("edit:") for k in win.docs)
+
+
+def test_action_popups(win):
+    from nxlogger.ui.dialogs.marker_dialog import MarkerDialog
+    from nxlogger.ui.dialogs.new_view_dialog import NewViewDialog
+    from nxlogger.ui.dialogs.write_value_dialog import WriteValueDialog
+    dev = win.project.devices[0]
+    w = WriteValueDialog(win, dev.name, dev.tags[0], 21.5, "HR 0 float32")
+    assert w.ok.text() == "Write" and w.result_value() == 21.5
+    n = NewViewDialog(win, "Overview", {"Overview"}, [(dev.id, dev.name)])
+    assert n.validate() == "Another view already has this name."
+    n.name.setText("Plant"); n.start.setCurrentIndex(1)
+    assert n.validate() == "" and n.result() == ("Plant", dev.id)
+    m = MarkerDialog(win, [("note", "Note"), ("fault", "Fault")], "fault", 0.0)
+    assert m.result() == ("fault", "")

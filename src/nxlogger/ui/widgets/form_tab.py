@@ -8,6 +8,11 @@ editor here instead of a pop-up:
   body     the form, one collapsible section per page (a ▲ / ▼ title bar each)
   bar      [extra actions ...]      Apply  Refresh  Close  New...  Apply & Close  Apply & New...
 
+Keys: Ctrl+S Apply, Ctrl+Enter Apply & Close, Ctrl+W Close (the window's tab shortcut).
+Apply / Apply & Close are enabled only when something changed (or for a new item);
+Refresh only when there are edits to discard. Closing with changes asks Apply / Don't
+apply / Cancel. Rules for tabs vs pop-ups: docs/ui-guidelines.md.
+
 The form itself is one of the ui/dialogs classes, embedded as a widget: its OK / Cancel
 row is hidden, its QTabWidget pages become the sections, and its own validation (_ok)
 runs on Apply. So every editor exists once and can still be used as a pop-up where a
@@ -23,12 +28,16 @@ Spec (dict) given by the window:
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+import time
+
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QCheckBox, QComboBox, QDialog,
-                               QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                               QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QPlainTextEdit, QPushButton, QScrollArea, QTabWidget,
                                QTreeWidget, QVBoxLayout, QWidget)
 
+from nxlogger.ui.dialogs.common import ask_unsaved, confirm
 from nxlogger.ui.theme.ui_kit import T, label, make_icon, set_prop
 
 
@@ -100,26 +109,29 @@ class FormTab(QWidget):
             bl.addWidget(b)
         bl.addStretch(1)
         self.btn_apply = self._btn(bl, "Apply", self.apply, "Ctrl+S")
-        self._btn(bl, "Refresh", self.refresh)
-        self._btn(bl, "Close", self.close_tab)
+        self.btn_refresh = self._btn(bl, "Refresh", self.refresh, tip="Discard the edits: back to the project")
+        self._btn(bl, "Close", self.close_tab, tip="Close  (Ctrl+W)")
         has_new = spec.get("new") is not None
         if has_new:
-            self._btn(bl, "New...", self._new)
-        self._btn(bl, "Apply && Close", self._apply_close)
-        if has_new:
-            self._btn(bl, "Apply && New...", self._apply_new)
+            self._btn(bl, "New...", self._new, tip="Another new item of this kind")
+        self.btn_apply_close = self._btn(bl, "Apply && Close", self._apply_close, tip="Apply && Close  (Ctrl+Enter)")
+        self.btn_apply_new = self._btn(bl, "Apply && New...", self._apply_new) if has_new else None
         set_prop(self.btn_apply, "primary", True)
+        for keys, slot in (("Ctrl+S", self.apply), ("Ctrl+Return", self._apply_close),
+                           ("Ctrl+Enter", self._apply_close)):
+            sc = QShortcut(QKeySequence(keys), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(slot)
 
         v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
         v.addWidget(head); v.addWidget(self.scroll, 1); v.addWidget(bar)
         self.set_identity(spec["key"], spec["title"], spec["path"])
         self._load()
 
-    def _btn(self, layout, text, slot, shortcut=None) -> QPushButton:
+    def _btn(self, layout, text, slot, shortcut=None, tip="") -> QPushButton:
         b = QPushButton(text); b.setMinimumWidth(90)
         b.clicked.connect(slot)
-        if shortcut:
-            b.setShortcut(shortcut); b.setToolTip(f"{text.replace('&&', '&')}  ({shortcut})")
+        b.setToolTip(tip or (f"{text.replace('&&', '&')}  ({shortcut})" if shortcut else ""))
         layout.addWidget(b)
         return b
 
@@ -215,10 +227,17 @@ class FormTab(QWidget):
         if on != self.modified:
             self.modified = on
             self.changed.emit()
+        dirty = self.modified or bool(self.spec.get("is_new"))
+        for b in (self.btn_apply, self.btn_apply_close, self.btn_apply_new):
+            if b is not None:
+                b.setEnabled(dirty)
+        self.btn_refresh.setEnabled(self.modified and not self.spec.get("is_new"))
 
     def _message(self, text: str, level: str = "bad"):
         self.msg.setText(text); self.msg.setVisible(bool(text))
         set_prop(self.msg, "level", level)
+        if text and level == "ok":                   # confirmations fade, errors stay
+            QTimer.singleShot(3000, lambda: self.msg.text() == text and self._message(""))
 
     # ---- buttons
     def apply(self) -> bool:
@@ -226,6 +245,8 @@ class FormTab(QWidget):
         if why:
             self._message(why)
             return False
+        if not (self.modified or self.spec.get("is_new")):
+            return True                              # nothing to apply
         self._ok = False
         if hasattr(self.dlg, "_ok"):
             self.dlg._ok()                       # validation: calls accept() when fine
@@ -238,25 +259,25 @@ class FormTab(QWidget):
             return False
         self.spec["is_new"] = False
         self._set_modified(False)
-        self._message("Applied", "ok")
+        self._message(f"Applied  ·  {time.strftime('%H:%M:%S')}", "ok")
         return True
 
     def refresh(self):
         """Back to the values in the project (discard the edits)."""
-        if self.modified and not self.spec.get("is_new") and QMessageBox.question(
-                self, "Refresh", "Discard the changes in this editor?") != QMessageBox.StandardButton.Yes:
+        if self.modified and not self.spec.get("is_new") and not confirm(
+                self, "Refresh", f"Discard the changes to '{self.title}'?", "Discard changes",
+                "The editor shows the values in the project again."):
             return
         self._load()
 
     def can_close(self) -> bool:
         if not self.modified:
             return True
-        r = QMessageBox.question(self, "Close", f"Apply the changes to '{self.title}'?",
-                                 QMessageBox.StandardButton.Apply | QMessageBox.StandardButton.Discard |
-                                 QMessageBox.StandardButton.Cancel)
-        if r == QMessageBox.StandardButton.Apply:
+        self.host.show_editor(self)                  # the question is about the tab in view
+        r = ask_unsaved(self, "Unapplied changes", f"Apply the changes to '{self.title}'?", keep="Apply")
+        if r == "keep":
             return self.apply()
-        return r == QMessageBox.StandardButton.Discard
+        return r == "discard"
 
     def close_tab(self):
         self.host.close_editor(self)

@@ -194,3 +194,10 @@ run(MyWindow, org="Spex", app="MyTool")
 - **Rebrand:** change only `accent`, `accent_hover` and `accent_text` in both `DARK` and `LIGHT`.
 - **New styled widget:** give it an `objectName` and add a rule to `QSS` (or pass `extra_qss` to `apply_theme`). Use `@token@` placeholders only.
 - **Other stacks** (web, Streamlit, Tkinter): use the CSS block in §2, the type scale in §3, the spacing in §4 and the layout in §5. You can also give this file to an AI assistant and ask it to follow it.
+
+
+## Editor tabs and pop-ups (NX Logger)
+
+Which window to use - editor tab, work page, Properties panel or pop-up - and how each is
+laid out (path bar, collapsible sections, Apply / Refresh / Close / New... button order,
+verb buttons, safe defaults) is in `docs/ui-guidelines.md` at the repo root.

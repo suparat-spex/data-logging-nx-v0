@@ -20,7 +20,7 @@ Formerly SX Logger / MQDAQ (MQTT waveform logger; last flat-file version: git ta
 | `paths.py`, `config.py` | File locations (dev vs EXE) and `config.ini` |
 | `sim/publisher.py` | ESP32 waveform generator over MQTT |
 
-Docs: `docs/connectivity.md` (connectors, addresses, tag CSV), `docs/recording-format.md`
+Docs: `docs/ui-guidelines.md` (editor tabs vs pop-ups), `docs/connectivity.md` (connectors, addresses, tag CSV), `docs/recording-format.md`
 (session files - the contract with the NX Viewer), `docs/packet-format.md`, `docs/config.md`.
 
 ## Commands
@@ -47,6 +47,6 @@ Full end-to-end check (local Modbus + OPC UA servers, alarms, recording, screens
 - Formulas go through `channel_math.compile_expr` / `compile_formula` (AST whitelist) - never `eval` user text.
 - Threads: drivers and paho callbacks only queue; decode / scale / alarms / statistics on the GUI timer; disk + REST in workers.
 - The grid-layout view version is kept on branch `nx-views-grid` (not merged).
-- Configuration opens in editor tabs, not pop-ups (Genesis64 style): double-click in the Project tree -> `DaqWindow.open_editor(what, ident, **ctx)` with a `_spec_<what>` (device, tag, group, alarm, aprofile, variable, lprofile). New items are drafts until Apply. Pop-ups only for actions inside a tab (pick tags, browse OPC UA, add tags in bulk, write value, confirmations).
+- Tabs vs pop-ups: **docs/ui-guidelines.md**. Saved items open in editor tabs (`DaqWindow.open_editor(what, ident, **ctx)`, a `_spec_<what>`: device, tag, group, alarm, aprofile, variable, lprofile, view, tile, mllog); new items are drafts until Apply. Pop-ups only for actions: subclass `common.ActionDialog`, confirm with `common.confirm` / `ask_unsaved` - never `QMessageBox.question` / `QInputDialog` directly. Background events never open a pop-up.
 - Project tree: Connectivity = devices only; Tags = device > groups > tags (tag management); Quick View is in the Project menu.
 - Put scratch files in the session scratchpad, not the repo.
