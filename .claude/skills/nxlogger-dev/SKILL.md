@@ -1,12 +1,12 @@
 ---
 name: nxlogger-dev
-description: Use when developing NX Logger (formerly SX Logger / MQDAQ), the PySide6 tag data-logger in this project (src/nxlogger - core / comms drivers / ui / dialogs / widgets / icons / config / packaging) - adding connectors (Modbus, MQTT, OPC UA ...), tags, the Connectivity document, Properties panel, grid views and components, statistics windows, alarms, logging profiles, theming, icons, config.ini, building the EXE/installer, or running and testing the app.
+description: Use when developing NX Logger (formerly SX Logger / MQDAQ), the PySide6 tag data-logger in this project (src/nxlogger - core / comms drivers / ui / dialogs / widgets / icons / config / packaging) - adding connectors (Modbus, MQTT, OPC UA ...), tags, the Connectivity document, Properties panel, views and components, statistics windows, alarms, logging profiles, theming, icons, config.ini, building the EXE/installer, or running and testing the app.
 ---
 
 # NX Logger development
 
 NX Logger is a Yokogawa GA10 style data logger with SCADA-like connectivity (Genesis64 /
-FUXA): devices (Simulation, Modbus TCP / RTU, MQTT, OPC UA) hold tags; grid views, alarms,
+FUXA): devices (Simulation, Modbus TCP / RTU, MQTT, OPC UA) hold tags; views, alarms,
 statistics and recording work on tags. ESP32 waveform nodes still connect as MQTT devices in
 wavepacket mode (array tags). Aim for professional data-logger behaviour (see
 `references/alarms-ga10.md`).
@@ -18,7 +18,7 @@ wavepacket mode (array tags). Aim for professional data-logger behaviour (see
 |---|---|
 | Logic without UI (packet, scaling, alarm rule, statistic) | `core/` - no Qt, add a test in `tests/` |
 | New connector / protocol | schema in `core/tags.DRIVERS`, `comms/drivers/<name>.py` (PollDriver), `make_driver`, test with a local server in `tests/test_drivers.py`, docs/connectivity.md |
-| New view component | `TILE_DEFAULTS` / `KIND_TITLE` in `core/view_model.py`, Tile subclass + `ADD_MENUS` in `ui/widgets/views.py`, fields in `ui/widgets/properties.tile_target`, tab in `tile_dialog.py` |
+| New view component | `TILE_DEFAULTS` / `KIND_TITLE` / `DEFAULT_SIZE` in `core/view_model.py`, Tile subclass + `ADD_MENUS` in `ui/widgets/views.py`, fields in `ui/widgets/properties.tile_target`, tab in `tile_dialog.py` |
 | Something the Properties panel edits | a `*_target()` in `ui/widgets/properties.py` (fields = `core/tags.F` dicts) |
 | New dialog | new file `ui/dialogs/<name>_dialog.py`; open it from the page / window that needs it |
 | New document page or panel | `ui/widgets/` |
@@ -45,7 +45,7 @@ syncing reusable improvements back to spex-ui.
   `src/nxlogger/__init__.py` for a release (EXE properties, installer name and About read it).
 - **Project files are JSON** (`.nxl`, version 2; `.sxl` / `.mqdaq` still open). New fields need
   defaults and a migration in `Project.from_dict` so older files open (v1 topics -> MQTT
-  wavepacket devices with the same id; free-form views -> grids; `window_s` -> `win_n`;
+  wavepacket devices with the same id; grid-layout views -> free-form; `window_s` -> `win_n`;
   TDMS profiles -> CSV; v5 `alarm_lo/hi` -> Level 1/2).
 - **Live data path:** driver thread -> `DriverManager.q` -> `_drain_and_draw` -> `_ingest`
   (scale, ring, alarms, StatHub, variables, recorder, AI log). A scan is a one-sample

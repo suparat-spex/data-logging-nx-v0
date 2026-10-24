@@ -1,53 +1,34 @@
-"""View model (no Qt): grid views, editing rows / columns, migration of free-form views."""
+"""View model (no Qt): free-form views with a snap grid, migration of grid and tabbed views."""
 from nxlogger.core import view_model as vm
 from nxlogger.core.project import Project
 
 
-def test_old_view_becomes_grid():
-    old = {"id": "v1", "name": "Old", "tiles": [
-        {"id": "h", "kind": "text", "x": 10, "y": 10, "w": 600, "h": 50},
-        {"id": "a", "kind": "value", "x": 10, "y": 80, "w": 200, "h": 110},
-        {"id": "b", "kind": "gauge", "x": 230, "y": 80, "w": 200, "h": 110, "window_s": 5},
-        {"id": "c", "kind": "plot", "x": 10, "y": 210, "w": 600, "h": 300}]}
+def test_old_view_gets_tile_defaults():
+    old = {"id": "v1", "name": "Old", "tiles": [{"id": "t", "kind": "plot", "x": 0, "y": 0, "w": 9, "h": 9,
+                                                 "window_s": 5}]}
     v = vm.normalize_view(old)
-    pos = {t["id"]: (t["row"], t["col"], t["colspan"]) for t in v["tiles"]}
-    assert v["layout"] == "grid" and len(v["rows"]) == 3 and len(v["cols"]) == 2
-    assert pos == {"h": (0, 0, 2), "a": (1, 0, 1), "b": (1, 1, 1), "c": (2, 0, 2)}
-    assert v["rows"][0]["fixed"] and not v["rows"][2]["fixed"]
-    b = next(t for t in v["tiles"] if t["id"] == "b")
-    assert (b["win_n"], b["win_unit"]) == (5.0, "s") and "x" not in b
+    t = v["tiles"][0]
+    assert t["plot"] == "time" and t["legend"] is True and v["grid"] == 10 and v["layout"] == "free"
+    assert (t["x"], t["w"], t["win_n"], t["win_unit"]) == (0, 9, 5.0, "s")
 
 
-def test_insert_and_delete_lines_move_components():
-    v = vm.new_view("G", rows=2, cols=3)
-    wide = vm.new_tile("plot", 0, 0, colspan=3, rowspan=1)
-    cell = vm.new_tile("value", 1, 1)
-    v["tiles"] = [wide, cell]
-    vm.insert_line(v, "cols", 1)                     # crossing component grows, right one moves
-    assert (wide["col"], wide["colspan"], cell["col"]) == (0, 4, 2)
-    assert vm.delete_line(v, "rows", 1) == [cell] and len(v["rows"]) == 1
-    vm.delete_line(v, "cols", 0)
-    assert wide["colspan"] == 3 and vm.tile_at(v, 0, 2) is wide
-    assert vm.free_cell(v) is None                    # full
+def test_grid_view_becomes_free_form():
+    grid = {"id": "g", "name": "Grid", "layout": "grid", "gap": 8, "margin": 10,
+            "rows": [{"size": 60, "fixed": True}, {"size": 1.0, "fixed": False}],
+            "cols": [{"size": 1.0, "fixed": False}, {"size": 1.0, "fixed": False}],
+            "tiles": [{"id": "h", "kind": "text", "row": 0, "col": 0, "rowspan": 1, "colspan": 2},
+                      {"id": "a", "kind": "value", "row": 1, "col": 1, "rowspan": 1, "colspan": 1}]}
+    v = vm.normalize_view(grid)
+    h, a = v["tiles"]
+    assert v["layout"] == "free" and "rows" not in v and "row" not in a
+    assert (h["x"], h["y"]) == (10, 10) and h["h"] == 60 and h["w"] > a["w"]
+    assert a["x"] > h["x"] and a["y"] > h["y"] + 50 and all(x % 10 == 0 for x in (a["x"], a["y"], a["w"]))
 
 
-def test_fits_and_free_cell():
-    v = vm.new_view("G", rows=2, cols=2)
-    v["tiles"] = [vm.new_tile("value", 0, 0)]
-    assert not vm.fits(v, None, 0, 0, 1, 1) and vm.fits(v, None, 0, 1, 2, 1)
-    assert vm.free_cell(v, 2, 2) == (0, 1, 1, 2)
-    v["cols"].pop(); vm.clamp_tiles(v)
-    assert len(v["tiles"]) == 1
-
-
-def test_overlapping_components_are_moved_not_dropped():
-    v = vm.new_view("G", rows=2, cols=2)
-    big = vm.new_tile("plot", 0, 0, colspan=2, rowspan=2)
-    a, b = vm.new_tile("value", 1, 0), vm.new_tile("value", 1, 1)
-    v["tiles"] = [big, a, b]
-    vm.clamp_tiles(v)
-    assert len(v["tiles"]) == 3 and len(v["rows"]) == 3
-    assert {(t["row"], t["col"]) for t in (a, b)} == {(2, 0), (2, 1)}
+def test_new_tile_sizes_and_default_view():
+    assert (vm.new_tile("gauge", 20, 30)["w"], vm.new_tile("led")["h"]) == (240, 140)
+    v = vm.default_view("Overview", [("d", 0), ("d", 1)])
+    assert [t["kind"] for t in v["tiles"]] == ["text", "value", "value", "plot", "stats"]
 
 
 def test_tabbed_view_splits_into_views():
@@ -57,6 +38,7 @@ def test_tabbed_view_splits_into_views():
                                                           {"id": "b", "name": "Pumps", "tiles": [tile(), tile()]}]}]
     p = Project.from_dict(d)
     assert [v["name"] for v in p.views] == ["Plant", "Plant - Pumps"]
+    assert [len(v["tiles"]) for v in p.views] == [1, 2]
     assert all("pages" not in v for v in p.views)
 
 

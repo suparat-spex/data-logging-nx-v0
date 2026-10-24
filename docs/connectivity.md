@@ -78,4 +78,4 @@ noise`). Unknown keys are ignored. Export a device to get a template.
 `.sxl` (SX Logger) and `.mqdaq` (MQDAQ) projects open and are converted: every MQTT topic
 becomes an MQTT device in wavepacket mode with the same id (alarms, variables, views and
 logging profiles keep working), using the broker last used in the old connection form
-(or `config.ini [mqtt]`). Free-form views become grids. Save as `.nxl` to keep them.
+(or `config.ini [mqtt]`). Save as `.nxl` to keep them.

@@ -8,10 +8,10 @@ NX Logger (tag-based data logger, Yokogawa GA10 / Genesis64 / FUXA style):
     mode stream ESP32 waveforms as array tags. Start / stop per device or all at once.
   * Tags have every channel property (unit, colour, scaling, decimals, Y range) and are
     used everywhere a channel was: alarms, variables, views, logging, AI/ML log.
-  * Views are grids of rows x columns; each cell holds a component (header, trend, FFT,
+  * Views are free-form canvases with a snap grid holding components (header, trend, FFT,
     number, gauge, LED, tag / statistics / alarm table). Statistics windows are seconds,
     minutes, hours or samples, buffered by the app (core/stat_buffer.py).
-  * Right: Properties panel - whatever is selected (device, tag, group, view, cell,
+  * Right: Properties panel - whatever is selected (device, tag, group, view,
     component ...) is edited there, like the Genesis64 / FUXA property inspectors. A small
     Runtime section under it shows recording / communication state.
   * Recording: CSV (and raw .wpk for waveform devices); session folders keep project.json
@@ -716,7 +716,7 @@ class DaqWindow(AppWindow):
         if k[0] in ("device", "group", "tag", "tags", "project"):
             ref = k if k[0] != "tags" else ("tags", k[1], list(k[2]))
             self.select_object(ref)
-        elif k[0] in ("view", "tile", "cell", "line"):
+        elif k[0] in ("view", "tile"):
             page = self.doc_tabs.currentWidget()
             if isinstance(page, dv.ViewPage):
                 self.view_selected(page, page.selected)
@@ -1382,7 +1382,7 @@ class DaqWindow(AppWindow):
                 vi.setForeground(0, QBrush(QColor(T["bad"])))
         varn.setExpanded(True)
         views = node(root, "Views", make_icon("layout", T["text"]), ("views",),
-                     "Screens: grids of headers, trends, numbers, gauges, tables - right-click for New view")
+                     "Screens: headers, trends, numbers, gauges, tables on a snap grid - right-click for New view")
         for vw in self.project.views:
             node(views, vw["name"], make_icon("layout", T["muted"]), ("view", vw["id"]))
         views.setExpanded(True)
@@ -2801,7 +2801,7 @@ class DaqWindow(AppWindow):
         self._mark_dirty()
         self._rebuild_project_tree()
         self.show_properties(props.view_target(self, page))
-        self.toast.popup("Edit mode - select a cell and insert a component")
+        self.toast.popup("Edit mode - add a header, graph, indicator or table")
 
     def view_properties(self, page):
         if page is None:

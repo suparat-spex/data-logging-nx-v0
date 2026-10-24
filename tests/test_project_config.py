@@ -47,7 +47,7 @@ def test_tag_csv_round_trip():
 def test_default_project_has_simulator_and_view():
     p = Project.default()
     assert p.devices[0].driver == "sim" and len(p.devices[0].tags) == 4
-    assert p.views and p.views[0]["layout"] == "grid" and new_device("modbus_rtu").settings["baudrate"] == "9600"
+    assert p.views and p.views[0]["layout"] == "free" and new_device("modbus_rtu").settings["baudrate"] == "9600"
 
 
 def test_config_defaults_and_override(tmp_path, monkeypatch):

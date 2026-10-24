@@ -15,7 +15,6 @@ from nxlogger.core import channel_math as cm
 from nxlogger.core import view_model as vm
 from nxlogger.core.tags import (DRIVERS, PLANNED, SCAN_CHOICES, F, describe_address, driver_label)
 from nxlogger.ui.widgets.property_grid import PropTarget
-from nxlogger.ui.widgets.views import ADD_MENUS
 
 STATS = {k: an.STAT_LABEL[k] for k in an.STAT_KEYS}
 WIN_UNITS = {k: v[0] for k, v in vm.WIN_UNITS.items()}
@@ -217,88 +216,25 @@ def view_target(w, page) -> PropTarget:
     v = page.view
 
     def apply(k, val):
-        if k in ("n_rows", "n_cols"):
-            axis = "rows" if k == "n_rows" else "cols"
-            n = int(val)
-            while len(v[axis]) < n:
-                page.insert_line(axis, len(v[axis]))
-            while len(v[axis]) > max(1, n):
-                page.delete_line(axis, len(v[axis]) - 1)
-                if len(v[axis]) > n:                    # cancelled
-                    break
-            w.show_properties(view_target(w, page))
-            return
         if k == "name":
             val = val.strip()
             if not val or val in {x["name"] for x in w.project.views if x is not v}:
                 return
         _set(v, k, val, lambda: w.view_props_changed(page, k))
-    return PropTarget(v["name"], "layout", f"View · {len(v['rows'])} × {len(v['cols'])} grid · "
-                                           f"{len(v['tiles'])} component(s)",
+    return PropTarget(v["name"], "layout", f"View · {len(v['tiles'])} component(s) · "
+                                           "click a component to edit it",
                       [("View", [F("name", "Name", "str", ""), F("description", "Description", "text", "")]),
-                       ("Grid", [F("n_rows", "Rows", "int", 3, (1, vm.MAX_ROWS)),
-                                 F("n_cols", "Columns", "int", 4, (1, vm.MAX_COLS)),
-                                 F("gap", "Gap (px)", "int", 8, (0, 60)),
-                                 F("margin", "Margin (px)", "int", 10, (0, 100))]),
+                       ("Snap grid", [F("grid", "Grid (px)", "int", 10, (2, 100)),
+                                      F("snap", "Snap to grid", "bool", True),
+                                      F("show_grid", "Show grid (edit)", "bool", True)]),
                        ("Appearance", [F("bg", "Background", "color", ""),
                                        F("tile_bg", "Card background", "color", ""),
                                        F("tile_border", "Card border", "color", ""),
                                        F("title_bar", "Title bars (new)", "bool", True)])],
-                      {**v, "n_rows": len(v["rows"]), "n_cols": len(v["cols"]),
-                       "description": v.get("description", "")}, apply,
+                      {**v, "description": v.get("description", "")}, apply,
                       [("Done" if page.editing else "Edit layout", "pencil",
                         lambda: page.btn_edit.setChecked(not page.editing)),
                        ("", "trash", lambda: w.delete_view(page))], key=("view", v["id"]))
-
-
-def _line_fields(axis: str, i: int, line: dict) -> list:
-    return [F(f"{axis}.{i}.fixed", "Fixed size", "bool", False,
-              tip="Fixed: size in pixels. Off: a share (weight) of the free space"),
-            F(f"{axis}.{i}.size", "Size (px)" if line.get("fixed") else "Weight", "float",
-              1.0, (20, 4000) if line.get("fixed") else (0.1, 50))]
-
-
-def _apply_line(w, page, k, v) -> bool:
-    if not k.startswith(("rows.", "cols.")):
-        return False
-    axis, i, what = k.split(".")
-    i = int(i)
-    if what == "fixed":
-        page.set_line(axis, i, fixed=bool(v))
-    else:
-        page.set_line(axis, i, size=v)
-    return True
-
-
-def line_target(w, page, axis: str, i: int) -> PropTarget:
-    line = page.view[axis][i]
-    word = "Row" if axis == "rows" else "Column"
-    a, b = ("above", "below") if axis == "rows" else ("left", "right")
-    name = str(i + 1) if axis == "rows" else (chr(65 + i) if i < 26 else str(i + 1))
-    n = sum(1 for t in page.view["tiles"] if i in range(t["row" if axis == "rows" else "col"],
-                                                       t["row" if axis == "rows" else "col"]
-                                                       + t["rowspan" if axis == "rows" else "colspan"]))
-    return PropTarget(f"{word} {name}", "rows" if axis == "rows" else "columns",
-                      f"{page.name} · {n} component(s) in this {word.lower()}",
-                      [(word, _line_fields(axis, i, line))],
-                      {f"{axis}.{i}.fixed": bool(line.get("fixed")), f"{axis}.{i}.size": float(line["size"])},
-                      lambda k, v: _apply_line(w, page, k, v),
-                      [(f"Insert {a}", "plus", lambda: page.insert_line(axis, i)),
-                       (f"Insert {b}", "plus", lambda: page.insert_line(axis, i + 1)),
-                       ("", "trash", lambda: page.delete_line(axis, i))], key=("line", page.view["id"], axis, i))
-
-
-def cell_target(w, page, r: int, c: int) -> PropTarget:
-    v = page.view
-    items = [(text, lambda k=kind, p=preset: page.add_tile(k, at=(r, c), **p))
-             for _, menu in ADD_MENUS for text, _i, kind, preset in menu]
-    return PropTarget(f"Cell {chr(65 + c) if c < 26 else c + 1}{r + 1}", "grid",
-                      f"{page.name} · empty - insert a component",
-                      [("Row", _line_fields("rows", r, v["rows"][r])), ("Column", _line_fields("cols", c, v["cols"][c]))],
-                      {f"rows.{r}.fixed": bool(v["rows"][r].get("fixed")), f"rows.{r}.size": float(v["rows"][r]["size"]),
-                       f"cols.{c}.fixed": bool(v["cols"][c].get("fixed")), f"cols.{c}.size": float(v["cols"][c]["size"])},
-                      lambda k, val: _apply_line(w, page, k, val),
-                      [("Insert", "plus", items)], key=("cell", v["id"], r, c))
 
 
 # ---------------------------------------------------------------------- components
@@ -321,12 +257,12 @@ def tile_target(w, page, cfg: dict) -> PropTarget:
     pick_many = lambda: w.pick_keys(cfg, "channels", True, page)        # noqa: E731
     pick_one = lambda: w.pick_keys(cfg, "channel", False, page)         # noqa: E731
     comp = [F("type", "Type", "info", ""), F("title", "Title", "str", "", tip="empty = automatic"),
-            F("show_title", "Show title", "bool", True),
-            F("colspan", "Column span", "int", 1, (1, vm.MAX_COLS)),
-            F("rowspan", "Row span", "int", 1, (1, vm.MAX_ROWS))]
+            F("show_title", "Show title", "bool", True)]
+    geo = [F("x", "X (px)", "int", 0, (0, 20000)), F("y", "Y (px)", "int", 0, (0, 20000)),
+           F("w", "Width (px)", "int", 200, (vm.MIN_W, 20000)), F("h", "Height (px)", "int", 110, (vm.MIN_H, 20000))]
     data, look = [], [F("card_bg", "Background", "color", ""), F("border_color", "Border", "color", "")]
     if kind == "text":
-        comp = [comp[0]] + comp[3:]
+        comp = [comp[0]]
         data = [F("text", "Text", "text", ""), F("style", "Style", "choice", "H1",
                                                  {"H1": "Header 1", "H2": "Header 2", "H3": "Header 3",
                                                   "Body": "Body text"}),
@@ -369,15 +305,8 @@ def tile_target(w, page, cfg: dict) -> PropTarget:
             "channel": _keys_text(w, [cfg["channel"]] if cfg.get("channel") else [])}
 
     def apply(k, v):
-        if k in ("colspan", "rowspan"):
-            cs = int(v) if k == "colspan" else cfg["colspan"]
-            rs = int(v) if k == "rowspan" else cfg["rowspan"]
-            if vm.fits(page.view, cfg, cfg["row"], cfg["col"], rs, cs):
-                cfg.update(colspan=cs, rowspan=rs)
-                page.tile_changed(cfg, relayout=True)
-            else:
-                w.toast.popup("No room - the neighbouring cells are taken")
-                w.show_properties(tile_target(w, page, cfg))
+        if k in ("x", "y", "w", "h"):
+            _set(cfg, k, page.snap(int(v)), lambda: page.tile_changed(cfg, geometry=True))
             return
         if k == "win_n":
             v = float(v)
@@ -385,24 +314,19 @@ def tile_target(w, page, cfg: dict) -> PropTarget:
     actions = [("All settings...", "sliders", lambda: tile and page.edit_tile(tile)),
                ("", "copy", lambda: tile and page.duplicate_tile(tile)),
                ("", "trash", lambda: tile and page.delete_tile(tile))]
-    pos = f"{chr(65 + cfg['col']) if cfg['col'] < 26 else cfg['col'] + 1}{cfg['row'] + 1}"
     return PropTarget(vm.tile_title(cfg), {"plot": "chart", "text": "heading", "value": "hash", "gauge": "gauge",
                                           "led": "circle-dot", "stats": "sigma", "alarms": "bell",
                                           "tags": "tag"}.get(kind, "layout"),
-                      f"{page.name} · cell {pos}" + (f" · {cfg['colspan']}×{cfg['rowspan']} cells"
-                                                    if (cfg['colspan'], cfg['rowspan']) != (1, 1) else ""),
-                      [("Component", comp), ("Data", data), ("Appearance", look)], vals, apply, actions,
+                      f"{page.name} · {cfg['w']}×{cfg['h']} px at {cfg['x']}, {cfg['y']}",
+                      [("Component", comp), ("Data", data), ("Position", geo), ("Appearance", look)],
+                      vals, apply, actions,
                       key=("tile", cfg["id"]))
 
 
 def selection_target(w, page, sel) -> PropTarget:
-    if sel is None:
-        return view_target(w, page)
-    if sel[0] == "tile":
+    if sel and sel[0] == "tile":
         return tile_target(w, page, sel[1])
-    if sel[0] == "cell":
-        return cell_target(w, page, sel[1], sel[2])
-    return line_target(w, page, "rows" if sel[0] == "row" else "cols", sel[1])
+    return view_target(w, page)
 
 
 # ====================================================================== others

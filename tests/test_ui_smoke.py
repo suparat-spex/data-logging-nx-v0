@@ -103,7 +103,6 @@ def test_simulator_feeds_tags_views_and_stats(win):
 
 
 def test_properties_panel_targets(win):
-    from nxlogger.ui.widgets import properties as props
     dev = win.project.devices[0]
     for ref in (("device", dev.id), ("tag", dev.id, 0), ("project",)):
         win.select_object(ref)
@@ -115,10 +114,11 @@ def test_properties_panel_targets(win):
     assert win.props.target.key == ("tile", tile["id"])
     win.props.target.apply("decimals", 1)
     assert tile["decimals"] == 1
-    page.select(("cell", 0, 0))
-    page.insert_line("cols", 1)                          # inside the header's span: it grows
-    assert len(page.view["cols"]) == 5 and page.view["tiles"][0]["colspan"] == 5
-    t = props.view_target(win, page)
-    t.apply("n_rows", 5)
-    assert len(page.view["rows"]) == 5
+    win.props.target.apply("w", 333)                     # snaps to the 10 px grid
+    tile_w = page.tile_of(tile).width()
+    assert tile["w"] == 330 and tile_w == 330
+    page.add_tile("led")
+    assert page.view["tiles"][-1]["kind"] == "led" and win.props.target.key[0] == "tile"
+    page.select(None)
+    assert win.props.target.key == ("view", page.view["id"])
     page.btn_edit.setChecked(False)

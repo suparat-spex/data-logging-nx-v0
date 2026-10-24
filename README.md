@@ -7,12 +7,12 @@ connectivity of a SCADA (Genesis64, FUXA):
   (JSON / plain values, or ESP32 waveform packets), **OPC UA** (client with address-space
   browser) and a built-in **simulator**. Tags in groups, live value / quality / time,
   write to RW tags, tag list import / export (CSV). OPC DA is planned.
-- **Views:** grids of rows × columns; each cell holds a component - header, trend, FFT /
-  spectrogram / histogram, number, gauge, LED, tag table, statistics table, alarm table.
-  Add, insert, delete and size rows and columns; components can span cells.
+- **Views:** free-form screens with a snap grid - drag components to move them, the corner
+  grip to resize: header, trend, FFT / spectrogram / histogram, number, gauge, LED, tag table,
+  statistics table, alarm table.
 - **Statistics** over windows the app buffers itself: seconds, minutes, hours or a number
   of samples, moving or block (mean of each full minute ...).
-- **Properties panel:** select anything (device, tag, group, view, cell, component) and
+- **Properties panel:** select anything (device, tag, group, view, component) and
   edit it on the right.
 - **Alarms:** 4 levels per tag (H, L, difference, rate of change, data loss) with
   hysteresis, on-delay, ACK / latch, alarm log, notifications (popup, REST, MQTT).
@@ -44,7 +44,7 @@ names and never send real data there). Defaults are in `config.ini`
 
 ```
 src/nxlogger/
-  core/       no Qt: tags (devices, tags, connector schemas), project, view_model (grid),
+  core/       no Qt: tags (devices, tags, connector schemas), project, view_model,
               stat_buffer, ring, recording, ml_log, alarm_rules, channel_math, analysis,
               variables, wavepacket
   comms/      drivers/ (sim, modbus, mqtt, opcua - one thread per device), manager.py,

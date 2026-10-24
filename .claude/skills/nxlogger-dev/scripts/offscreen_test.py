@@ -179,22 +179,21 @@ lp = [L.new_log_profile("signal"),
 v_rms = {**vr.new_variable("statistic", "VibRMS"), "source": [sim.id, 0], "stat": "rms",
          "win_n": 2.0, "win_unit": "s"}
 v_sum = {**vr.new_variable("formula", "Sum"), "expr": "PLC_Temperature + PLC_Pressure"}
-view = vm.new_view("Overview", rows=4, cols=4)
-view["rows"] = [{"size": 56, "fixed": True}, {"size": 120, "fixed": True}, {"size": 2.0, "fixed": False},
-                {"size": 1.5, "fixed": False}]
+view = vm.new_view("Overview")
 keys = [[d.id, t.index] for d in (plc, uad, sim) for t in d.tags]
-stats_tile = vm.new_tile("stats", 3, 0, colspan=2, channels=keys, win_n=25, win_unit="samples")
+stats_tile = vm.new_tile("stats", 10, 560, w=520, h=190, channels=keys, win_n=25, win_unit="samples")
 view["tiles"] = [
-    vm.new_tile("text", 0, 0, colspan=4, text="Plant overview", style="H1", show_title=False),
-    vm.new_tile("value", 1, 0, channel=[plc.id, 0], decimals=2),
-    vm.new_tile("gauge", 1, 1, channel=list(vr.var_key(v_rms["id"])), g_min=0, g_max=1),
-    vm.new_tile("led", 1, 2, channel=[plc.id, 0], led_op=">", led_value=1.5, title="Temperature high"),
-    vm.new_tile("value", 1, 3, channel=[uad.id, 0], quantity="max", win_n=1, win_unit="min", decimals=1),
-    vm.new_tile("plot", 2, 0, colspan=3, rowspan=1, channels=[[sim.id, 0], [uad.id, 0]], title="Trend",
-                span_s=10),
-    vm.new_tile("tags", 2, 3, colspan=1, channels=keys),
+    vm.new_tile("text", 10, 10, w=860, h=60, text="Plant overview", style="H1", show_title=False),
+    vm.new_tile("value", 10, 80, w=200, h=120, channel=[plc.id, 0], decimals=2),
+    vm.new_tile("gauge", 230, 80, w=200, h=120, channel=list(vr.var_key(v_rms["id"])), g_min=0, g_max=1),
+    vm.new_tile("led", 450, 80, w=200, h=120, channel=[plc.id, 0], led_op=">", led_value=1.5,
+                title="Temperature high"),
+    vm.new_tile("value", 670, 80, w=200, h=120, channel=[uad.id, 0], quantity="max", win_n=1, win_unit="min",
+                decimals=1),
+    vm.new_tile("plot", 10, 220, w=640, h=320, channels=[[sim.id, 0], [uad.id, 0]], title="Trend", span_s=10),
+    vm.new_tile("tags", 670, 220, w=420, h=320, channels=keys),
     stats_tile,
-    vm.new_tile("alarms", 3, 2, colspan=2, source="active", max_rows=5)]
+    vm.new_tile("alarms", 550, 560, w=540, h=190, source="active", max_rows=5)]
 log_dir = os.path.join(args.out, "rec")
 p = L.Project(name="NXL Test", devices=devices, logging=L.LoggingCfg(folder=log_dir), logging_profiles=lp,
               alarms=[a1, a2, a3], alarm_profiles=[pop, rest], views=[view], variables=[v_rms, v_sum])
@@ -297,7 +296,7 @@ def finish():
     w.project_path = path; w._save_project()
     q = L.Project.from_dict(json.load(open(path, encoding="utf-8")))
     check(len(q.devices) == len(devices) and len(q.alarms) == 3 and len(q.views) == 1 and
-          len(q.views[0]["tiles"]) == 9 and q.views[0]["tiles"][1]["row"] == 1, "project round trip (.nxl)")
+          len(q.views[0]["tiles"]) == 9 and q.views[0]["tiles"][1]["y"] == 80, "project round trip (.nxl)")
     w.drivers.stop_all()
     if pub_state["client"]:
         pub_state["client"].loop_stop()
