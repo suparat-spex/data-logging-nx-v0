@@ -40,6 +40,16 @@ def test_fits_and_free_cell():
     assert len(v["tiles"]) == 1
 
 
+def test_overlapping_components_are_moved_not_dropped():
+    v = vm.new_view("G", rows=2, cols=2)
+    big = vm.new_tile("plot", 0, 0, colspan=2, rowspan=2)
+    a, b = vm.new_tile("value", 1, 0), vm.new_tile("value", 1, 1)
+    v["tiles"] = [big, a, b]
+    vm.clamp_tiles(v)
+    assert len(v["tiles"]) == 3 and len(v["rows"]) == 3
+    assert {(t["row"], t["col"]) for t in (a, b)} == {(2, 0), (2, 1)}
+
+
 def test_tabbed_view_splits_into_views():
     tile = lambda: vm.new_tile("gauge")                   # noqa: E731
     d = Project.default().to_dict()

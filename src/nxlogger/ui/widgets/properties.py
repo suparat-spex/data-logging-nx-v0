@@ -59,7 +59,7 @@ def device_target(w, did: str) -> PropTarget | None:
     info = DRIVERS[d.driver]
     general = [F("name", "Name", "str", ""), F("enabled", "Enabled", "bool", True),
                F("driver", "Connector", "info", ""),
-               F("scan_ms", "Scan interval (ms)", "combo", 1000, {x: f"{x} ms" for x in SCAN_CHOICES},
+               F("scan_ms", "Scan interval", "combo", 1000, {x: f"{x} ms" for x in SCAN_CHOICES},
                  "How often the number tags are read"),
                F("description", "Description", "text", "")]
     settings = [dict(f, key="set." + f["key"]) for f in info["settings"]]
@@ -241,9 +241,9 @@ def view_target(w, page) -> PropTarget:
                                  F("gap", "Gap (px)", "int", 8, (0, 60)),
                                  F("margin", "Margin (px)", "int", 10, (0, 100))]),
                        ("Appearance", [F("bg", "Background", "color", ""),
-                                       F("tile_bg", "Component background", "color", ""),
-                                       F("tile_border", "Component border", "color", ""),
-                                       F("title_bar", "Title bars on new components", "bool", True)])],
+                                       F("tile_bg", "Card background", "color", ""),
+                                       F("tile_border", "Card border", "color", ""),
+                                       F("title_bar", "Title bars (new)", "bool", True)])],
                       {**v, "n_rows": len(v["rows"]), "n_cols": len(v["cols"]),
                        "description": v.get("description", "")}, apply,
                       [("Done" if page.editing else "Edit layout", "pencil",
@@ -252,10 +252,9 @@ def view_target(w, page) -> PropTarget:
 
 
 def _line_fields(axis: str, i: int, line: dict) -> list:
-    word = "Row" if axis == "rows" else "Column"
-    return [F(f"{axis}.{i}.fixed", f"{word} fixed size", "bool", False,
+    return [F(f"{axis}.{i}.fixed", "Fixed size", "bool", False,
               tip="Fixed: size in pixels. Off: a share (weight) of the free space"),
-            F(f"{axis}.{i}.size", f"{word} {'size (px)' if line.get('fixed') else 'weight'}", "float",
+            F(f"{axis}.{i}.size", "Size (px)" if line.get("fixed") else "Weight", "float",
               1.0, (20, 4000) if line.get("fixed") else (0.1, 50))]
 
 
@@ -323,8 +322,8 @@ def tile_target(w, page, cfg: dict) -> PropTarget:
     pick_one = lambda: w.pick_keys(cfg, "channel", False, page)         # noqa: E731
     comp = [F("type", "Type", "info", ""), F("title", "Title", "str", "", tip="empty = automatic"),
             F("show_title", "Show title", "bool", True),
-            F("colspan", "Columns spanned", "int", 1, (1, vm.MAX_COLS)),
-            F("rowspan", "Rows spanned", "int", 1, (1, vm.MAX_ROWS))]
+            F("colspan", "Column span", "int", 1, (1, vm.MAX_COLS)),
+            F("rowspan", "Row span", "int", 1, (1, vm.MAX_ROWS))]
     data, look = [], [F("card_bg", "Background", "color", ""), F("border_color", "Border", "color", "")]
     if kind == "text":
         comp = [comp[0]] + comp[3:]

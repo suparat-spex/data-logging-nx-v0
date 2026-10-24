@@ -67,7 +67,7 @@ from nxlogger.core import wavepacket as wp
 from nxlogger.core.project import (OLD_PROJECT_EXTS, PROJECT_EXT, Project, fmt_interval, new_log_profile)
 from nxlogger.core.ring import MAX_PLOT_S, TopicStream
 from nxlogger.core.tags import (COLORS, DRIVERS, PLANNED, DeviceCfg, ScanBlock, TagCfg, driver_label, new_device,
-                                new_tag, tag_color, tag_from_row, tags_to_rows)
+                                new_tag, tag_from_row, tags_to_rows)
 from nxlogger.ui.dialogs.about_dialog import show_about
 from nxlogger.ui.dialogs.add_tags_dialog import AddTagsDialog
 from nxlogger.ui.dialogs.device_dialog import DeviceDialog
@@ -320,7 +320,7 @@ class DaqWindow(AppWindow):
 
     def build_extra_menus(self, mb):
         # actions shared by the Acquisition menu and the toolbar (menus are built first)
-        self.act_connect = self.act("Start", self._toggle_comm, "Ctrl+K", "play")
+        self.act_connect = self.act("Connect", self._toggle_comm, "Ctrl+K", "play")
         self.act_rec = self.act("Record", self._start_recording, "Ctrl+R", None)
         self.reg_icon(self.act_rec, "circle", "bad")
         self.act_stop = self.act("Stop", self._stop_recording, "Ctrl+Shift+R", "square")
@@ -486,8 +486,8 @@ class DaqWindow(AppWindow):
             "🧩", "No tags enabled", "Add a device and its tags in Connectivity, or enable one, "
             "to see them here.", "Open Connectivity", lambda: self._show_doc("connectivity")))
         self.screen_stack.addWidget(EmptyState(
-            "📡", "Waiting for data", "Start communication: every enabled device connects and its "
-            "tags appear here.", "Start", self._start_all))
+            "📡", "Waiting for data", "Connect: every enabled device starts and its tags appear "
+            "here.", "Connect", self._start_all))
         self.screen_stack.addWidget(self.glw)
 
         bar = QFrame(); bar.setObjectName("bottomBar")
@@ -915,6 +915,7 @@ class DaqWindow(AppWindow):
 
     def _structure_changed(self):
         """Devices / tags changed: scaling, formula names, alarms, plots, logging, statistics."""
+        self._rebuild_colors()
         self._rebuild_scalers()
         self._variables_reload()                 # tag names are formula names
         self._rebuild_plots()
@@ -946,6 +947,19 @@ class DaqWindow(AppWindow):
             self.drivers.start(self.project.device(did))
         QTimer.singleShot(0, lambda: (self._structure_changed(), self.conn_page.refresh(),
                                       self._refresh_properties()))
+
+    def _rebuild_colors(self):
+        """Default tag colours run through the palette across the whole project (the first tag
+        of every device would otherwise get the same colour); a tag's own colour wins."""
+        self._colors = {}
+        k = 0
+        for d in self.project.devices:
+            for t in d.tags:
+                self._colors[(d.id, t.index)] = t.color or COLORS[k % len(COLORS)]
+                k += 1
+
+    def color_of(self, did: str, idx: int) -> str:
+        return getattr(self, "_colors", {}).get((did, idx)) or COLORS[idx % len(COLORS)]
 
     def device_state(self, did: str) -> tuple[str, str]:
         return self.drivers.state(did)
@@ -1060,7 +1074,8 @@ class DaqWindow(AppWindow):
         if t is None or not self._recording_guard():
             return
         st = self.streams.get(did)
-        dlg = TagDialog(self, dev, t, COLORS[t.index % len(COLORS)],
+        k = next(i for i, x in enumerate(x for d in self.project.devices for x in d.tags) if x is t)
+        dlg = TagDialog(self, dev, t, COLORS[k % len(COLORS)],
                         lambda: st.raw_mean.get(idx) if st else None)
         if dlg.exec():
             dlg.apply(t)
@@ -1263,7 +1278,7 @@ class DaqWindow(AppWindow):
 
     def _sync_comm(self):
         on = self.drivers.any_running
-        text = "Stop" if on else "Start"
+        text = "Disconnect" if on else "Connect"
         if self.act_connect.text() != text:
             self.act_connect.setText(text)
             self.act_connect.setIcon(make_icon("square" if on else "play", T["bad" if on else "ok"]))
@@ -1319,7 +1334,7 @@ class DaqWindow(AppWindow):
             if not d.enabled:
                 di.setForeground(0, muted)
             for t in d.tags[:200]:                   # the Connectivity table shows them all
-                ti = node(di, t.name + (f"  ({t.unit})" if t.unit else ""), swatch(tag_color(t)),
+                ti = node(di, t.name + (f"  ({t.unit})" if t.unit else ""), swatch(self.color_of(d.id, t.index)),
                           ("tag", d.id, t.index), (t.group + " · " if t.group else "") + t.description)
                 if not (t.enabled and d.enabled):
                     ti.setForeground(0, muted)
@@ -1868,8 +1883,8 @@ class DaqWindow(AppWindow):
                   ", ".join(f"{p['name']} [{p['type']}, {p['format']}]" for p in profiles) + ")")
         self.set_status(f"Recording to {rec.dir}", "ok")
         if not self.drivers.any_running:
-            self.banners.post("rec", "Recording, but communication is stopped - nothing is being "
-                                     "received.", "warn", "Start", self._start_all)
+            self.banners.post("rec", "Recording, but the devices are not connected - nothing is being "
+                                     "received.", "warn", "Connect", self._start_all)
         self._update_stats()
 
     def _stop_recording(self):
@@ -2171,7 +2186,7 @@ class DaqWindow(AppWindow):
                     p.setLabel("left", units.pop(), color=T["muted"])
             else:
                 d, t = members[0]
-                p.setLabel("left", f"{title}" + (f" ({t.unit})" if t.unit else ""), color=tag_color(t))
+                p.setLabel("left", f"{title}" + (f" ({t.unit})" if t.unit else ""), color=self.color_of(d.id, t.index))
             if first is None:
                 first = p
             else:
@@ -2186,9 +2201,9 @@ class DaqWindow(AppWindow):
             for d, t in members:
                 label_txt = t.name + (f" [{t.unit}]" if t.unit else "")
                 self.curves[(d.id, t.index)] = p.plot(
-                    pen=pg.mkPen(tag_color(t), width=1.5), name=label_txt,
+                    pen=pg.mkPen(self.color_of(d.id, t.index), width=1.5), name=label_txt,
                     symbol="o" if t.kind == "number" and d.scan_ms >= 1000 else None, symbolSize=3,
-                    symbolPen=None, symbolBrush=tag_color(t))
+                    symbolPen=None, symbolBrush=self.color_of(d.id, t.index))
             self.plots.append(p)
         self._zoomed = False
         self.zoom_btn.setVisible(False)
@@ -2212,7 +2227,7 @@ class DaqWindow(AppWindow):
             for t in d.tags:
                 if not t.enabled:
                     continue
-                a = m.addAction(swatch(tag_color(t)), t.name + (f"  [{t.unit}]" if t.unit else ""))
+                a = m.addAction(swatch(self.color_of(d.id, t.index)), t.name + (f"  [{t.unit}]" if t.unit else ""))
                 a.setCheckable(True); a.setChecked((d.id, t.index) not in hidden)
                 a.toggled.connect(lambda on, k=(d.id, t.index): self._toggle_quick(k, on))
 
@@ -2509,7 +2524,7 @@ class DaqWindow(AppWindow):
         for d in self.project.devices:
             for t in d.tags:
                 out.append((d.id, t.index, f"{d.name} · {t.name}" + (f" [{t.unit}]" if t.unit else ""),
-                            tag_color(t), t.unit))
+                            self.color_of(d.id, t.index), t.unit))
         for v in self.project.variables:             # calculated tags
             if v["enabled"]:
                 u = v.get("unit", "")

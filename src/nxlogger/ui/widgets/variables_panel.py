@@ -62,7 +62,7 @@ class VariablesPage(QWidget):
         self.tree.itemChanged.connect(self._item_changed)
         self.tree.customContextMenuRequested.connect(self._menu)
         hint = label("  Variables are calculated channels: use them in views, alarms and logging like any "
-                     "channel. In formulas, channels are named <topic>_<channel> (e.g. Simulator_CH1).",
+                     "tag. In formulas, tags are named <device>_<tag> (e.g. Simulator_Temperature).",
                      muted=True, small=True)
         hint.setContentsMargins(4, 6, 4, 6); hint.setWordWrap(True)
 

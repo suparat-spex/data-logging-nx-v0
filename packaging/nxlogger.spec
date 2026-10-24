@@ -4,6 +4,8 @@
 import re
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_submodules
+
 from PyInstaller.utils.win32.versioninfo import (FixedFileInfo, StringFileInfo, StringStruct, StringTable,
                                                  VarFileInfo, VarStruct, VSVersionInfo)
 
@@ -27,7 +29,9 @@ a = Analysis(
     [str(PKG / "__main__.py")],
     pathex=[str(ROOT / "src")],
     datas=[(str(PKG / "resources"), "nxlogger/resources")],      # paths.resource_dir() looks here
-    hiddenimports=["PySide6.QtSvg"],
+    # connectors load their libraries on first use: pymodbus / asyncua import parts dynamically
+    hiddenimports=["PySide6.QtSvg", "serial", "serial.tools.list_ports", "asyncua.sync"]
+                  + collect_submodules("pymodbus") + collect_submodules("nxlogger.comms.drivers"),
     excludes=["tkinter", "matplotlib", "PyQt5", "PyQt6", "PySide2", "IPython", "pytest"],
     noarchive=False,
 )

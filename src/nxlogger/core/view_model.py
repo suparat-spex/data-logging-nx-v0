@@ -242,21 +242,27 @@ def free_cell(v: dict, want_cs: int = 1, want_rs: int = 1) -> tuple[int, int, in
 
 
 def clamp_tiles(v: dict):
-    """After rows / columns were removed: shrink spans, drop components that lost their cell."""
+    """Make the components fit the grid (file edited by hand, older version): shrink spans
+    at the edge; a component without room moves to a free cell - a row is added if the grid
+    is full, so nothing is ever dropped."""
     nr, nc = len(v["rows"]), len(v["cols"])
-    keep = []
-    for t in v["tiles"]:
-        if t["row"] >= nr or t["col"] >= nc:
-            continue
-        t["rowspan"] = max(1, min(t["rowspan"], nr - t["row"]))
-        t["colspan"] = max(1, min(t["colspan"], nc - t["col"]))
-        keep.append(t)
-    v["tiles"] = []                                       # re-add: a later tile may overlap now
+    keep = list(v["tiles"])
+    for t in keep:
+        t["row"], t["col"] = max(0, min(int(t["row"]), nr - 1)), max(0, min(int(t["col"]), nc - 1))
+        t["rowspan"] = max(1, min(int(t["rowspan"]), nr - t["row"]))
+        t["colspan"] = max(1, min(int(t["colspan"]), nc - t["col"]))
+    v["tiles"] = []                                       # re-add: a later one may overlap now
     for t in keep:
         span = fit_span(v, t, t["row"], t["col"], t["colspan"], t["rowspan"])
-        if span:
-            t["colspan"], t["rowspan"] = span
-            v["tiles"].append(t)
+        if span is None:
+            place = free_cell(v, t["colspan"], 1)
+            if place is None:
+                v["rows"].append({"size": 1.0, "fixed": False})
+                place = free_cell(v, t["colspan"], 1)
+            t["row"], t["col"] = place[0], place[1]
+            span = place[2], place[3]
+        t["colspan"], t["rowspan"] = span
+        v["tiles"].append(t)
 
 
 def insert_line(v: dict, axis: str, at: int):

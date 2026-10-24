@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nx-logger"
-description = "NX Logger - MQTT data logger: live waveforms, alarms and recording from ESP32 DAQ nodes"
+description = "NX Logger - data logger for Modbus TCP / RTU, MQTT and OPC UA tags: views, alarms, statistics, recording"
 readme = "README.md"
 requires-python = ">=3.10"
 dynamic = ["version"]
@@ -14,6 +14,9 @@ dependencies = [
     "paho-mqtt>=2.0",
     "numpy>=1.24",
     "zstandard>=0.22; python_version < '3.14'",   # AI/ML data log .zst (3.14+ has compression.zstd)
+    "pymodbus>=3.6",                              # Modbus TCP / RTU connector
+    "pyserial>=3.5",                              # Modbus RTU serial ports
+    "asyncua>=1.1",                               # OPC UA client connector
 ]
 
 [project.optional-dependencies]

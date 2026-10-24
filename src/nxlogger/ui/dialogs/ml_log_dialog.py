@@ -25,10 +25,10 @@ class MlLogDialog(QDialog):
         v = QVBoxLayout(self)
         intro = label(
             "Continuous raw logging for anomaly detection and model training - runs on its own, "
-            "independent of Record. Every topic is cut into files of one period, aligned to the clock, "
-            "in one folder per day: <folder>/YYYY-MM-DD/<topic>/YYYY-MM-DD_HHMMSS.wpk.zst, with "
-            "events.csv (alarms, markers) and meta.json (channels, units, scaling) per day. "
-            "Lossless: every packet goes into exactly one file.", muted=True, small=True)
+            "independent of Record. Every device is cut into files of one period, aligned to the clock, "
+            "in one folder per day: <folder>/YYYY-MM-DD/<device>/YYYY-MM-DD_HHMMSS.wpk.zst (waveforms) "
+            "or .csv.zst (number tags), with events.csv (alarms, markers) and meta.json (tags, units, "
+            "scaling) per day. Lossless: every packet / scan goes into exactly one file.", muted=True, small=True)
         intro.setWordWrap(True)
         v.addWidget(intro)
         f = QFormLayout(); f.setSpacing(8)

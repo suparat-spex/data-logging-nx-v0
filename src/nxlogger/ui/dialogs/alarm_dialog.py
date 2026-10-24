@@ -1,4 +1,4 @@
-"""Add / edit one alarm: channel, 4 levels, notification profiles."""
+"""Add / edit one alarm: tag, 4 levels, notification profiles."""
 from __future__ import annotations
 
 import copy
@@ -15,7 +15,7 @@ from nxlogger.ui.theme.ui_kit import label, set_prop
 
 
 class AlarmDialog(QDialog):
-    """Add / edit one alarm: channel, 4 levels, notification profiles."""
+    """Add / edit one alarm: tag, 4 levels, notification profiles."""
 
     def __init__(self, parent, alarm: dict, choices, profiles: list[dict]):
         super().__init__(parent)
@@ -38,9 +38,9 @@ class AlarmDialog(QDialog):
             self.chan.setCurrentIndex(max(self.chan.findData(list(self.a["channel"])), 0))
         if self.a.get("ref"):
             self.ref.setCurrentIndex(max(self.ref.findData(list(self.a["ref"])), 0))
-        f.addRow("Channel (tag)", self.chan)
-        f.addRow("Reference channel", self.ref)
-        self.ref.setToolTip("Used by the difference types dH / dL: value = channel − reference")
+        f.addRow("Tag", self.chan)
+        f.addRow("Reference tag", self.ref)
+        self.ref.setToolTip("Used by the difference types dH / dL: value = tag − reference")
         self.desc = QLineEdit(self.a.get("description", ""))
         self.desc.setPlaceholderText("optional - shown in the alarm list and sent to targets")
         f.addRow("Description", self.desc)
@@ -115,12 +115,12 @@ class AlarmDialog(QDialog):
     def _ok(self):
         err = ""
         if self.chan.currentData() is None:
-            err = "Choose a channel."
+            err = "Choose a tag."
         elif not any(r[0].isChecked() for r in self.rows):
             err = "Enable at least one level."
         elif any(r[0].isChecked() and r[1].currentData() in REF_TYPES for r in self.rows) \
                 and self.ref.currentData() is None:
-            err = "Difference alarms (dH / dL) need a reference channel."
+            err = "Difference alarms (dH / dL) need a reference tag."
         elif any(r[0].isChecked() and r[1].currentData() == "D" and r[2].value() <= 0 for r in self.rows):
             err = "Data loss: the setpoint is a time in seconds and must be above 0."
         if err:

@@ -25,7 +25,6 @@ IM04L65B01-01EN.pdf
 # Local recordings / test output
 recordings/
 *.wpk
-*.tdms
 
 # Claude Code: share skills, keep personal settings local
 .claude/settings.local.json

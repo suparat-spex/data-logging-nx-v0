@@ -96,7 +96,8 @@ QToolButton#gridHead[selected="true"] { color: @accent_text@; background: @accen
 QTreeWidget#propGrid { background: @panel@; alternate-background-color: @panel@; border: none; }
 QTreeWidget#propGrid::item { padding: 1px 0; }
 QTreeWidget#propGrid QLineEdit, QTreeWidget#propGrid QComboBox, QTreeWidget#propGrid QSpinBox,
-QTreeWidget#propGrid QDoubleSpinBox { padding: 1px 4px; border-radius: 3px; }
+QTreeWidget#propGrid QDoubleSpinBox, QTreeWidget#propGrid QPlainTextEdit { padding: 1px 4px; border-radius: 3px;
+  border: 1px solid @border@; background: @input@; }
 QLabel#propTitle { font-size: 14px; font-weight: 600; background: transparent; }
 QFrame#propHead { background: @panel2@; border-bottom: 1px solid @border@; }
 QFrame#propHead QLabel { background: transparent; }

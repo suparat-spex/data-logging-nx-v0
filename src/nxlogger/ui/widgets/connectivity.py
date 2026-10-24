@@ -11,7 +11,7 @@ Select anything to edit it in the Properties panel; double-click a tag for all i
 (scaling, display). Tags can be multi-selected (delete, enable / disable, move to a group).
 
 Host API (duck-typed, DaqWindow):
-  host.project, host.reg_icon(target, name, token), host.recording (bool)
+  host.project, host.reg_icon(target, name, token), host.recording (bool), host.color_of(did, idx)
   host.device_state(did) -> (state, text)
   host.tag_live(did, idx) -> (value text, quality text, good: bool | None, time text)
   host.select_object(ref)            ref: ("device", did) | ("group", did, path) | ("tag", did, idx) | None
@@ -28,7 +28,7 @@ from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLineEdit, QMenu,
                                QSplitter, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from nxlogger.core.tags import DRIVERS, PLANNED, describe_address, driver_label, tag_color
+from nxlogger.core.tags import DRIVERS, PLANNED, describe_address, driver_label
 from nxlogger.ui.icons import swatch
 from nxlogger.ui.theme.ui_kit import T, label, make_icon
 
@@ -259,7 +259,7 @@ class ConnectivityPage(QWidget):
             it = QTreeWidgetItem([t.name, t.group, describe_address(dev.driver, "", t), typ,
                                   t.access, t.unit, "", "", "", t.description])
             it.setData(0, Qt.ItemDataRole.UserRole, (dev.id, t.index))
-            it.setIcon(0, swatch(tag_color(t)))
+            it.setIcon(0, swatch(self.host.color_of(dev.id, t.index)))
             it.setTextAlignment(C_VALUE, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             if not t.enabled:
                 for c in range(len(COLS)):

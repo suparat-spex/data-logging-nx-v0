@@ -380,7 +380,7 @@ class AlarmPage(QWidget):
     def add_alarm(self, channel=None):
         ch = self.host.channel_choices()
         if not ch:
-            QMessageBox.information(self, "Add alarm", "Add a topic with channels first.")
+            QMessageBox.information(self, "Add alarm", "Add a device with tags first (Connectivity).")
             return
         a = new_alarm(channel or ch[0][:2])
         a["profiles"] = [p["id"] for p in self.host.project.alarm_profiles if p["enabled"]]
@@ -388,7 +388,7 @@ class AlarmPage(QWidget):
         dlg = AlarmDialog(self, a, ch, self.host.project.alarm_profiles)
         dlg.setWindowTitle("Add alarm")
         if dlg.name.text() == "New alarm":
-            dlg.name.clear(); dlg.name.setPlaceholderText("default: the channel name")
+            dlg.name.clear(); dlg.name.setPlaceholderText("default: the tag name")
         if dlg.exec():
             self.host.project.alarms.append(dlg.result_alarm())
             self.host.alarms_changed()

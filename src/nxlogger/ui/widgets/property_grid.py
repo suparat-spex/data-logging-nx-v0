@@ -73,7 +73,7 @@ class PropertyGrid(QTreeWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.header().resizeSection(0, 120)
+        self.header().resizeSection(0, 132)
         self.editors: dict[str, QWidget] = {}
         self._fields: dict[str, dict] = {}
         self._quiet = False
@@ -242,8 +242,8 @@ class PropertiesPanel(QWidget):
         self.target = t
         while self.actions_row.count():
             w = self.actions_row.takeAt(0).widget()
-            if w is not None:
-                w.deleteLater()
+            if w is not None:                        # off the screen now, deleted later
+                w.hide(); w.setParent(None); w.deleteLater()
         if t is None:
             self.title.setText("Nothing selected"); self.subtitle.setText("")
             self.icon.setPixmap(make_icon("info", T["muted"]).pixmap(18, 18))
