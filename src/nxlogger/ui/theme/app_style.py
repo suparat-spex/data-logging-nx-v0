@@ -101,6 +101,15 @@ QTreeWidget#propGrid QDoubleSpinBox, QTreeWidget#propGrid QPlainTextEdit { paddi
 QLabel#propTitle { font-size: 14px; font-weight: 600; background: transparent; }
 QFrame#propHead { background: @panel2@; border-bottom: 1px solid @border@; }
 QFrame#propHead QLabel { background: transparent; }
+QFrame#formHead { background: @accent@; border-bottom: 1px solid @border@; }
+QFrame#formHead QLabel#formPath { color: @accent_text@; font-style: italic; background: transparent; }
+QFrame#formHead QLabel#statusMsg { background: transparent; }
+QFrame#formSection { border: 1px solid @border@; border-radius: 4px; background: @panel@; }
+QFrame#formSectionBar { background: @panel2@; border-bottom: 1px solid @border@; border-top-left-radius: 4px; border-top-right-radius: 4px; }
+QLabel#formSectionHead { font-weight: 600; background: transparent; }
+QLabel#formSectionArrow { color: @muted@; background: transparent; }
+QFrame#formSectionBody { background: transparent; border: none; }
+QFrame#formBar { background: @panel@; border-top: 1px solid @border@; }
 QLabel#quality[level="bad"] { color: @bad@; }
 QLabel#quality[level="ok"] { color: @ok@; }
 """

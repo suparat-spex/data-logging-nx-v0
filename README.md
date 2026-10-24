@@ -12,8 +12,11 @@ connectivity of a SCADA (Genesis64, FUXA):
   statistics table, alarm table.
 - **Statistics** over windows the app buffers itself: seconds, minutes, hours or a number
   of samples, moving or block (mean of each full minute ...).
-- **Properties panel:** select anything (device, tag, group, view, component) and
-  edit it on the right.
+- **Workbench editing (Genesis64 style):** double-click a device, tag, group, alarm,
+  variable or logging profile in the Project tree and it opens as a closable editor tab
+  (Full Path header, collapsible sections, Apply / Refresh / Close / New... / Apply & Close /
+  Apply & New...). Pop-ups are only used for actions inside a tab. The **Tags** branch of
+  the tree manages tags and groups; the **Properties panel** edits the selection quickly.
 - **Alarms:** 4 levels per tag (H, L, difference, rate of change, data loss) with
   hysteresis, on-delay, ACK / latch, alarm log, notifications (popup, REST, MQTT).
 - **Recording:** session folders with CSV (and raw `.wpk` for waveforms) plus a

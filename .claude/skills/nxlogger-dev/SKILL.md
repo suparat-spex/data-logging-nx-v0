@@ -20,6 +20,7 @@ wavepacket mode (array tags). Aim for professional data-logger behaviour (see
 | New connector / protocol | schema in `core/tags.DRIVERS`, `comms/drivers/<name>.py` (PollDriver), `make_driver`, test with a local server in `tests/test_drivers.py`, docs/connectivity.md |
 | New view component | `TILE_DEFAULTS` / `KIND_TITLE` / `DEFAULT_SIZE` in `core/view_model.py`, Tile subclass + `ADD_MENUS` in `ui/widgets/views.py`, fields in `ui/widgets/properties.tile_target`, tab in `tile_dialog.py` |
 | Something the Properties panel edits | a `*_target()` in `ui/widgets/properties.py` (fields = `core/tags.F` dicts) |
+| New editable item in the Project tree | a form in `ui/dialogs/` (QDialog with `_ok()` + result / apply; tab pages become sections), a `_spec_<what>()` in `main_window.py`, open it with `open_editor(what, ident)` - no `exec()` pop-up |
 | New dialog | new file `ui/dialogs/<name>_dialog.py`; open it from the page / window that needs it |
 | New document page or panel | `ui/widgets/` |
 | New icon | save the Lucide SVG to `src/nxlogger/resources/icons/ui/<name>.svg`, use `make_icon("<name>", T[...])` or `self.reg_icon(widget, name, token)` |

@@ -378,6 +378,9 @@ class AlarmPage(QWidget):
                 self.profs.setCurrentItem(it)
 
     def add_alarm(self, channel=None):
+        if hasattr(self.host, "open_editor"):          # editor tab (Genesis64 style), no pop-up
+            self.host.open_editor("alarm", None, channel=channel)
+            return
         ch = self.host.channel_choices()
         if not ch:
             QMessageBox.information(self, "Add alarm", "Add a device with tags first (Connectivity).")
@@ -397,6 +400,9 @@ class AlarmPage(QWidget):
     def edit_alarm(self, aid: str | None = None):
         a = next((x for x in self.host.project.alarms if x["id"] == aid), None) if aid else self._sel_alarm()
         if a is None:
+            return
+        if hasattr(self.host, "open_editor"):
+            self.host.open_editor("alarm", a["id"])
             return
         dlg = AlarmDialog(self, a, self.host.channel_choices(), self.host.project.alarm_profiles)
         if dlg.exec():
@@ -493,6 +499,9 @@ class AlarmPage(QWidget):
         return next((p for p in self.host.project.alarm_profiles if p["id"] == pid), None)
 
     def add_profile(self, kind: str = "popup"):
+        if hasattr(self.host, "open_editor"):
+            self.host.open_editor("aprofile", None, kind=kind)
+            return
         dlg = AlarmProfileDialog(self, new_profile(kind))
         if dlg.exec():
             self.host.project.alarm_profiles.append(dlg.result_profile())
@@ -502,6 +511,9 @@ class AlarmPage(QWidget):
         p = next((x for x in self.host.project.alarm_profiles if x["id"] == pid), None) if pid \
             else self._sel_profile()
         if p is None:
+            return
+        if hasattr(self.host, "open_editor"):
+            self.host.open_editor("aprofile", p["id"])
             return
         dlg = AlarmProfileDialog(self, p)
         if dlg.exec():

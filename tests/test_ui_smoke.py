@@ -122,3 +122,62 @@ def test_properties_panel_targets(win):
     page.select(None)
     assert win.props.target.key == ("view", page.view["id"])
     page.btn_edit.setChecked(False)
+
+
+def test_tree_layout(win):
+    from PySide6.QtCore import Qt
+    win._rebuild_project_tree()
+    root = win.ptree.topLevelItem(0)
+    kids = {root.child(i).text(0).split("  ")[0]: root.child(i) for i in range(root.childCount())}
+    assert "Quick View" not in kids and "Tags" in kids and "Connectivity" in kids
+    conn = kids["Connectivity"]
+    assert conn.childCount() == len(win.project.devices)
+    assert all(conn.child(i).childCount() == 0 for i in range(conn.childCount()))      # devices only
+    dev_node = kids["Tags"].child(0)
+    assert dev_node.data(0, Qt.ItemDataRole.UserRole)[0] == "tagdev" and dev_node.childCount() >= 4
+
+
+def test_editor_tabs(win, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from nxlogger.ui.widgets.form_tab import FormTab
+    dev = win.project.devices[0]
+    n_dev, n_tags = len(win.project.devices), len(dev.tags)
+    # existing device: edit the name in the tab, Apply
+    tab = win.open_editor("device", dev.id)
+    assert isinstance(tab, FormTab) and win.doc_tabs.currentWidget() is tab
+    assert win.open_editor("device", dev.id) is tab                 # opened once, then focused
+    tab.dlg.name.setText("Sim A"); tab.dlg.name.textEdited.emit("Sim A")
+    assert tab.modified and win.doc_tabs.tabText(win.doc_tabs.indexOf(tab)).endswith("*")
+    assert tab.apply() and dev.name == "Sim A" and not tab.modified
+    win.close_editor(tab)
+    # new device: a draft until Apply
+    tab = win.open_editor("device", None, driver="modbus_tcp")
+    assert len(win.project.devices) == n_dev
+    tab.dlg.form.w["host"][1].setText("10.0.0.5")
+    assert tab.apply() and len(win.project.devices) == n_dev + 1
+    plc = win.project.devices[-1]
+    assert plc.driver == "modbus_tcp" and plc.settings["host"] == "10.0.0.5" and tab.key == f"edit:device:{plc.id}"
+    win.close_editor(tab)
+    # new group + new tag in it
+    g = win.open_editor("group", None, did=dev.id)
+    g.dlg.name.setText("Boiler")
+    assert g.apply() and "Boiler" in dev.all_groups()
+    t = win.open_editor("tag", None, did=dev.id, group="Boiler")
+    t.dlg.name.setText("Steam")
+    assert t.apply() and len(dev.tags) == n_tags + 1 and dev.tags[-1].group == "Boiler"
+    # every other kind opens as a tab (new and existing)
+    for kind, ident, ctx in (("alarm", None, {}), ("aprofile", None, {"kind": "rest"}), ("variable", None, {}),
+                             ("lprofile", None, {"kind": "statistic"}),
+                             ("lprofile", win.project.logging_profiles[0]["id"], {}),
+                             ("tag", (dev.id, 0), {})):
+        e = win.open_editor(kind, ident, **ctx)
+        assert isinstance(e, FormTab) and e.dlg is not None, kind
+    # closing a modified editor asks; Discard closes
+    e = win.open_editor("tag", (dev.id, 0))
+    e._set_modified(True)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Cancel)
+    assert not win.close_editor(e) and win.doc_tabs.indexOf(e) >= 0
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Discard)
+    assert win.close_editor(e)
+    win._close_editors()
+    assert not any(k.startswith("edit:") for k in win.docs)

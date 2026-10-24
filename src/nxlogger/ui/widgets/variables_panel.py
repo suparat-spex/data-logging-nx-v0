@@ -162,8 +162,12 @@ class VariablesPage(QWidget):
             n += 1
         return f"{base}{n}"
 
-    def add_variable(self, kind: str = "formula", source=None):
+    def add_variable(self, kind: str = "formula", source=None, popup: bool = False):
+        """New variable: an editor tab; popup=True for actions inside another form."""
         if self.host.recorder is not None:
+            return
+        if not popup and hasattr(self.host, "open_editor"):
+            self.host.open_editor("variable", None, kind=kind, source=source)
             return
         base = {"formula": "Calc", "statistic": "Stat", "process": "Proc"}[kind]
         v = vr.new_variable(kind, self._unique_name(base))
@@ -180,6 +184,9 @@ class VariablesPage(QWidget):
     def edit_variable(self, vid: str | None = None):
         v = next((x for x in self.host.project.variables if x["id"] == vid), None) if vid else self._sel()
         if v is None or self.host.recorder is not None:
+            return
+        if hasattr(self.host, "open_editor"):
+            self.host.open_editor("variable", v["id"])
             return
         dlg = VariableDialog(self, v, self.host.variable_engine, self.host.channel_choices())
         if dlg.exec():

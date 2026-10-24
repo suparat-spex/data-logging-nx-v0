@@ -70,12 +70,16 @@ from nxlogger.core.tags import (COLORS, DRIVERS, PLANNED, DeviceCfg, ScanBlock, 
                                 new_tag, tag_from_row, tags_to_rows)
 from nxlogger.ui.dialogs.about_dialog import show_about
 from nxlogger.ui.dialogs.add_tags_dialog import AddTagsDialog
+from nxlogger.ui.dialogs.alarm_dialog import AlarmDialog
+from nxlogger.ui.dialogs.alarm_profile_dialog import AlarmProfileDialog
 from nxlogger.ui.dialogs.device_dialog import DeviceDialog
+from nxlogger.ui.dialogs.group_dialog import GroupDialog
 from nxlogger.ui.dialogs.log_profile_dialog import LogProfileDialog
 from nxlogger.ui.dialogs.ml_log_dialog import MlLogDialog
 from nxlogger.ui.dialogs.opcua_browse_dialog import OpcUaBrowseDialog
 from nxlogger.ui.dialogs.pick_dialog import PickDialog
 from nxlogger.ui.dialogs.tag_dialog import TagDialog
+from nxlogger.ui.dialogs.variable_dialog import VariableDialog
 from nxlogger.ui.dialogs.view_dialog import ViewDialog
 from nxlogger.ui.icons import check_icon_file, grip_icon_file, level_icon, swatch
 from nxlogger.ui.theme import ui_kit as ui
@@ -85,6 +89,7 @@ from nxlogger.ui.widgets import alarm_panel as ap
 from nxlogger.ui.widgets import properties as props
 from nxlogger.ui.widgets import views as dv
 from nxlogger.ui.widgets.connectivity import STATE_TOKEN, ConnectivityPage
+from nxlogger.ui.widgets.form_tab import FormTab
 from nxlogger.ui.widgets.property_grid import PropertiesPanel
 from nxlogger.ui.widgets.variables_panel import VariablesPage
 
@@ -739,6 +744,8 @@ class DaqWindow(AppWindow):
     # ================================================================ project
     def _set_project(self, p: Project, path: str | None):
         self.drivers.stop_all()
+        if hasattr(self, "doc_tabs"):
+            self._close_editors()                # editors of the old project
         self.project, self.project_path = p, path
         self._loading = True
         self.p_name.setText(p.name)
@@ -902,6 +909,367 @@ class DaqWindow(AppWindow):
         self.project_path = path
         return self._save_project()
 
+    # ================================================================ editor tabs (Genesis64 style)
+    def open_editor(self, what: str, ident=None, /, **ctx):
+        """Open (or focus) the editor tab of a device, tag, group, alarm, notification profile,
+        variable or logging profile. ident None = a new item (a draft until the first Apply).
+        ctx: what a new item starts from (driver, did, group, kind, channel ...)."""
+        spec = getattr(self, f"_spec_{what}")(ident, **ctx)
+        if spec is None:
+            return None
+        key = spec["key"]
+        old = self.docs.get(key, (None,))[0]
+        if isinstance(old, FormTab):
+            self._show_doc(key)
+            return old
+        tab = FormTab(self, spec)
+        spec["tab"] = tab
+        tab.changed.connect(lambda t=tab: self._editor_changed(t))
+        self.docs[key] = (tab, spec["title"], spec["title"], spec["icon"])
+        self._show_doc(key)
+        self._editor_changed(tab)
+        return tab
+
+    def _editor_changed(self, tab):
+        """Modified flag, or a new item got its real key / name: tab text, docs key."""
+        old = next((k for k, v in self.docs.items() if v[0] is tab), None)
+        if old is not None and old != tab.key:
+            self.docs[tab.key] = self.docs.pop(old)
+        self.docs[tab.key] = (tab, tab.title, tab.title, tab.spec["icon"])
+        i = self.doc_tabs.indexOf(tab)
+        if i >= 0:
+            self.doc_tabs.setTabText(i, tab.title + (" *" if tab.modified else ""))
+            self.doc_tabs.setTabIcon(i, tab.tab_icon())
+            self.doc_tabs.setTabToolTip(i, tab.spec["path"])
+
+    def close_editor(self, tab, force: bool = False) -> bool:
+        if not force and not tab.can_close():
+            return False
+        key = next((k for k, v in self.docs.items() if v[0] is tab), None)
+        i = self.doc_tabs.indexOf(tab)
+        if i >= 0:
+            self.doc_tabs.removeTab(i)
+        if key:
+            self.docs.pop(key, None)
+        tab.deleteLater()
+        return True
+
+    def _close_editors(self, prefix: str = "edit:"):
+        """Model gone (project changed, item deleted): close its editors without asking."""
+        for k in [k for k, v in self.docs.items() if k.startswith(prefix) and isinstance(v[0], FormTab)]:
+            self.close_editor(self.docs[k][0], force=True)
+
+    def _locked_reason(self) -> str:
+        return "Stop recording to change the project." if self.recorder is not None else ""
+
+    def _delete_action(self, spec, fn, exists):
+        """Delete button of an editor: ask (fn does), then close the tab if the item is gone."""
+        def run():
+            if spec.get("is_new"):
+                self.close_editor(spec["tab"], force=True)
+                return
+            fn()
+            if not exists():
+                self.close_editor(spec["tab"], force=True)
+        return ("Delete", "trash", run)
+
+    # ---- devices
+    def _spec_device(self, did, driver: str | None = None):
+        new = did is None
+        if new:
+            dev = new_device(driver or "sim", self._unique_name(driver_label(driver or "sim").split(" (")[0],
+                                                                  {d.name for d in self.project.devices}))
+            if dev.driver == "mqtt":                 # start from the broker used so far
+                dev.settings.update({k: v for k, v in self._legacy_broker().items() if v not in ("", None)})
+        else:
+            dev = self.project.device(did)
+            if dev is None:
+                return None
+        spec = {"key": f"edit:device:{dev.id}", "title": dev.name, "icon": DRIVERS[dev.driver]["icon"],
+                "path": f"Project / Connectivity / {dev.name}", "kind": f"{driver_label(dev.driver)} device",
+                "is_new": new, "locked": self._locked_reason}
+        taken = lambda: {d.name for d in self.project.devices if d is not dev}      # noqa: E731
+        spec["build"] = lambda: DeviceDialog(self, dev, taken(), new=spec["is_new"])
+
+        def apply(dlg):
+            if spec["is_new"]:
+                driver0 = dev.driver
+                dlg.apply(dev)
+                if dev.driver != driver0 and dev.driver != "sim":
+                    dev.tags = []                    # the simulator's starter tags don't fit
+                if dev.wave and not dev.tags:
+                    dev.tags = [TagCfg(i, f"CH{i + 1}", kind="array") for i in range(4)]
+                self.project.devices.append(dev)
+                self._mark_dirty()
+                self._structure_changed()
+                self.conn_page.refresh(("device", dev.id))
+                if self.drivers.any_running and dev.enabled and dev.driver not in PLANNED:
+                    self.drivers.start(dev)
+            else:
+                was_wave = dev.wave
+                dlg.apply(dev)
+                self.device_changed(dev.id, structure=was_wave != dev.wave)
+            spec["icon"] = DRIVERS[dev.driver]["icon"]
+            spec["kind"] = f"{driver_label(dev.driver)} device"
+            spec["tab"].set_identity(f"edit:device:{dev.id}", dev.name, f"Project / Connectivity / {dev.name}")
+            self.set_status(f"Device '{dev.name}' applied", "ok")
+            return True
+        spec["apply"] = apply
+        spec["new"] = lambda: self.open_editor("device", None, driver=dev.driver)
+        exists = lambda: self.project.device(dev.id) is not None                   # noqa: E731
+        need = lambda fn: (lambda: fn() if exists() else self.toast.popup("Apply the new device first"))  # noqa: E731
+        spec["actions"] = [("Connect", "play", need(lambda: self.start_device(dev.id))),
+                           ("Disconnect", "square", need(lambda: self.stop_device(dev.id))),
+                           ("Add tags...", "list", need(lambda: self.add_tags(dev.id, "", True)))]
+        if dev.driver == "opcua":
+            spec["actions"].append(("Browse...", "search", need(lambda: self.browse_opcua(dev.id, ""))))
+        spec["actions"].append(self._delete_action(spec, lambda: self.delete_device(dev.id), exists))
+        return spec
+
+    # ---- tags
+    def _spec_tag(self, ident, did: str | None = None, group: str = ""):
+        new = ident is None
+        if new:
+            dev = self.project.device(did)
+            if dev is None:
+                return None
+            if dev.wave and len(dev.tags) >= wp.MAX_CH:
+                self.toast.popup("A waveform packet has at most 8 channels")
+                return None
+            t = new_tag(dev, "", group)
+            t.name = self._unique_name(t.name, {x.name for x in dev.tags})
+            key = f"edit:tag:new:{uuid.uuid4().hex[:6]}"
+        else:
+            dev = self.project.device(ident[0])
+            t = dev.tag(ident[1]) if dev else None
+            if t is None:
+                return None
+            key = f"edit:tag:{dev.id}:{t.index}"
+        path = lambda: f"Project / Tags / {dev.name}" + (f" / {t.group}" if t.group else "") + f" / {t.name}"  # noqa: E731
+        spec = {"key": key, "title": t.name, "icon": "tag", "path": path(),
+                "kind": "array tag" if t.kind == "array" else "tag", "is_new": new, "locked": self._locked_reason}
+
+        def build():
+            st = self.streams.get(dev.id)
+            k = sum(len(d.tags) for d in self.project.devices[:self.project.devices.index(dev)]) + \
+                (dev.tags.index(t) if t in dev.tags else len(dev.tags))
+            return TagDialog(self, dev, t, COLORS[k % len(COLORS)],
+                             lambda: st.raw_mean.get(t.index) if st else None)
+        spec["build"] = build
+
+        def apply(dlg):
+            if spec["is_new"]:
+                if dev.tag(t.index) is not None:       # the index was taken meanwhile
+                    free = [i for i in range(wp.MAX_CH) if dev.tag(i) is None] if dev.wave else [dev.next_index()]
+                    if not free:
+                        spec["tab"]._message("A waveform packet has at most 8 channels.")
+                        return False
+                    t.index = free[0]
+                dlg.apply(t)
+                dev.tags.append(t)
+                if dev.wave:
+                    dev.tags.sort(key=lambda x: x.index)
+            else:
+                dlg.apply(t)
+            self.tags_changed(dev.id, restart=True)
+            spec["tab"].set_identity(f"edit:tag:{dev.id}:{t.index}", t.name, path())
+            return True
+        spec["apply"] = apply
+        spec["new"] = lambda: self.open_editor("tag", None, did=dev.id, group=t.group)
+        exists = lambda: dev.tag(t.index) is t                                     # noqa: E731
+        spec["actions"] = [("Write value...", "pencil-line",
+                            lambda: self.write_tag(dev.id, t.index) if exists() else None),
+                           ("Add alarm", "bell", lambda: self.add_alarm_for((dev.id, t.index)) if exists() else None),
+                           self._delete_action(spec, lambda: self.delete_tags(dev.id, [t.index]), exists)]
+        return spec
+
+    # ---- groups
+    def _spec_group(self, ident, did: str | None = None, parent: str = ""):
+        new = ident is None
+        dev = self.project.device(did if new else ident[0])
+        if dev is None:
+            return None
+        cur = {"path": "" if new else ident[1]}
+        title = lambda: cur["path"].rsplit("/", 1)[-1] if cur["path"] else "New group"        # noqa: E731
+        path = lambda: f"Project / Tags / {dev.name} / {cur['path'] or '(new)'}"            # noqa: E731
+        spec = {"key": f"edit:group:{dev.id}:{cur['path'] or uuid.uuid4().hex[:6]}", "title": title(),
+                "icon": "folder", "path": path(), "kind": "group", "is_new": new, "locked": self._locked_reason}
+        spec["build"] = lambda: GroupDialog(self, dev, cur["path"], parent)
+
+        def apply(dlg):
+            newp, old = dlg.result_path(), cur["path"]
+            if not old:
+                dev.groups.append(newp)
+            elif newp != old:
+                fix = lambda g: newp + g[len(old):] if g == old or g.startswith(old + "/") else g   # noqa: E731
+                dev.groups = sorted({fix(g) for g in dev.groups} | {newp})
+                for x in dev.tags:
+                    x.group = fix(x.group)
+            cur["path"] = newp
+            self._mark_dirty()
+            self.conn_page.refresh(("group", dev.id, newp))
+            self._rebuild_project_tree()
+            spec["tab"].set_identity(f"edit:group:{dev.id}:{newp}", title(), path())
+            return True
+        spec["apply"] = apply
+        spec["new"] = lambda: self.open_editor("group", None, did=dev.id, parent=cur["path"].rsplit("/", 1)[0]
+                                               if "/" in cur["path"] else "")
+        exists = lambda: bool(cur["path"]) and cur["path"] in dev.all_groups()      # noqa: E731
+        spec["actions"] = [("Add tag", "tag", lambda: self.open_editor("tag", None, did=dev.id, group=cur["path"])),
+                           ("Add tags...", "list", lambda: self.add_tags(dev.id, cur["path"], True)),
+                           self._delete_action(spec, lambda: self.delete_group(dev.id, cur["path"]), exists)]
+        return spec
+
+    # ---- alarms and notification profiles
+    def _spec_alarm(self, aid, channel=None):
+        new = aid is None
+        if new:
+            ch = self.channel_choices()
+            if not ch:
+                self.toast.popup("Add a device with tags first")
+                return None
+            a = ar.new_alarm(tuple(channel) if channel else ch[0][:2])
+            a["profiles"] = [p["id"] for p in self.project.alarm_profiles if p["enabled"]]
+            a["levels"][0]["enabled"] = True
+        else:
+            a = next((x for x in self.project.alarms if x["id"] == aid), None)
+            if a is None:
+                return None
+        spec = {"key": f"edit:alarm:{a['id']}", "title": a["name"], "icon": "bell",
+                "path": f"Project / Alarms / {a['name']}", "kind": "alarm", "is_new": new}
+
+        def build():
+            dlg = AlarmDialog(self, a, self.channel_choices(), self.project.alarm_profiles)
+            if spec["is_new"] and dlg.name.text() == "New alarm":
+                dlg.name.clear(); dlg.name.setPlaceholderText("default: the tag name")
+            return dlg
+        spec["build"] = build
+
+        def apply(dlg):
+            res = dlg.result_alarm()
+            a.clear(); a.update(res)
+            if spec["is_new"]:
+                self.project.alarms.append(a)
+            self.alarms_changed()
+            spec["tab"].set_identity(f"edit:alarm:{a['id']}", a["name"], f"Project / Alarms / {a['name']}")
+            return True
+        spec["apply"] = apply
+        spec["new"] = lambda: self.open_editor("alarm", None)
+        exists = lambda: any(x is a for x in self.project.alarms)                  # noqa: E731
+
+        def delete():
+            if QMessageBox.question(self, "Delete alarm", f"Delete alarm '{a['name']}'?") \
+                    == QMessageBox.StandardButton.Yes:
+                self.project.alarms[:] = [x for x in self.project.alarms if x is not a]
+                self.alarms_changed()
+        spec["actions"] = [self._delete_action(spec, delete, exists)]
+        return spec
+
+    def _spec_aprofile(self, pid, kind: str = "popup"):
+        new = pid is None
+        p = ar.new_profile(kind) if new else next((x for x in self.project.alarm_profiles if x["id"] == pid), None)
+        if p is None:
+            return None
+        spec = {"key": f"edit:aprofile:{p['id']}", "title": p["name"], "icon": "send",
+                "path": f"Project / Alarms / Notification profiles / {p['name']}", "kind": "notification profile",
+                "is_new": new, "section": "Notification profile"}
+        spec["build"] = lambda: AlarmProfileDialog(self, p)
+
+        def apply(dlg):
+            res = dlg.result_profile()
+            p.clear(); p.update(res)
+            if spec["is_new"]:
+                self.project.alarm_profiles.append(p)
+            self.alarms_changed()
+            spec["tab"].set_identity(f"edit:aprofile:{p['id']}", p["name"],
+                                     f"Project / Alarms / Notification profiles / {p['name']}")
+            return True
+        spec["apply"] = apply
+        spec["new"] = lambda: self.open_editor("aprofile", None, kind=p["kind"])
+        exists = lambda: any(x is p for x in self.project.alarm_profiles)          # noqa: E731
+
+        def delete():
+            if QMessageBox.question(self, "Delete profile", f"Delete notification profile '{p['name']}'?") \
+                    == QMessageBox.StandardButton.Yes:
+                self.project.alarm_profiles.remove(p)
+                for x in self.project.alarms:
+                    x["profiles"] = [i for i in x["profiles"] if i != p["id"]]
+                self.alarms_changed()
+        spec["actions"] = [("Send test", "send", lambda: self.test_profile(p) if exists() else None),
+                           self._delete_action(spec, delete, exists)]
+        return spec
+
+    # ---- variables
+    def _spec_variable(self, vid, kind: str = "formula", source=None):
+        new = vid is None
+        if new:
+            base = {"formula": "Calc", "statistic": "Stat", "process": "Proc"}[kind]
+            v = vr.new_variable(kind, self.var_page._unique_name(base))
+            ch = self.channel_choices()
+            if kind != "formula" and ch:
+                v["source"] = list(source or ch[0][:2])
+        else:
+            v = next((x for x in self.project.variables if x["id"] == vid), None)
+            if v is None:
+                return None
+        spec = {"key": f"edit:variable:{v['id']}", "title": v["name"], "icon": "variable",
+                "path": f"Project / Variables / {v['name']}", "kind": f"{vr.KINDS.get(v['kind'], '')} variable",
+                "is_new": new, "locked": self._locked_reason}
+        spec["build"] = lambda: VariableDialog(self, v, self.variable_engine, self.channel_choices())
+
+        def apply(dlg):
+            res = dlg.result_variable()
+            v.clear(); v.update(res)
+            if spec["is_new"]:
+                self.project.variables.append(v)
+            self.variables_changed()
+            spec["tab"].set_identity(f"edit:variable:{v['id']}", v["name"], f"Project / Variables / {v['name']}")
+            return True
+        spec["apply"] = apply
+        spec["new"] = lambda: self.open_editor("variable", None, kind=v["kind"])
+        exists = lambda: any(x is v for x in self.project.variables)               # noqa: E731
+        spec["actions"] = [("Add alarm", "bell", lambda: self.add_alarm_for(vr.var_key(v["id"])) if exists() else None),
+                           self._delete_action(spec, lambda: (self.var_page.select(v["id"]),
+                                                              self.var_page.delete_variable()), exists)]
+        return spec
+
+    # ---- logging profiles
+    def _spec_lprofile(self, pid, kind: str = "signal"):
+        new = pid is None
+        if new:
+            base = "Data" if kind == "signal" else "Statistics"
+            taken = {x["name"] for x in self.project.logging_profiles}
+            pr = new_log_profile(kind, next(n for n in [base] + [f"{base} {i}" for i in range(2, 99)]
+                                            if n not in taken))
+        else:
+            pr = self._log_profile(pid)
+            if pr is None:
+                return None
+        spec = {"key": f"edit:lprofile:{pr['id']}", "title": pr["name"], "icon": "file-text",
+                "path": f"Project / Logging / {pr['name']}",
+                "kind": "statistic logging profile" if pr["type"] == "statistic" else "data logging profile",
+                "is_new": new, "locked": self._locked_reason, "section": "Logging profile"}
+
+        def build():
+            taken = {dl.safe_name(x["name"]).lower() for x in self.project.logging_profiles if x["id"] != pr["id"]}
+            return LogProfileDialog(self, pr, self.channel_choices(), taken, add_variable=self._new_variable_key)
+        spec["build"] = build
+
+        def apply(dlg):
+            res = dlg.result_profile()
+            pr.clear(); pr.update(res)
+            if spec["is_new"]:
+                self.project.logging_profiles.append(pr)
+            self._log_profiles_changed()
+            self._select_log_profile(pr["id"])
+            spec["tab"].set_identity(f"edit:lprofile:{pr['id']}", pr["name"], f"Project / Logging / {pr['name']}")
+            return True
+        spec["apply"] = apply
+        spec["new"] = lambda: self.open_editor("lprofile", None, kind=pr["type"])
+        exists = lambda: any(x is pr for x in self.project.logging_profiles)      # noqa: E731
+        spec["actions"] = [self._delete_action(spec, lambda: self._delete_log_profile(pr["id"]), exists)]
+        return spec
+
     # ================================================================ devices + tags (host API)
     @property
     def recording(self) -> bool:
@@ -985,39 +1353,11 @@ class DaqWindow(AppWindow):
         return base if base not in taken else next(f"{base} {i}" for i in range(2, 999) if f"{base} {i}" not in taken)
 
     def add_device(self, driver: str):
-        if not self._recording_guard():
-            return
-        dev = new_device(driver, self._unique_name(driver_label(driver).split(" (")[0],
-                                                    {d.name for d in self.project.devices}))
-        if driver == "mqtt":                     # start from the broker used so far
-            dev.settings.update({k: v for k, v in self._legacy_broker().items() if v not in ("", None)})
-        dlg = DeviceDialog(self, dev, {d.name for d in self.project.devices}, new=True)
-        if not dlg.exec():
-            return
-        dlg.apply(dev)
-        if dev.driver != driver and dev.driver != "sim":
-            dev.tags = []                        # the starter tags of the simulator don't fit
-        if dev.wave and not dev.tags:
-            dev.tags = [TagCfg(i, f"CH{i + 1}", kind="array") for i in range(4)]
-        self.project.devices.append(dev)
-        self._mark_dirty()
-        self._structure_changed()
-        self.conn_page.refresh(("device", dev.id))
-        self._show_doc("connectivity")
-        self.select_object(("device", dev.id))
-        self.set_status(f"Device '{dev.name}' added - add its tags, then Start", "ok")
-        if self.drivers.any_running and dev.enabled and dev.driver not in PLANNED:
-            self.drivers.start(dev)
+        if self._recording_guard():
+            self.open_editor("device", None, driver=driver)
 
     def edit_device(self, did: str):
-        dev = self.project.device(did)
-        if dev is None or not self._recording_guard():
-            return
-        dlg = DeviceDialog(self, dev, {d.name for d in self.project.devices if d is not dev})
-        if dlg.exec():
-            was_wave = dev.wave
-            dlg.apply(dev)
-            self.device_changed(did, structure=was_wave != dev.wave)
+        self.open_editor("device", did)
 
     def delete_device(self, did: str):
         dev = self.project.device(did)
@@ -1028,6 +1368,9 @@ class DaqWindow(AppWindow):
             return
         self.drivers.stop(did)
         self.project.devices.remove(dev)
+        self._close_editors(f"edit:device:{did}")
+        self._close_editors(f"edit:tag:{did}:")
+        self._close_editors(f"edit:group:{did}:")
         self.streams.pop(did, None)
         self._mark_dirty()
         self._structure_changed()
@@ -1046,8 +1389,12 @@ class DaqWindow(AppWindow):
         self.add_tags(did, sel[2] if sel and sel[0] == "group" else "", False)
 
     def add_tags(self, did: str, group: str, bulk: bool):
+        """bulk: Add tags... pop-up (an action); one tag: a new-tag editor tab."""
         dev = self.project.device(did)
         if dev is None or not self._recording_guard():
+            return
+        if not bulk:
+            self.open_editor("tag", None, did=did, group=group)
             return
         if dev.wave and len(dev.tags) >= wp.MAX_CH:
             self.toast.popup("A waveform packet has at most 8 channels")
@@ -1069,18 +1416,7 @@ class DaqWindow(AppWindow):
                                       self.select_object(("tag", did, new[-1].index))))
 
     def edit_tag(self, did: str, idx: int):
-        dev = self.project.device(did)
-        t = dev.tag(idx) if dev else None
-        if t is None or not self._recording_guard():
-            return
-        st = self.streams.get(did)
-        k = next(i for i, x in enumerate(x for d in self.project.devices for x in d.tags) if x is t)
-        dlg = TagDialog(self, dev, t, COLORS[k % len(COLORS)],
-                        lambda: st.raw_mean.get(idx) if st else None)
-        if dlg.exec():
-            dlg.apply(t)
-            self.tags_changed(did, restart=True)
-            self.set_status(f"Tag '{t.name}' updated", "ok")
+        self.open_editor("tag", (did, idx))
 
     def delete_tags(self, did: str, idxs: list[int]):
         dev = self.project.device(did)
@@ -1118,18 +1454,8 @@ class DaqWindow(AppWindow):
         self.tags_changed(did)
 
     def add_group(self, did: str, parent: str):
-        dev = self.project.device(did)
-        if dev is None or not self._recording_guard():
-            return
-        name, ok = QInputDialog.getText(self, "Add group", f"Group name{' in ' + parent if parent else ''}:")
-        name = "/".join(p.strip() for p in name.split("/") if p.strip())
-        if ok and name:
-            path = f"{parent}/{name}" if parent else name
-            if path not in dev.groups:
-                dev.groups.append(path)
-            self._mark_dirty()
-            self.conn_page.refresh(("group", did, path))
-            self.select_object(("group", did, path))
+        if self._recording_guard():
+            self.open_editor("group", None, did=did, parent=parent)
 
     def rename_group(self, did: str, path: str, name: str):
         dev = self.project.device(did)
@@ -1304,7 +1630,15 @@ class DaqWindow(AppWindow):
         tree = getattr(self, "ptree", None)
         if tree is None:
             return
-        expanded = {did for did, it in self.ptree_devices.items() if it.isExpanded()}
+        expanded, first = set(), tree.topLevelItemCount() == 0
+
+        def walk(it):
+            if it.isExpanded():
+                expanded.add(tuple(it.data(0, Qt.ItemDataRole.UserRole) or ()))
+            for i in range(it.childCount()):
+                walk(it.child(i))
+        for i in range(tree.topLevelItemCount()):
+            walk(tree.topLevelItem(i))
         tree.clear(); self.ptree_devices.clear(); self._dot_cache.clear()
         muted = QBrush(QColor(T["muted"]))
         fname = os.path.basename(self.project_path) if self.project_path else f"{self.project.name}{PROJECT_EXT}"
@@ -1322,25 +1656,34 @@ class DaqWindow(AppWindow):
             parent.addChild(it)
             return it
 
-        node(root, "Quick View", make_icon("chart", T["text"]), ("doc", "screen"),
-             "Live plots of every enabled tag - choose them with the Tags button")
+        # Connectivity: the devices (connections) only - their tags are under Tags
         self.nav_conn = node(root, "Connectivity", make_icon("network", T["text"]), ("doc", "connectivity"),
-                             "Devices and tags: Simulation, Modbus TCP / RTU, MQTT, OPC UA")
+                             "Devices: Simulation, Modbus TCP / RTU, MQTT, OPC UA - double-click to edit")
         for d in self.project.devices:
             tok = self._device_token(d)
-            di = node(self.nav_conn, f"{d.name}  ({len(d.tags)})", self._dot(tok), ("device", d.id),
-                      f"{driver_label(d.driver)} · {d.topic}" + ("" if d.enabled else "  ·  disabled"))
+            di = node(self.nav_conn, d.name, self._dot(tok), ("device", d.id),
+                      f"{driver_label(d.driver)} · {d.topic} · {len(d.tags)} tag(s)"
+                      + ("" if d.enabled else "  ·  disabled"))
             self._dot_cache[d.id] = tok
             if not d.enabled:
                 di.setForeground(0, muted)
-            for t in d.tags[:200]:                   # the Connectivity table shows them all
-                ti = node(di, t.name + (f"  ({t.unit})" if t.unit else ""), swatch(self.color_of(d.id, t.index)),
-                          ("tag", d.id, t.index), (t.group + " · " if t.group else "") + t.description)
+            self.ptree_devices[d.id] = di
+        # Tags: tag management - device > groups > tags
+        tags = node(root, "Tags", make_icon("tag", T["text"]), ("tagsroot",),
+                    "Tag management: add / edit / delete tags and groups - right-click")
+        for d in self.project.devices:
+            dn = node(tags, f"{d.name}  ({len(d.tags)})", make_icon(DRIVERS[d.driver]["icon"], T["muted"]),
+                      ("tagdev", d.id), f"Tags of {d.name}")
+            folders = {"": dn}
+            for g in d.all_groups():
+                parent = folders.get(g.rsplit("/", 1)[0] if "/" in g else "", dn)
+                folders[g] = node(parent, g.rsplit("/", 1)[-1], make_icon("folder", T["muted"]), ("group", d.id, g),
+                                  f"Group {g}")
+            for t in d.tags[:2000]:
+                ti = node(folders.get(t.group, dn), t.name + (f"  ({t.unit})" if t.unit else ""),
+                          swatch(self.color_of(d.id, t.index)), ("tag", d.id, t.index), t.description)
                 if not (t.enabled and d.enabled):
                     ti.setForeground(0, muted)
-            di.setExpanded(d.id in expanded)
-            self.ptree_devices[d.id] = di
-        self.nav_conn.setExpanded(True)
         logn = node(root, "Logging", make_icon("file-text", T["text"]), ("doc", "logging"),
                     "Test properties, log folder and logging profiles")
         for pr in self.project.logging_profiles:
@@ -1350,7 +1693,6 @@ class DaqWindow(AppWindow):
                       + f" · {pr['format']}" + ("" if pr["enabled"] else " · disabled"))
             if not pr["enabled"]:
                 li.setForeground(0, muted)
-        logn.setExpanded(True)
         self.nav_alarms = node(root, "Alarms", make_icon("bell", T["text"]), ("alarms",),
                                "4-level alarms, active list, alarm log - right-click to add")
         self.ptree_alarms = {}
@@ -1369,7 +1711,6 @@ class DaqWindow(AppWindow):
                       + ("" if pf["enabled"] else "  ·  disabled"))
             if not pf["enabled"]:
                 pi.setForeground(0, muted)
-        self.nav_alarms.setExpanded(True)
         varn = node(root, "Variables", make_icon("variable", T["text"]), ("vars",),
                     "Calculated tags: formulas, statistics, signal processing - right-click to add")
         for v in self.project.variables:
@@ -1380,12 +1721,19 @@ class DaqWindow(AppWindow):
                 vi.setForeground(0, muted)
             elif err:
                 vi.setForeground(0, QBrush(QColor(T["bad"])))
-        varn.setExpanded(True)
         views = node(root, "Views", make_icon("layout", T["text"]), ("views",),
                      "Screens: headers, trends, numbers, gauges, tables on a snap grid - right-click for New view")
         for vw in self.project.views:
             node(views, vw["name"], make_icon("layout", T["muted"]), ("view", vw["id"]))
-        views.setExpanded(True)
+
+        def expand(it):
+            d = tuple(it.data(0, Qt.ItemDataRole.UserRole) or ())
+            if d in expanded or (first and d and d[0] in ("project", "doc", "tagsroot", "alarms", "vars",
+                                                          "views", "tagdev")):
+                it.setExpanded(True)
+            for i in range(it.childCount()):
+                expand(it.child(i))
+        expand(root)
         root.setExpanded(True)
         self._update_nav_dots(force=True)
         self._apply_nav_filter(self.nav_filter.text())
@@ -1431,13 +1779,17 @@ class DaqWindow(AppWindow):
             walk(self.ptree.topLevelItem(i))
 
     def _collapse_tree(self):
-        for it in self.ptree_devices.values():
-            it.setExpanded(False)
+        root = self.ptree.topLevelItem(0)
+        for i in range(root.childCount() if root else 0):
+            it = root.child(i)
+            for k in range(it.childCount()):
+                it.child(k).setExpanded(False)
 
     def _nav_data(self, it):
         return it.data(0, Qt.ItemDataRole.UserRole) if it is not None else None
 
     def _nav_open(self, it):
+        """Single click: show it (document + Properties panel). Double-click edits (tab)."""
         d = self._nav_data(it)
         if not d:
             return
@@ -1450,21 +1802,23 @@ class DaqWindow(AppWindow):
             page = self.view_pages.get(d[1])
             if page is not None:
                 self.show_properties(props.view_target(self, page))
-        elif d[0] == "device":
-            self._show_doc("connectivity")
+        elif d[0] in ("device", "tagdev"):
             self.conn_page.refresh(("device", d[1]))
             self.select_object(("device", d[1]))
-        elif d[0] == "tag":
+        elif d[0] == "tagsroot":
             self._show_doc("connectivity")
+        elif d[0] == "group":
+            self.conn_page.refresh(("group", d[1], d[2]))
+            self.select_object(("group", d[1], d[2]))
+        elif d[0] == "tag":
             self.conn_page.select_tag(d[1], d[2])
             self.select_object(("tag", d[1], d[2]))
         elif d[0] == "lprof":
-            self._show_doc("logging")
             self._select_log_profile(d[1])
             pr = self._log_profile(d[1])
             if pr:
                 self.show_properties(props.simple_target(
-                    pr["name"], "file-text", "Logging profile - edit in its dialog",
+                    pr["name"], "file-text", "Logging profile - double-click to edit",
                     {"Type": "Statistic" if pr["type"] == "statistic" else "Data", "Format": pr["format"],
                      "Enabled": "Yes" if pr["enabled"] else "No"},
                     [("Edit...", "pencil", lambda: self._edit_log_profile(d[1]))], key=("lprof", d[1])))
@@ -1472,58 +1826,88 @@ class DaqWindow(AppWindow):
             self._show_doc("alarms")
             self.alarm_page.tabs.setCurrentIndex(0)
         elif d[0] == "alarm":
-            self._show_doc("alarms")
             self.alarm_page.select_alarm(d[1])
         elif d[0] in ("aprofs", "aprof"):
-            self._show_doc("alarms")
-            self.alarm_page.tabs.setCurrentIndex(3)
             if d[0] == "aprof":
                 self.alarm_page.select_profile(d[1])
-        elif d[0] in ("vars", "var"):
+            else:
+                self._show_doc("alarms"); self.alarm_page.tabs.setCurrentIndex(3)
+        elif d[0] == "vars":
             self._show_doc("variables")
-            if d[0] == "var":
-                self.var_page.select(d[1])
+        elif d[0] == "var":
+            self.var_page.select(d[1])
 
     def _nav_double_clicked(self, it, _col):
+        """Double-click opens the item's editor tab (no pop-up)."""
         d = self._nav_data(it)
-        if d and d[0] == "device":
-            QTimer.singleShot(0, lambda: self.edit_device(d[1]))     # dialogs rebuild trees
-        elif d and d[0] == "tag":
-            QTimer.singleShot(0, lambda: self.edit_tag(d[1], d[2]))
-        elif d and d[0] == "lprof":
-            QTimer.singleShot(0, lambda: self._edit_log_profile(d[1]))
-        elif d and d[0] == "alarm":
-            QTimer.singleShot(0, lambda: self.alarm_page.edit_alarm(d[1]))
-        elif d and d[0] == "aprof":
-            QTimer.singleShot(0, lambda: self.alarm_page.edit_profile(d[1]))
-        elif d and d[0] == "var":
-            QTimer.singleShot(0, lambda: self.var_page.edit_variable(d[1]))
+        if not d:
+            return
+        go = {"device": lambda: self.open_editor("device", d[1]),
+              "tagdev": lambda: self.open_editor("device", d[1]),
+              "tag": lambda: self.open_editor("tag", (d[1], d[2])),
+              "group": lambda: self.open_editor("group", (d[1], d[2])),
+              "lprof": lambda: self.open_editor("lprofile", d[1]),
+              "alarm": lambda: self.open_editor("alarm", d[1]),
+              "aprof": lambda: self.open_editor("aprofile", d[1]),
+              "var": lambda: self.open_editor("variable", d[1])}.get(d[0])
+        if go:
+            QTimer.singleShot(0, go)             # editors rebuild trees: not inside the click
 
     def _nav_menu(self, pos):
         it = self.ptree.itemAt(pos)
         d = self._nav_data(it) or ("none",)
         m = QMenu(self)
+        later = lambda fn: (lambda: QTimer.singleShot(0, fn))                    # noqa: E731
         if d[0] == "device":
             dev = self.project.device(d[1])
             run = self.drivers.running(d[1])
-            m.addAction("Edit device...", lambda: QTimer.singleShot(0, lambda: self.edit_device(d[1])))
-            m.addAction("Stop" if run else "Start", lambda: (self.stop_device if run else self.start_device)(d[1]))
-            m.addAction("Add tag", lambda: self.add_tags(d[1], "", False))
-            m.addAction("Add tags...", lambda: self.add_tags(d[1], "", True))
+            m.addAction("Edit device...", later(lambda: self.open_editor("device", d[1])))
+            m.addAction("Disconnect" if run else "Connect",
+                        lambda: (self.stop_device if run else self.start_device)(d[1]))
             if dev and dev.driver == "opcua":
                 m.addAction("Browse server...", lambda: self.browse_opcua(d[1], ""))
             m.addSeparator()
             m.addAction("Delete device", lambda: self.delete_device(d[1]))
-        elif d[0] == "tag":
-            m.addAction("Edit tag...", lambda: QTimer.singleShot(0, lambda: self.edit_tag(d[1], d[2])))
-            t = self.project.tag(d[1], d[2])
-            if t is not None:
-                m.addAction("Disable" if t.enabled else "Enable",
-                            lambda: self.set_tags_enabled(d[1], [d[2]], not t.enabled))
-            m.addAction("Add alarm for this tag...", lambda: self.add_alarm_for((d[1], d[2])))
-            m.addAction("Add statistic variable of this tag...", lambda: self._var_action("add", [d[1], d[2]]))
-            m.addSeparator()
-            m.addAction("Delete tag", lambda: self.delete_tags(d[1], [d[2]]))
+        elif tuple(d[:2]) == ("doc", "connectivity"):
+            add = m.addMenu("Add device")
+            for k, dd in DRIVERS.items():
+                add.addAction(dd["label"] + "...", lambda kk=k: self.add_device(kk))
+        elif d[0] in ("tagsroot", "tagdev", "group", "tag"):
+            did = d[1] if len(d) > 1 else (self.project.devices[0].id if self.project.devices else None)
+            group = d[2] if d[0] == "group" else (self.project.tag(d[1], d[2]).group
+                                                   if d[0] == "tag" and self.project.tag(d[1], d[2]) else "")
+            if d[0] == "tag":
+                t = self.project.tag(d[1], d[2])
+                m.addAction("Edit tag...", later(lambda: self.open_editor("tag", (d[1], d[2]))))
+                if t is not None:
+                    m.addAction("Disable" if t.enabled else "Enable",
+                                lambda: self.set_tags_enabled(d[1], [d[2]], not t.enabled))
+                    if t.access == "RW":
+                        m.addAction("Write value...", lambda: self.write_tag(d[1], d[2]))
+                    mv = m.addMenu("Move to group")
+                    mv.addAction("(no group)", lambda: self.move_tags(d[1], [d[2]], ""))
+                    for g in self.project.device(d[1]).all_groups():
+                        mv.addAction(g, lambda gg=g: self.move_tags(d[1], [d[2]], gg))
+                m.addAction("Add alarm for this tag...", lambda: self.add_alarm_for((d[1], d[2])))
+                m.addAction("Add statistic variable of this tag...", lambda: self._var_action("add", [d[1], d[2]]))
+                m.addAction("Delete tag", lambda: self.delete_tags(d[1], [d[2]]))
+                m.addSeparator()
+            elif d[0] == "group":
+                m.addAction("Edit group...", later(lambda: self.open_editor("group", (d[1], d[2]))))
+                m.addAction("Delete group", lambda: self.delete_group(d[1], d[2]))
+                m.addSeparator()
+            if did is not None:
+                where = f" ({group})" if group else ""
+                m.addAction(f"New tag{where}...", later(lambda: self.open_editor("tag", None, did=did, group=group)))
+                m.addAction(f"Add tags{where}...", lambda: self.add_tags(did, group, True))
+                m.addAction(f"New group{where}...", later(lambda: self.open_editor("group", None, did=did,
+                                                                                  parent=group)))
+                if d[0] in ("tagdev", "tagsroot"):
+                    m.addSeparator()
+                    m.addAction("Import tags (CSV)...", lambda: self.import_tags(did))
+                    m.addAction("Export tags (CSV)...", lambda: self.export_tags(did))
+            else:
+                m.addAction("Add a device first (Connectivity)", lambda: self._show_doc("connectivity"))
         elif d[0] in ("views", "view"):
             if d[0] == "view":
                 page = self.view_pages.get(d[1])
@@ -1533,42 +1917,50 @@ class DaqWindow(AppWindow):
                 m.addSeparator()
             m.addAction("New view...", self._new_view)
         elif d[0] == "lprof" or tuple(d[:2]) == ("doc", "logging"):
-            self._log_profile_menu(m, self._log_profile(d[1]) if d[0] == "lprof" else None)
+            if d[0] == "lprof":
+                pr = self._log_profile(d[1])
+                m.addAction("Edit profile...", later(lambda: self.open_editor("lprofile", d[1])))
+                if pr:
+                    m.addAction("Disable" if pr["enabled"] else "Enable", lambda: self._toggle_log_profile(d[1]))
+                m.addAction("Duplicate", lambda: self._dup_log_profile(d[1]))
+                m.addAction("Delete profile", lambda: self._delete_log_profile(d[1]))
+                m.addSeparator()
+            m.addAction("New data profile...", lambda: self._add_log_profile("signal"))
+            m.addAction("New statistic profile...", lambda: self._add_log_profile("statistic"))
         elif d[0] in ("alarms", "alarm", "aprofs", "aprof"):
             pg_ = self.alarm_page
             if d[0] == "alarm":
                 a = next((x for x in self.project.alarms if x["id"] == d[1]), None)
-                m.addAction("Edit alarm...", lambda: QTimer.singleShot(0, lambda: pg_.edit_alarm(d[1])))
+                m.addAction("Edit alarm...", later(lambda: self.open_editor("alarm", d[1])))
                 m.addAction("Disable" if a and a["enabled"] else "Enable", lambda: pg_.toggle_alarm(d[1]))
                 m.addAction("Delete alarm", lambda: (pg_.select_alarm(d[1]), pg_.delete_alarm()))
                 m.addSeparator()
             elif d[0] == "aprof":
                 pf = next((x for x in self.project.alarm_profiles if x["id"] == d[1]), None)
-                m.addAction("Edit profile...", lambda: QTimer.singleShot(0, lambda: pg_.edit_profile(d[1])))
+                m.addAction("Edit profile...", later(lambda: self.open_editor("aprofile", d[1])))
                 m.addAction("Disable" if pf and pf["enabled"] else "Enable", lambda: pg_.toggle_profile(d[1]))
                 m.addAction("Send test", lambda: pf and self.test_profile(pf))
                 m.addAction("Delete profile", lambda: (pg_.select_profile(d[1]), pg_.delete_profile()))
                 m.addSeparator()
             if d[0] in ("aprofs", "aprof"):
-                add = m.addMenu("Add notification profile")
+                add = m.addMenu("New notification profile")
                 for k, text in ar.PROFILE_KINDS.items():
-                    add.addAction(text, lambda kk=k: (self._show_doc("alarms"), pg_.add_profile(kk)))
+                    add.addAction(text, lambda kk=k: self.open_editor("aprofile", None, kind=kk))
             else:
-                m.addAction("Add alarm...", lambda: self._alarm_action("add"))
+                m.addAction("New alarm...", later(lambda: self.open_editor("alarm", None)))
         elif d[0] in ("vars", "var"):
             vp = self.var_page
             if d[0] == "var":
                 v = next((x for x in self.project.variables if x["id"] == d[1]), None)
-                m.addAction("Edit variable...", lambda: QTimer.singleShot(0, lambda: vp.edit_variable(d[1])))
+                m.addAction("Edit variable...", later(lambda: self.open_editor("variable", d[1])))
                 m.addAction("Disable" if v and v["enabled"] else "Enable", lambda: vp.toggle(d[1]))
-                m.addAction("Delete variable", lambda: (self._show_doc("variables"), vp.select(d[1]),
-                                                        vp.delete_variable()))
+                m.addAction("Delete variable", lambda: (vp.select(d[1]), vp.delete_variable()))
                 m.addAction("Add alarm for this variable...",
                             lambda: self._alarm_action("add", list(vr.var_key(d[1]))))
                 m.addSeparator()
-            add = m.addMenu("Add variable")
+            add = m.addMenu("New variable")
             for k, text in vr.KINDS.items():
-                add.addAction(text + "...", lambda kk=k: (self._show_doc("variables"), vp.add_variable(kk)))
+                add.addAction(text + "...", lambda kk=k: self.open_editor("variable", None, kind=kk))
         else:
             add = m.addMenu("Add device")
             for k, dd in DRIVERS.items():
@@ -1576,11 +1968,10 @@ class DaqWindow(AppWindow):
             m.addAction("New view...", self._new_view)
         free = ("views", "view", "alarms", "alarm", "aprofs", "aprof")
         for a in m.actions():
-            a.setEnabled(a.isEnabled() and (self.recorder is None or d[0] in free
-                                            or a.text().startswith(("Add alarm", "Start", "Stop"))))
+            a.setEnabled(a.isEnabled() and (self.recorder is None or d[0] in free or a.text().startswith(
+                ("Add alarm", "Connect", "Disconnect", "Write", "Export", "Edit"))))
         m.exec(self.ptree.viewport().mapToGlobal(pos))
 
-    # ---------------------------------------------------------------- sessions (Data tab)
     def _refresh_sessions(self):
         tree = getattr(self, "stree", None)
         if tree is None:
@@ -1752,31 +2143,19 @@ class DaqWindow(AppWindow):
         self._rebuild_project_tree()
 
     def _profile_dialog(self, pr: dict) -> dict | None:
+        """Pop-up form of a logging profile (used by actions; the tree opens an editor tab)."""
         taken = {dl.safe_name(x["name"]).lower() for x in self.project.logging_profiles if x["id"] != pr["id"]}
         dlg = LogProfileDialog(self, pr, self.channel_choices(), taken, add_variable=self._new_variable_key)
         return dlg.result_profile() if dlg.exec() else None
 
     def _add_log_profile(self, kind: str):
-        if not self._recording_guard():
-            return
-        base = "Data" if kind == "signal" else "Statistics"
-        taken = {x["name"] for x in self.project.logging_profiles}
-        name = next(n for n in [base] + [f"{base} {i}" for i in range(2, 99)] if n not in taken)
-        pr = self._profile_dialog(new_log_profile(kind, name))
-        if pr:
-            self.project.logging_profiles.append(pr)
-            self._log_profiles_changed()
-            self._show_doc("logging")
-            self._select_log_profile(pr["id"])
+        if self._recording_guard():
+            self.open_editor("lprofile", None, kind=kind)
 
     def _edit_log_profile(self, pid: str | None = None):
         pr = self._log_profile(pid)
-        if pr is None or not self._recording_guard():
-            return
-        new = self._profile_dialog(pr)
-        if new:
-            pr.clear(); pr.update(new)
-            self._log_profiles_changed()
+        if pr is not None:
+            self.open_editor("lprofile", pr["id"])
 
     def _dup_log_profile(self, pid: str | None = None):
         pr = self._log_profile(pid)
@@ -2487,6 +2866,9 @@ class DaqWindow(AppWindow):
         self.doc_tabs.tabBar().setTabButton(i, self.doc_tabs.tabBar().ButtonPosition.RightSide, close)
 
     def _close_doc(self, w):
+        if isinstance(w, FormTab):
+            self.close_editor(w)                 # editors are closed for good (ask if modified)
+            return
         i = self.doc_tabs.indexOf(w)
         if i >= 0:
             self.doc_tabs.removeTab(i)          # the page lives on; reopen it from the tree
@@ -2725,9 +3107,9 @@ class DaqWindow(AppWindow):
                                                         channels=list(range(len(vids)))))
 
     def _new_variable_key(self):
-        """Add a variable from another dialog -> (its key, new choices) or None."""
+        """Add a variable from another form (pop-up action) -> (its key, new choices) or None."""
         before = {v["id"] for v in self.project.variables}
-        self.var_page.add_variable("formula")
+        self.var_page.add_variable("formula", popup=True)
         new = [v for v in self.project.variables if v["id"] not in before]
         return (vr.var_key(new[0]["id"]), self.channel_choices()) if new else None
 

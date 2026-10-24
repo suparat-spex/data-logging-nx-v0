@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit,
-                               QPlainTextEdit, QSpinBox, QVBoxLayout)
+                               QPlainTextEdit, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
 from nxlogger.core.tags import DRIVERS, PLANNED, SCAN_CHOICES, DeviceCfg, defaults
 from nxlogger.ui.dialogs.common import SchemaForm
@@ -40,11 +40,12 @@ class DeviceDialog(QDialog):
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         set_prop(bb.button(QDialogButtonBox.StandardButton.Ok), "primary", True)
         bb.accepted.connect(self._ok); bb.rejected.connect(self.reject)
+        gen = QWidget(); gen.setLayout(f)
+        con = QWidget(); cv = QVBoxLayout(con); cv.setContentsMargins(0, 0, 0, 0)
+        cv.addWidget(self.note); cv.addLayout(self.settings_box)
+        tabs = QTabWidget(); tabs.addTab(gen, "Device"); tabs.addTab(con, "Connection")
         v = QVBoxLayout(self)
-        v.addLayout(f)
-        v.addWidget(label("Connection", name="sectionTitle"))
-        v.addWidget(self.note)
-        v.addLayout(self.settings_box)
+        v.addWidget(tabs)
         v.addStretch(1)
         v.addWidget(self.err); v.addWidget(bb)
         self.form: SchemaForm | None = None

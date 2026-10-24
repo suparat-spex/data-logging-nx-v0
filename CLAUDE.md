@@ -14,7 +14,7 @@ Formerly SX Logger / MQDAQ (MQTT waveform logger; last flat-file version: git ta
 | `comms/mqtt_client.py` | paho-mqtt in Qt signals - only the waveform simulator (`sim/`) uses it |
 | `ui/main_window.py` | `DaqWindow`: docks, documents, host API for pages, data path, recording (big - grep, don't read whole) |
 | `ui/dialogs/` | One dialog per file. Dialogs never import each other; shared helpers (SchemaForm, ChannelPicker ...) in `common.py` |
-| `ui/widgets/` | `connectivity` (devices + tag table), `property_grid` (Properties panel), `properties` (what it shows per selection), `views` (free-form ViewPage + components), `gauge`, `alarm_panel`, `variables_panel`, `mqtt_panel` (simulator) |
+| `ui/widgets/` | `form_tab` (editor tabs: a dialog embedded as a closable document with Apply / Refresh / Close / New... / Apply & Close / Apply & New...), `connectivity` (devices + tag table), `property_grid` (Properties panel), `properties` (what it shows per selection), `views` (free-form ViewPage + components), `gauge`, `alarm_panel`, `variables_panel`, `mqtt_panel` (simulator) |
 | `ui/theme/` | `ui_kit` (tokens `T`, QSS, AppWindow shell), `app_style` (extra QSS, Fusion), `DESIGN.md` |
 | `ui/icons.py` | All icons. Lucide SVGs in `resources/icons/ui/` |
 | `paths.py`, `config.py` | File locations (dev vs EXE) and `config.ini` |
@@ -47,4 +47,6 @@ Full end-to-end check (local Modbus + OPC UA servers, alarms, recording, screens
 - Formulas go through `channel_math.compile_expr` / `compile_formula` (AST whitelist) - never `eval` user text.
 - Threads: drivers and paho callbacks only queue; decode / scale / alarms / statistics on the GUI timer; disk + REST in workers.
 - The grid-layout view version is kept on branch `nx-views-grid` (not merged).
+- Configuration opens in editor tabs, not pop-ups (Genesis64 style): double-click in the Project tree -> `DaqWindow.open_editor(what, ident, **ctx)` with a `_spec_<what>` (device, tag, group, alarm, aprofile, variable, lprofile). New items are drafts until Apply. Pop-ups only for actions inside a tab (pick tags, browse OPC UA, add tags in bulk, write value, confirmations).
+- Project tree: Connectivity = devices only; Tags = device > groups > tags (tag management); Quick View is in the Project menu.
 - Put scratch files in the session scratchpad, not the repo.
