@@ -11,8 +11,10 @@ Kinds
               Names are the channel identifiers (topic_channel) and variable names.
               Arrays come from the block that triggered the calculation; a channel
               of another topic enters as its latest value (a scalar).
-  statistic   one value per block from a source over a time window (mean, RMS,
-              SD, crest factor, kurtosis, dominant frequency ...; see analysis.STATS)
+  statistic   one value per block from a source over a window (mean, RMS, SD, crest
+              factor, kurtosis, dominant frequency ...; see analysis.STATS). The window is
+              seconds / minutes / hours / samples, moving or block, buffered by the app
+              (stat_buffer.py); 0 = the block itself
   process     signal processing of one source, with state across blocks:
               integrate (acceleration -> velocity, with a drift high-pass),
               differentiate, moving average, moving RMS, low-pass, high-pass
@@ -30,6 +32,7 @@ import numpy as np
 
 from nxlogger.core import analysis as an
 from nxlogger.core import channel_math as cm
+from nxlogger.core import stat_buffer as sb
 
 
 KINDS = {"formula": "Formula", "statistic": "Statistic", "process": "Signal processing"}
@@ -61,11 +64,14 @@ def is_var(tid: str) -> bool:
 def new_variable(kind: str = "formula", name: str = "") -> dict:
     return {"id": uuid.uuid4().hex[:8], "name": name or "Var1", "enabled": True, "kind": kind,
             "unit": "", "color": "", "description": "", "log": True, "decimals": 3,
-            "expr": "", "source": None, "stat": "rms", "window_s": 1.0,
+            "expr": "", "source": None, "stat": "rms", "window_s": 0.0,
+            "win_n": 0.0, "win_unit": "s", "win_mode": "moving",
             "op": "integrate", "param": OPS["integrate"][2]}
 
 
 def normalize_variable(v: dict) -> dict:
+    if "win_n" not in v and "window_s" in v:          # v6 / v7: seconds only (0 = per block)
+        v["win_n"], v["win_unit"], v["window_s"] = float(v["window_s"] or 0), "s", 0.0
     for k, d in new_variable(v.get("kind", "formula")).items():
         v.setdefault(k, d)
     return v
@@ -78,9 +84,9 @@ def describe(v: dict, label_of=lambda key: str(key)) -> str:
         return f"= {v.get('expr', '')}"
     src = label_of(tuple(v["source"])) if v.get("source") else "(no source)"
     if k == "statistic":
-        win = float(v.get("window_s") or 0)
+        spec = sb.spec_of(v)
         return f"{an.STAT_LABEL.get(v.get('stat'), v.get('stat'))} of {src}" + \
-            (f" over {win:g} s" if win else " per block")
+            (f" over {sb.describe(spec)}" if spec else " per block")
     op = OPS.get(v.get("op"), ("?", "", 0, ""))
     return f"{op[0]} of {src}" + (f"  ({op[1].lower()} {float(v.get('param') or 0):g} {op[3]})" if op[1] else "")
 
@@ -181,6 +187,7 @@ class VariableEngine:
       channel_ids()            -> {identifier: (topic_id, index)} of all channels
       history(key, window_s)   -> (t, y) newest samples of a channel / variable, or None
       latest(key)              -> last value of a channel / variable, or None
+      window_stat(key, spec, stat) -> statistic over a buffered window (stat_buffer), or None
     """
 
     def __init__(self):
@@ -196,6 +203,7 @@ class VariableEngine:
         self.channel_ids = lambda: {}
         self.history = lambda key, win: None
         self.latest = lambda key: None
+        self.window_stat = lambda key, spec, stat: None
 
     # ---- configuration
     def set_variables(self, variables: list[dict]):
@@ -334,17 +342,17 @@ class VariableEngine:
                     vb = VarBlock(blk.seq, blk.sample_idx, blk.t0, blk.dt, y.reshape(1, -1))
                 else:
                     src = tuple(v["source"])
-                    win = float(v.get("window_s") or 0)
+                    spec = sb.spec_of(v)
                     x = block.get(src)
-                    fs = 1.0 / blk.dt
-                    if win > 0 or x is None:
-                        h = self.history(src, win or blk.n * blk.dt)
-                        if h is not None:
-                            x = h[1]
-                            fs = an.sample_rate(h[0]) or fs
-                    if x is None:
-                        continue
-                    val = an.stat(v.get("stat", "mean"), x, fs)
+                    if spec is not None:                 # buffered window (seconds ... samples)
+                        val = self.window_stat(src, spec, v.get("stat", "mean"))
+                    else:                                # the block itself
+                        if x is None:
+                            h = self.history(src, blk.n * blk.dt)
+                            x = h[1] if h is not None else None
+                        if x is None:
+                            continue
+                        val = an.stat(v.get("stat", "mean"), x, 1.0 / blk.dt)
                     n = self._count[vid] = self._count.get(vid, 0) + 1
                     vb = VarBlock(blk.seq, n, blk.t0 + (blk.n - 1) * blk.dt, blk.n * blk.dt,
                                   np.array([[np.nan if val is None else val]]))

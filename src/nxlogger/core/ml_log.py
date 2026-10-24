@@ -8,6 +8,8 @@ meant to run 24/7 and cuts the stream into short files:
       pump01_vib/
         2026-10-23_103200.wpk.zst      one file per period, aligned to the clock
         2026-10-23_103300.wpk.zst
+      boiler_plc/
+        2026-10-23_103200.csv.zst      number-tag devices: CSV, one row per scan
       events.csv                       alarms + markers + log start / stop of the day
       meta.json                        sensors, units, scaling, sample rate
     2026-10-24/ ...
@@ -195,12 +197,13 @@ class MlLogger:
         os.makedirs(tdir, exist_ok=True)
         base, n = d.strftime("%Y-%m-%d_%H%M%S"), 0
         ext = dl.COMPRESSIONS[self.compression][1]
+        raw = not tp.get("virtual")              # number tags have no packets: CSV rows per scan
         while True:                              # restart in the same period / DST hour: _1, _2 ...
-            path = os.path.join(tdir, f"{base}{'_' + str(n) if n else ''}.wpk")
+            path = os.path.join(tdir, f"{base}{'_' + str(n) if n else ''}{'.wpk' if raw else '.csv'}")
             if not (os.path.exists(path) or os.path.exists(path + ext)):
                 break
             n += 1
-        sink = dl.WpkSink(path, tp, tp["channels"], start, self.project.get("name", ""))
+        sink = (dl.WpkSink if raw else dl.CsvSink)(path, tp, tp["channels"], start, self.project.get("name", ""))
         return _File(sink, path, start, start + self.period)
 
     def _close(self, tid: str):
@@ -232,19 +235,22 @@ class MlLogger:
 
     def _write_meta(self, day_dir: str):
         """meta.json: everything needed to read and scale the day's data without the project."""
-        cfg = {t.get("id"): t for t in self.project.get("topics", [])}
+        cfg = {t.get("id"): {**t, "channels": t.get("tags", t.get("channels", []))}
+               for t in self.project.get("devices", self.project.get("topics", []))}
         meta = {
             "format_version": FORMAT_VERSION,
             "app": "NX Logger", "project": self.project.get("name", ""),
             "written": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
             "utc_offset": _dt.datetime.now().astimezone().strftime("%z"),
             "period_s": self.period, "compression": self.compression,
-            "files": "<topic folder>/<YYYY-MM-DD_HHMMSS>.wpk[.zst|.gz], local time of the period "
-                     "start; a file holds the packets whose first sample is in [start, start + period)",
+            "files": "<device folder>/<YYYY-MM-DD_HHMMSS>.wpk|.csv[.zst|.gz], local time of the period "
+                     "start; a file holds the packets / scans whose first sample is in [start, start + period). "
+                     "Waveform devices: raw packets (.wpk); number-tag devices: CSV like a Record session",
             "packet_format": "wavepacket v1 - read with nxlogger.core.recording.read_wpk; values are "
                              "the device's engineering units before the channel scale below",
             "events": "events.csv: " + ", ".join(EVENT_COLS),
             "topics": [{"folder": tp["folder"], "name": tp["name"], "mqtt_topic": tp["topic"],
+                        "format": "csv" if tp.get("virtual") else "wpk",
                         "channels": [{"index": i, "name": n, "unit": u,
                                       **{k: c.get(k) for k in ("scale", "description")
                                          for c in cfg.get(tid, {}).get("channels", []) if c.get("index") == i}}
