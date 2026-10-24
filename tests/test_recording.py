@@ -1,6 +1,7 @@
-"""Recorder writes CSV + raw .wpk in a session folder; .wpk reads back losslessly."""
+"""Recorder writes CSV + raw .wpk in a session folder with a file index; .wpk reads back losslessly."""
 import csv
 import glob
+import json
 import os
 import time
 
@@ -22,6 +23,8 @@ def test_csv_and_wpk(tmp_path):
 
     files = sorted(os.listdir(rec.dir))
     assert "project.json" in files
+    info = json.load(open(os.path.join(rec.dir, "project.json"), encoding="utf-8"))
+    assert {f["format"] for f in info["files"]} == {"csv", "wpk"} and info["devices"][0]["name"] == "Dev"
     rows = [r for r in csv.reader(open(glob.glob(os.path.join(rec.dir, "*.csv"))[0], encoding="utf-8-sig"))
             if r and not r[0].startswith("#")]
     assert len(rows) == 1 + 500                               # header + every sample

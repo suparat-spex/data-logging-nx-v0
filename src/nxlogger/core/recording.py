@@ -358,12 +358,12 @@ class Recorder:
         self.dropped = self.packets = 0
         self.error: str | None = None
         self._sinks: dict[str, list[_Sink]] = {}
+        self.files: list[dict] = []              # index for readers (NX Viewer): who wrote which file
         self._thread = threading.Thread(target=self._run, name="recorder", daemon=True)
 
     # ------------------------------------------------------------ control
     def start(self):
         os.makedirs(self.dir, exist_ok=False)
-        self._write_session_json(running=True)
         name = self.project["name"]
         used = set()
         for pr in self.profiles:
@@ -385,6 +385,15 @@ class Recorder:
                     sinks.append(CsvSink(p(".csv"), tp, tp["channels"], self.t_start, name))
                 if (fmt == "WPK" or pr.get("keep_raw")) and not virtual:
                     sinks.append(WpkSink(p(".wpk"), tp, tp["channels"], self.t_start, name))
+            for tp in pr["topics"]:
+                for sk in self._sinks.get(tp["id"], []):
+                    f = os.path.basename(sk.f.name)
+                    if not any(x["file"] == f for x in self.files):
+                        self.files.append({"file": f, "profile": pr.get("name", ""), "type": pr.get("type", "signal"),
+                                           "device_id": tp["id"], "device": tp["name"],
+                                           "format": "wpk" if f.endswith(".wpk") else "csv",
+                                           "interval_s": pr.get("interval_s") if stat else None})
+        self._write_session_json(running=True)
         self._thread.start()
 
     def put(self, topic_id: str, rx_time: float, payload: bytes, blk: wp.WaveBlock):
@@ -449,14 +458,17 @@ class Recorder:
                             self.error = str(e)
 
     def _write_session_json(self, running: bool):
-        info = {"app": "NX Logger", "session_format": 2, "project": self.project, "format": self.fmt, "keep_raw": self.keep_raw,
+        info = {"app": "NX Logger", "session_format": 2,          # docs/recording-format.md
+                "project": self.project, "format": self.fmt, "keep_raw": self.keep_raw,
                 "profiles": [{k: v for k, v in p.items() if k != "topics"} |
                              {"topics": [t["name"] for t in p["topics"]]} for p in self.profiles],
                 "start": _dt.datetime.fromtimestamp(self.t_start).isoformat(),
                 "start_unix": self.t_start, "running": running,
                 "topics": [{**t, "channels": [{"index": i, "name": n, "unit": u}
                                               for i, n, u in t["channels"]]}
-                           for t in self.topics]}
+                           for t in self.topics],
+                "files": self.files}
+        info["devices"] = info["topics"]         # same list; "topics" kept for older readers
         if not running:
             info.update(end=_dt.datetime.now().isoformat(), duration_s=self.elapsed,
                         packets=self.packets, samples_per_channel=self.samples,

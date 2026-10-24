@@ -1,13 +1,15 @@
 ---
 name: nxlogger-dev
-description: Use when developing NX Logger (formerly MQDAQ), the PySide6 MQTT data-logger in this project (src/nxlogger - core / ui / dialogs / widgets / icons / config / packaging) - adding features or dialogs, alarms, logging profiles, views/tiles, theming, icons, config.ini, building the EXE/installer, or running and testing the app.
+description: Use when developing NX Logger (formerly SX Logger / MQDAQ), the PySide6 tag data-logger in this project (src/nxlogger - core / comms drivers / ui / dialogs / widgets / icons / config / packaging) - adding connectors (Modbus, MQTT, OPC UA ...), tags, the Connectivity document, Properties panel, grid views and components, statistics windows, alarms, logging profiles, theming, icons, config.ini, building the EXE/installer, or running and testing the app.
 ---
 
 # NX Logger development
 
-NX Logger is a FlexLogger / Yokogawa GA10 style data logger: ESP32 DAQ nodes publish
-binary waveform blocks over MQTT, the PC app plots, alarms and records them.
-Aim for professional data-logger behaviour (see `references/alarms-ga10.md`).
+NX Logger is a Yokogawa GA10 style data logger with SCADA-like connectivity (Genesis64 /
+FUXA): devices (Simulation, Modbus TCP / RTU, MQTT, OPC UA) hold tags; grid views, alarms,
+statistics and recording work on tags. ESP32 waveform nodes still connect as MQTT devices in
+wavepacket mode (array tags). Aim for professional data-logger behaviour (see
+`references/alarms-ga10.md`).
 `CLAUDE.md` has the layout; this skill has the how-to.
 
 ## Where things go
@@ -15,6 +17,9 @@ Aim for professional data-logger behaviour (see `references/alarms-ga10.md`).
 | Task | Where |
 |---|---|
 | Logic without UI (packet, scaling, alarm rule, statistic) | `core/` - no Qt, add a test in `tests/` |
+| New connector / protocol | schema in `core/tags.DRIVERS`, `comms/drivers/<name>.py` (PollDriver), `make_driver`, test with a local server in `tests/test_drivers.py`, docs/connectivity.md |
+| New view component | `TILE_DEFAULTS` / `KIND_TITLE` in `core/view_model.py`, Tile subclass + `ADD_MENUS` in `ui/widgets/views.py`, fields in `ui/widgets/properties.tile_target`, tab in `tile_dialog.py` |
+| Something the Properties panel edits | a `*_target()` in `ui/widgets/properties.py` (fields = `core/tags.F` dicts) |
 | New dialog | new file `ui/dialogs/<name>_dialog.py`; open it from the page / window that needs it |
 | New document page or panel | `ui/widgets/` |
 | New icon | save the Lucide SVG to `src/nxlogger/resources/icons/ui/<name>.svg`, use `make_icon("<name>", T[...])` or `self.reg_icon(widget, name, token)` |
@@ -38,11 +43,16 @@ syncing reusable improvements back to spex-ui.
 
 - **Versions = git**, not file copies. Work on a branch; bump `__version__` in
   `src/nxlogger/__init__.py` for a release (EXE properties, installer name and About read it).
-- **Project files are JSON** (`.sxl`; MQDAQ `.mqdaq` still opens). New fields need defaults
-  and a migration in `Project.from_dict` so older files open (v5 -> v6: `alarm_lo/hi` ->
-  Level 1/2, `logging.format` -> a "Waveform" profile).
-- **Settings:** QSettings under SPEX / "NX Logger" (window, last project, broker form);
-  `config.ini` only gives defaults. `ui/app.py` copies MQDAQ v6 settings once.
+- **Project files are JSON** (`.nxl`, version 2; `.sxl` / `.mqdaq` still open). New fields need
+  defaults and a migration in `Project.from_dict` so older files open (v1 topics -> MQTT
+  wavepacket devices with the same id; free-form views -> grids; `window_s` -> `win_n`;
+  TDMS profiles -> CSV; v5 `alarm_lo/hi` -> Level 1/2).
+- **Live data path:** driver thread -> `DriverManager.q` -> `_drain_and_draw` -> `_ingest`
+  (scale, ring, alarms, StatHub, variables, recorder, AI log). A scan is a one-sample
+  `ScanBlock`; never touch widgets from a driver.
+- **Settings:** QSettings under SPEX / "NX Logger" (window, last project, theme); connection
+  settings live in the project's devices; `config.ini [mqtt]` is the default broker for new
+  MQTT devices. `ui/app.py` copies MQDAQ v6 settings once.
 - **Theming:** colours only from tokens (`T["bad"]`, `@border@` in QSS) - no hex in
   widgets. Channel colours (`COLORS`) and the black plot area are data, not UI.
   The app always uses the Fusion style; both themes must look right.
@@ -70,8 +80,9 @@ Windows, Python 3.14 (`python`), installed with `pip install -e ".[dev]"`.
 
 - App: `python -m nxlogger`; publisher: `python -m nxlogger.sim`.
 - Fast checks (seconds, no broker): `python -m pytest -q` and `python -m pyflakes src tests`.
-- **Offscreen end-to-end test** (real broker, synthetic data, alarms, all logging
-  profiles, screenshots of every tab):
+- **Offscreen end-to-end test** (local Modbus TCP + OPC UA servers, simulator, alarms, logging
+  profiles, statistics windows, Modbus write, screenshots of every tab; `--mqtt` adds an ESP32
+  wavepacket device on the public broker):
 
   ```bash
   QT_QPA_PLATFORM=offscreen PYTHONIOENCODING=utf-8 python -u .claude/skills/nxlogger-dev/scripts/offscreen_test.py \
@@ -86,8 +97,8 @@ Windows, Python 3.14 (`python`), installed with `pip install -e ".[dev]"`.
 - Put test output and throwaway scripts in the session scratchpad, not the project.
 
 Known test pitfalls:
-- The public broker (`broker.emqx.io`) is slow at times: "no data", or the L4
-  data-loss alarm missing (about 1 run in 3, also on v6). Re-run once before suspecting the code.
+- With `--mqtt`, the public broker (`broker.emqx.io`) is slow at times: "no data" on the ESP
+  device. Re-run once before suspecting the code. The default run needs no internet.
 - `PYTHONIOENCODING=utf-8` is needed on Windows (°C in the output).
 - Close modal dialogs in tests (`QMessageBox` blocks the offscreen event loop).
 

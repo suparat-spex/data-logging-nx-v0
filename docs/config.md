@@ -1,7 +1,8 @@
 # config.ini
 
 Defaults that a person or an installer sets by hand. Anything changed inside the app
-(theme, broker form, window layout) is remembered separately and takes priority.
+(theme, window layout) is remembered separately and takes priority. Devices and their
+connection settings live in the project (`.nxl`), not here.
 
 | Running from | File |
 |---|---|
@@ -20,7 +21,8 @@ the same line as a value).
 
 ## [mqtt]
 
-Defaults for the Connection dialog.
+Default broker for a new MQTT device, and the broker of MQTT devices made when an old
+`.sxl` / `.mqdaq` project is opened (if the old connection form was never used on this PC).
 
 | Key | Meaning | Default |
 |---|---|---|
