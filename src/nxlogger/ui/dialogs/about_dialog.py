@@ -1,0 +1,14 @@
+"""Help -> About NX Logger."""
+from __future__ import annotations
+
+from PySide6.QtWidgets import QMessageBox
+
+from nxlogger import APP_NAME, __version__, config
+
+
+def show_about(parent):
+    src = config.get().source or "built-in defaults"
+    QMessageBox.about(parent, f"About {APP_NAME}",
+                      f"<h3>{APP_NAME} {__version__}</h3><p>MQTT data logger: live waveforms from multiple "
+                      "topics, alarms, recording to CSV / TDMS / raw packets, custom views.</p>"
+                      f"<p>Settings: {src}</p>")

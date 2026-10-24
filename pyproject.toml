@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nx-logger"
+description = "NX Logger - MQTT data logger: live waveforms, alarms and recording from ESP32 DAQ nodes"
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["version"]
+dependencies = [
+    "PySide6>=6.5",
+    "pyqtgraph>=0.13",
+    "paho-mqtt>=2.0",
+    "numpy>=1.24",
+    "zstandard>=0.22; python_version < '3.14'",   # AI/ML data log .zst (3.14+ has compression.zstd)
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyflakes>=3"]
+build = ["pyinstaller>=6.10"]
+
+[project.gui-scripts]
+nxlogger = "nxlogger.ui.app:main"
+nxlogger-sim = "nxlogger.sim.publisher:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "nxlogger.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nxlogger = ["resources/*.ini", "resources/icons/*/*", "ui/theme/DESIGN.md"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

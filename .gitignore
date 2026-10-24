@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+.env
+*.egg-info/
+.pytest_cache/
+
+# Build output (packaging/build.ps1)
+build/
+dist/
+
+# Local settings (may hold a broker password) - template: src/nxlogger/resources/config.default.ini
+config.ini
+
+# macOS / editors
+.DS_Store
+.vscode/
+.idea/
+
+# Third-party manuals (copyrighted - keep local, link to the vendor instead)
+IM04L65B01-01EN.pdf
+
+# Local recordings / test output
+recordings/
+*.wpk
+*.tdms
+
+# Claude Code: share skills, keep personal settings local
+.claude/settings.local.json
