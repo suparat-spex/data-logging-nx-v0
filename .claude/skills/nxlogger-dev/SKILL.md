@@ -17,7 +17,7 @@ wavepacket mode (array tags). Aim for professional data-logger behaviour (see
 | Task | Where |
 |---|---|
 | Logic without UI (packet, scaling, alarm rule, statistic) | `core/` - no Qt, add a test in `tests/` |
-| New connector / protocol | schema in `core/tags.DRIVERS`, `comms/drivers/<name>.py` (PollDriver), `make_driver`, test with a local server in `tests/test_drivers.py`, docs/connectivity.md |
+| New connector / protocol | schema in `core/tags.DRIVERS`, `comms/drivers/<name>.py` (PollDriver), `make_driver`, `ui/dialogs/device_pages/<name>.py` (ConnectionPage: SECTIONS, LABELS / CHOICES, summary, validate), test with a local server in `tests/test_drivers.py`, docs/connectivity.md |
 | New view component | `TILE_DEFAULTS` / `KIND_TITLE` / `DEFAULT_SIZE` in `core/view_model.py`, Tile subclass + `ADD_MENUS` in `ui/widgets/views.py`, fields in `ui/widgets/properties.tile_target`, tab in `tile_dialog.py` |
 | Something the Properties panel edits | a `*_target()` in `ui/widgets/properties.py` (fields = `core/tags.F` dicts) |
 | New pop-up (an action) | subclass `common.ActionDialog` (verb button), confirm with `common.confirm` - see docs/ui-guidelines.md |

@@ -54,7 +54,7 @@ from nxlogger.core.view_model import (ALARM_SOURCES, ALARM_TILE_COLS, GRID, MAX_
                                       MIN_W, PLOT_TYPES, STAT_TILE_COLS, TAG_TILE_COLS, axis_defaults,
                                       is_graph, new_tile, normalize_view, tile_title)
 from nxlogger.ui.dialogs.tile_dialog import TileDialog
-from nxlogger.ui.theme.ui_kit import T, label, set_prop
+from nxlogger.ui.theme.ui_kit import T, fixed_width, label, set_prop
 from nxlogger.ui.widgets.gauge import GaugeWidget
 
 
@@ -1050,6 +1050,7 @@ class ViewPage(QWidget):
         host.reg_icon(self.btn_edit, "pencil")
         self.btn_edit.toggled.connect(self.set_edit)
         bl.addWidget(self.btn_edit)
+        fixed_width(self.btn_edit, "Edit", "Done")
         self.add_btns = []
         icons = {"Text": "heading", "Graph": "chart", "Indicator": "gauge", "Table": "table"}
         for section, items in ADD_MENUS:
@@ -1061,9 +1062,8 @@ class ViewPage(QWidget):
             b.setToolTip(f"Add a {section.lower()} component")
             host.reg_icon(b, icons.get(section, "plus"))
             m = QMenu(b)
-            for text, icon, kind, preset in items:
-                a = m.addAction(text, lambda k=kind, p=preset: self.add_tile(k, **p))
-                host.reg_icon(a, icon)
+            for text, _icon, kind, preset in items:      # menus are text only (no icon column)
+                m.addAction(text, lambda k=kind, p=preset: self.add_tile(k, **p))
             b.setMenu(m)
             bl.addWidget(b); self.add_btns.append(b)
         bl.addStretch(1)

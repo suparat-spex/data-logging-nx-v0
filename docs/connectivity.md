@@ -73,6 +73,50 @@ PLC,Boiler,Setpoint,°C,,1,RW,1,area=holding;addr=10;dtype=int16
 table above: `area addr dtype order bit unit`, `topic path`, `node`, `wave amp freq offset
 noise`). Unknown keys are ignored. Export a device to get a template.
 
+## Connectivity and Tags documents
+
+**Connectivity** (Ctrl+2) is the device table: name, connector, address, scan, tag count,
+status and an *Enabled* indicator (read-only; set in the device settings pop-up - a disabled
+device is not connected or logged). Toolbar:
+Add ▾ (per connector), Edit, Duplicate, Delete, Import..., Export..., Columns ▾ (show / hide
+columns, remembered; also right-click the header). Select a row: the Properties panel shows
+the device read-only with one *Edit...* button; double-click (or Enter, Edit) opens the **device settings pop-up** (Save / Cancel);
+Del deletes. Rows can be multi-selected. Right-click a row: Edit device, Enable / Disable
+device, Duplicate, Export..., Delete device (Enable / Disable, Export and Delete act on every
+selected row; Edit and Duplicate on one).
+Other device settings change only in the pop-up.
+The device settings pop-up is one page: General (name, description, scan interval, enabled)
+and the connector's sections. The connector is chosen in Add ▾ and cannot change later (the
+tags' addresses depend on it). **Test connection** connects once with the values as typed -
+the real driver, in the background - and shows the time and how many tags returned a value,
+or the error. Nothing is saved or started by a test.
+**Tags** (Ctrl+6) is tag management: devices with groups on the left, the tag table right.
+
+## Device list (import / export)
+
+**Export...** opens a pop-up: tick the devices (the selected rows are ticked; none selected =
+all) and choose the format, then where to save:
+
+- **JSON** - devices with settings, groups and tags (`{"format": "nxlogger-devices",
+  "version": 1, "devices": [...]}`). Import also reads a `.nxl` project's devices.
+- **CSV** - one row per device, no tags:
+
+```
+name,driver,enabled,scan_ms,description,settings
+PLC,modbus_tcp,1,500,Line 1,host=10.0.0.5;port=502;unit=1;timeout_s=1.0;max_block=100;one_based=False
+```
+
+`driver` is the connector key (`sim modbus_tcp modbus_rtu mqtt opcua opcda`) or its label
+(`Modbus TCP`); `settings` uses the keys of the device form, unknown keys are ignored.
+**Passwords are never exported** - enter them after the import.
+
+**Import...** opens a pop-up: choose the file and it is **checked first** - wrong format or
+header, unknown connector or setting, a value that is not a number, an empty or duplicate
+name. Every problem is listed with its line and *Import* stays disabled: nothing is imported
+from a file that fails. A valid file lists its devices to tick; when a name exists: *Add as a copy*,
+*Replace* (keeps the device id, so alarms, views and logging keep working; a CSV replace
+keeps the old tags and passwords) or *Skip*. Imported devices are not started.
+
 ## Files written before NX Logger
 
 `.sxl` (SX Logger) and `.mqdaq` (MQDAQ) projects open and are converted: every MQTT topic

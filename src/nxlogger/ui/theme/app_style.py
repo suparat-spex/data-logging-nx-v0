@@ -59,6 +59,9 @@ QTreeWidget#navTree::item { padding: 4px 0; }
 QFrame#navBar { background: transparent; border-bottom: 1px solid @border@; }
 QFrame#navBar QToolButton { padding: 4px; }
 QFrame#docBar QLabel { background: transparent; }
+QToolBar::separator { background: @border@; width: 1px; margin: 6px 2px; }
+QFrame#vsep { background: @border@; border: none; min-width: 1px; max-width: 1px; margin: 6px 2px; }
+QMenu { icon-size: 0px; }  /* menus are text only: actions shared with the toolbar keep their icon there, no empty column here */
 QMainWindow::separator { background: @hover@; width: 4px; height: 4px; border: none; }
 QTabWidget#docTabs::pane { border: 1px solid @border@; top: -1px; background: @bg@; }
 QTabWidget#docTabs QTabBar::tab:selected { border-bottom: 2px solid @accent@; }
@@ -98,6 +101,15 @@ QTreeWidget#propGrid::item { padding: 1px 0; }
 QTreeWidget#propGrid QLineEdit, QTreeWidget#propGrid QComboBox, QTreeWidget#propGrid QSpinBox,
 QTreeWidget#propGrid QDoubleSpinBox, QTreeWidget#propGrid QPlainTextEdit { padding: 1px 4px; border-radius: 3px;
   border: 1px solid @border@; background: @input@; }
+QLabel#pageSection { font-weight: 600; border: none; border-radius: 0; border-bottom: 1px solid @border@; padding: 0 0 3px 0; background: transparent; }
+QLabel#statusMsg[level="warn"] { color: @warn@; }
+QLabel#statusMsg[level="info"] { color: @info@; }
+QFrame#dlgHeader { background: @panel2@; border: none; border-bottom: 1px solid @border@; }
+QFrame#dlgHeader QLabel { background: transparent; }
+QLabel#dlgTitle { font-size: 16px; font-weight: 600; }
+QFrame#dlgFooter { background: @panel2@; border: none; border-top: 1px solid @border@; }
+QFrame#dlgFooter QLabel { background: transparent; }
+QLabel#emptyTitle { font-weight: 600; background: transparent; }
 QLabel#propTitle { font-size: 14px; font-weight: 600; background: transparent; }
 QFrame#propHead { background: @panel2@; border-bottom: 1px solid @border@; }
 QFrame#propHead QLabel { background: transparent; }

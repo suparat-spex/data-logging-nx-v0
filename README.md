@@ -35,7 +35,7 @@ python -m nxlogger.sim        # ESP32 waveform simulator over MQTT (Connect, the
 
 A new project opens with a **Simulator** device and an *Overview* view: press
 **Connect** (Ctrl+K) to see live data. Add your own devices in **Connectivity**
-(Add device ▾) - see [docs/connectivity.md](docs/connectivity.md) for the connectors,
+(Add ▾, Import / Export JSON or CSV), their tags in **Tags** - see [docs/connectivity.md](docs/connectivity.md) for the connectors,
 address formats and the tag list CSV. Projects are `.nxl` (JSON); `.sxl` and `.mqdaq`
 files open and are converted.
 

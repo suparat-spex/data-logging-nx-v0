@@ -13,7 +13,7 @@ from __future__ import annotations
 from nxlogger.core import analysis as an
 from nxlogger.core import channel_math as cm
 from nxlogger.core import view_model as vm
-from nxlogger.core.tags import (DRIVERS, PLANNED, SCAN_CHOICES, F, describe_address, driver_label)
+from nxlogger.core.tags import DRIVERS, F, describe_address, driver_label
 from nxlogger.ui.widgets.property_grid import PropTarget
 
 STATS = {k: an.STAT_LABEL[k] for k in an.STAT_KEYS}
@@ -51,60 +51,30 @@ def project_target(w) -> PropTarget:
 
 # ====================================================================== devices
 def device_target(w, did: str) -> PropTarget | None:
+    """Information only - a device is configured in its settings pop-up (Edit...)."""
     d = w.project.device(did)
     if d is None:
         return None
-    locked = w.recording
     info = DRIVERS[d.driver]
-    general = [F("name", "Name", "str", ""), F("enabled", "Enabled", "bool", True),
-               F("driver", "Connector", "info", ""),
-               F("scan_ms", "Scan interval", "combo", 1000, {x: f"{x} ms" for x in SCAN_CHOICES},
-                 "How often the number tags are read"),
-               F("description", "Description", "text", "")]
+    general = [F("name", "Name", "info", ""), F("driver", "Connector", "info", ""),
+               F("enabled", "Enabled", "bool", True), F("scan_ms", "Scan interval", "info", ""),
+               F("tags", "Tags", "info", ""), F("description", "Description", "info", "")]
     settings = [dict(f, key="set." + f["key"]) for f in info["settings"]]
     status = [F("state", "State", "info", ""), F("message", "Message", "info", ""),
               F("scans", "Scans", "info", ""), F("errors", "Errors", "info", "")]
-    vals = {"name": d.name, "enabled": d.enabled, "driver": info["label"], "scan_ms": d.scan_ms,
-            "description": d.description, **{"set." + k: v for k, v in d.settings.items()}}
-
-    def apply(k, v):
-        if locked and k not in ("description",):
-            w.toast.popup("Stop recording to change the device")
-            return
-        if k.startswith("set."):
-            if k == "set.port" and d.driver == "modbus_rtu":
-                v = str(v)
-            _set(d.settings, k[4:], v, lambda: w.device_changed(did, structure=k == "set.mode"))
-        elif k == "scan_ms":
-            try:
-                v = max(20, int(str(v).split()[0]))
-            except ValueError:
-                return
-            _set(d, k, v, lambda: w.device_changed(did))
-        elif k == "name":
-            v = v.strip()
-            if v and v not in {x.name for x in w.project.devices if x is not d}:
-                _set(d, k, v, lambda: w.device_changed(did, restart=False))
-        else:
-            _set(d, k, v, lambda: w.device_changed(did, restart=k == "enabled"))
+    vals = {"name": d.name, "enabled": d.enabled, "driver": info["label"], "tags": str(len(d.tags)),
+            "scan_ms": "-" if d.wave else f"{d.scan_ms} ms", "description": d.description,
+            **{"set." + k: v for k, v in d.settings.items()}}
 
     def live():
         st, msg = w.device_state(did)
         drv = w.drivers.driver(did)
         return {"state": st.capitalize(), "message": msg or "-",
                 "scans": f"{drv.scans:,}" if drv else "-", "errors": f"{drv.errors:,}" if drv else "-"}
-    running = w.device_state(did)[0] != "stopped"
-    actions = [("Stop" if running else "Start", "square" if running else "play",
-                (lambda: w.stop_device(did)) if running else (lambda: w.start_device(did))),
-               ("Add tag", "tag", lambda: w.add_tags(did, "", False))]
-    if d.driver == "opcua":
-        actions.append(("Browse", "search", lambda: w.browse_opcua(did, "")))
-    actions.append(("", "trash", lambda: w.delete_device(did)))
-    if d.driver in PLANNED:
-        actions = actions[1:]
-    return PropTarget(d.name, info["icon"], f"{driver_label(d.driver)} · {d.topic} · {len(d.tags)} tag(s)",
+    return PropTarget(d.name, info["icon"], f"{driver_label(d.driver)} · {d.topic}",
                       [("Device", general), ("Connection", settings), ("Status", status)],
-                      {**vals, **live()}, apply, actions, live, key=("device", did))
+                      {**vals, **live()}, None, [("Edit...", "pencil", lambda: w.edit_device(did))], live,
+                      key=("device", did), readonly=True)
 
 
 def group_target(w, did: str, path: str) -> PropTarget | None:

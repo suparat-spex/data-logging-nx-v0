@@ -11,12 +11,12 @@ pop-ups. One question decides it:
 
 | Place | For | Examples | Buttons |
 |---|---|---|---|
-| **Editor tab** (closable document) | configuring one saved item | device, tag, group, alarm, notification profile, variable, logging profile, view, view component (*All settings*), AI/ML log settings | Apply · Refresh · Close · New... · Apply & Close · Apply & New... |
-| **Work page** (document tab) | working with many items / watching live data | Quick View, Connectivity, Logging, Alarms, Variables, views | none - they act at once |
-| **Properties panel** (right) | quick changes to the selection | a tag's unit, a component's position, a view's grid | none - applies at once |
-| **Pop-up** (modal dialog) | one action, finished when it closes | delete?, write value, add tags in bulk, browse OPC UA, pick tags, new view, marker, import / export, unsaved changes | Cancel · **Verb** |
+| **Editor tab** (closable document) | configuring one saved item | tag, group, alarm, notification profile, variable, logging profile, view, view component (*All settings*), AI/ML log settings | Apply · Refresh · Close · New... · Apply & Close · Apply & New... |
+| **Work page** (document tab) | working with many items / watching live data | Quick View, Connectivity (device table), Tags, Logging, Alarms, Variables, views | none - they act at once |
+| **Properties panel** (right) | quick changes to the selection | a tag's unit, a component's position, a view's grid; a device is **read-only** there (its settings pop-up is the one place to change it) | none - applies at once; devices: *Edit...* |
+| **Pop-up** (modal dialog) | one action, finished when it closes | device settings (Add / Edit - Cancel · *Add device* / *Save*), delete?, write value, add tags in bulk, browse OPC UA, pick tags, new view, marker, import devices / tags, export, unsaved changes | Cancel · **Verb** |
 
-Opening: single-click selects (Properties panel), **double-click opens the editor tab**,
+Opening: single-click selects (Properties panel), **double-click opens the editor tab** (a device: its settings pop-up),
 right-click lists the actions. The same item never opens twice: a second double-click
 brings its tab to the front.
 
@@ -63,6 +63,21 @@ brings its tab to the front.
 - Information only: About, Keyboard shortcuts, "view is full". Background events
   (alarms, connection lost, recording problems) are **not** pop-ups: toasts, banners and
   the Log panel carry them, so unattended logging is never blocked by a dialog.
+
+## Properties dock
+
+Same bar as the Project / Data docks: **Refresh**, the item's actions as icons (tooltips), and
+**Expand all / Collapse** on the right. Sections are full-width bands with a border (neutral
+theme colours). A tab that comes back to the front restores its selected row and shows its
+properties again (`activate()` on Connectivity / Tags).
+
+## Toolbars never move
+
+Every toolbar button keeps its place and size. A button whose text changes (Connect /
+Disconnect, Edit / Done, *Alarms (3)*, the REC timer) gets the width of its longest text with
+`ui_kit.fixed_width(widget, *texts)`; a button that does not apply is **disabled, not
+hidden** (Tags: *Browse...* outside OPC UA). Buttons that switch with a mode (view edit mode)
+sit to the right of the fixed ones.
 
 ## For developers
 

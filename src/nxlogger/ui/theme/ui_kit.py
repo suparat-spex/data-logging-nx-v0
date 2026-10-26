@@ -20,7 +20,7 @@ pip install PySide6   (optional: matplotlib, for style_axes)
 """
 import sys
 
-from PySide6.QtCore import Qt, QTimer, QSettings, QCoreApplication
+from PySide6.QtCore import Qt, QEvent, QObject, QTimer, QSettings, QCoreApplication
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QPalette, QKeySequence, QGuiApplication
 )
@@ -238,6 +238,56 @@ def label(text, muted=False, small=False, name=None):
     if name:
         l.setObjectName(name)
     return l
+
+
+class _Refit(QObject):
+    """Re-measures fixed_width() widgets when their style or font changes (theme switch)."""
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QEvent.Type.StyleChange, QEvent.Type.FontChange, QEvent.Type.Show):
+            QTimer.singleShot(0, lambda o=obj: refit(o))
+        return False
+
+
+_REFIT = None
+
+
+def fixed_width(w, *texts):
+    """Give a button (or label) whose text changes - Connect / Disconnect, Edit / Done,
+    "Alarms (3)" - the width of its longest text, so the toolbar around it never moves.
+    `w` may be a QAction in a toolbar: pass the widget (toolbar.widgetForAction)."""
+    global _REFIT
+    if _REFIT is None:
+        _REFIT = _Refit(QApplication.instance())
+    w.setProperty("fixedTexts", [t for t in texts if t])
+    w.installEventFilter(_REFIT)
+    refit(w)
+
+
+def refit(w):
+    """Measure again (after a theme change or an icon-only / text toolbar switch)."""
+    texts = w.property("fixedTexts")
+    if not texts or getattr(w, "_refitting", False):
+        return
+    w.setMinimumWidth(0)
+    if isinstance(w, QToolButton) and w.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly:
+        return
+    w._refitting = True                      # setText below must not re-enter through events
+    w.ensurePolished()
+    cur, best = w.text(), 0
+    for t in texts:
+        w.setText(t)
+        best = max(best, w.sizeHint().width())
+    w.setText(cur)
+    w._refitting = False
+    w.setMinimumWidth(best)
+
+
+def vsep():
+    """Separator for a hand-built bar (QFrame#docBar ...): drawn like QToolBar::separator
+    (same QSS: 1 px @border@ line, same margins), so every toolbar looks the same."""
+    f = QFrame(); f.setObjectName("vsep"); f.setFrameShape(QFrame.Shape.NoFrame)
+    return f
 
 
 def primary_button(text):

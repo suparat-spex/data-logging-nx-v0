@@ -2,8 +2,9 @@
 main_window.py - NX Logger main window: devices + tags, live views, alarms, recording.
 
 NX Logger (tag-based data logger, Yokogawa GA10 / Genesis64 / FUXA style):
-  * Connectivity document: devices (Simulation, Modbus TCP, Modbus RTU, MQTT, OPC UA client;
-    OPC DA planned) with groups and tags. Each device runs in its own driver thread
+  * Connectivity document: the device table (Simulation, Modbus TCP, Modbus RTU, MQTT, OPC UA
+    client; OPC DA planned) - add / edit / enable / import / export (JSON, CSV). Tags document:
+    devices with groups and tags. Each device runs in its own driver thread
     (comms/drivers); number tags are read every scan interval, MQTT devices in wavepacket
     mode stream ESP32 waveforms as array tags. Start / stop per device or all at once.
   * Tags have every channel property (unit, colour, scaling, decimals, Y range) and are
@@ -12,8 +13,9 @@ NX Logger (tag-based data logger, Yokogawa GA10 / Genesis64 / FUXA style):
     number, gauge, LED, tag / statistics / alarm table). Statistics windows are seconds,
     minutes, hours or samples, buffered by the app (core/stat_buffer.py).
   * Right: Properties panel - whatever is selected (device, tag, group, view,
-    component ...) is edited there, like the Genesis64 / FUXA property inspectors. A small
-    Runtime section under it shows recording / communication state.
+    component ...) is shown there, like the Genesis64 / FUXA property inspectors (devices
+    read-only: Edit... opens their settings pop-up). The Runtime dock under it shows
+    recording / communication state.
   * Recording: CSV (and raw .wpk for waveform devices); session folders keep project.json
     (docs/recording-format.md - read by the NX Viewer). TDMS is no longer written.
   * Project files: .nxl (JSON); .sxl and .mqdaq open and are converted (topics -> MQTT
@@ -21,7 +23,8 @@ NX Logger (tag-based data logger, Yokogawa GA10 / Genesis64 / FUXA style):
 
 Layout:
   * Left:   "Project" dock (navigator tree) and "Data" dock (recorded sessions)
-  * Centre: closable document tabs - Quick View, Connectivity, Logging, Alarms, Variables, Views
+  * Centre: closable document tabs - Quick View, Connectivity, Tags, Logging, Alarms,
+            Variables, Views
   * Right:  "Properties" dock; bottom: "Log" dock
 Responsive (by window width): wide >= 1500 px, medium 1180-1500, compact < 1180 (the
 Properties panel auto-hides, icon-only toolbar, short tab names).
@@ -67,14 +70,17 @@ from nxlogger.core import wavepacket as wp
 from nxlogger.core.project import (OLD_PROJECT_EXTS, PROJECT_EXT, Project, fmt_interval, new_log_profile)
 from nxlogger.core.ring import MAX_PLOT_S, TopicStream
 from nxlogger.core.tags import (COLORS, DRIVERS, PLANNED, DeviceCfg, ScanBlock, TagCfg, describe_address,
-                                driver_label, new_device,
-                                new_tag, tag_from_row, tags_to_rows)
+                                DEVICE_COLS, devices_to_json,
+                                devices_to_rows, driver_label, new_device, new_tag, secret_keys,
+                                tag_from_row, tags_to_rows)
 from nxlogger.ui.dialogs.about_dialog import show_about
 from nxlogger.ui.dialogs.add_tags_dialog import AddTagsDialog
 from nxlogger.ui.dialogs.alarm_dialog import AlarmDialog
 from nxlogger.ui.dialogs.alarm_profile_dialog import AlarmProfileDialog
 from nxlogger.ui.dialogs.device_dialog import DeviceDialog
 from nxlogger.ui.dialogs.group_dialog import GroupDialog
+from nxlogger.ui.dialogs.export_devices_dialog import ExportDevicesDialog
+from nxlogger.ui.dialogs.import_devices_dialog import ImportDevicesDialog
 from nxlogger.ui.dialogs.common import ask_unsaved, confirm
 from nxlogger.ui.dialogs.log_profile_dialog import LogProfileDialog
 from nxlogger.ui.dialogs.marker_dialog import MarkerDialog
@@ -90,13 +96,15 @@ from nxlogger.ui.dialogs.write_value_dialog import WriteValueDialog
 from nxlogger.ui.icons import check_icon_file, grip_icon_file, level_icon, swatch
 from nxlogger.ui.theme import ui_kit as ui
 from nxlogger.ui.theme.app_style import DENSE_QSS, EXTRA_QSS, blend, fusion_palette, fusion_qss
-from nxlogger.ui.theme.ui_kit import AppWindow, Card, Chip, EmptyState, T, label, make_icon, set_prop
+from nxlogger.ui.theme.ui_kit import (AppWindow, Card, Chip, EmptyState, T, fixed_width, label, make_icon, refit,
+                                      set_prop)
 from nxlogger.ui.widgets import alarm_panel as ap
 from nxlogger.ui.widgets import properties as props
 from nxlogger.ui.widgets import views as dv
 from nxlogger.ui.widgets.connectivity import STATE_TOKEN, ConnectivityPage
 from nxlogger.ui.widgets.form_tab import FormTab
 from nxlogger.ui.widgets.property_grid import PropertiesPanel
+from nxlogger.ui.widgets.tags_page import TagsPage
 from nxlogger.ui.widgets.variables_panel import VariablesPage
 
 
@@ -169,7 +177,7 @@ class DaqWindow(AppWindow):
         self.curves: dict[tuple[str, int], pg.PlotDataItem] = {}
         self._mode: str | None = None          # compact | medium | wide
         self._dense = self._screen_is_small()  # read by apply_theme() during super().__init__
-        self._auto_hidden_right = False
+        self._auto_hidden_right = self._auto_hidden_rt = False   # hidden by a narrow window (Properties, Runtime)
         self._status_full = ""
         self._zoomed = False                   # Quick View plots hold their range after a box zoom
         self._grid = False                     # Quick View plots: stack (False) or 2-column grid
@@ -192,6 +200,8 @@ class DaqWindow(AppWindow):
         self._alarm_level = None               # last indicator state (repaint only on change)
         self._prop_key: tuple | None = None    # what the Properties panel shows
         self._stat_dirty = True                # statistics windows to (re)collect
+        # menus are text only on every platform (macOS hides menu icons natively; Windows matches)
+        QApplication.instance().setAttribute(Qt.ApplicationAttribute.AA_DontShowIconsInMenus, True)
         super().__init__()
         self.theme_listeners.append(self._rebuild_plots)
         self.left_dock.setMinimumWidth(210)
@@ -213,6 +223,11 @@ class DaqWindow(AppWindow):
         self.alarm_btn.setToolTip("Alarms - click to open the Alarms document")
         self.alarm_btn.clicked.connect(lambda: self._show_doc("alarms"))
         self.statusBar().insertPermanentWidget(1, self.alarm_btn)   # 0 = the message label
+        # text that changes at run time: fixed widths, so the toolbar / status bar never move
+        fixed_width(self.alarm_btn, "No alarms", "99 active")
+        fixed_width(self.toolbar.widgetForAction(self.act_connect), "Connect", "Disconnect")
+        fixed_width(self.toolbar.widgetForAction(self.act_alarms), "Alarms", "Alarms (99)")
+        fixed_width(self.rec_label, "Ready", "● REC  00:00:00")
         self.ml_label = QLabel(); self.ml_label.setObjectName("statusMsg")
         set_prop(self.ml_label, "level", "ok")
         self.ml_label.hide()
@@ -221,7 +236,8 @@ class DaqWindow(AppWindow):
         self._ml_update_ui()
         self.theme_listeners.append(lambda: (setattr(self, "_alarm_level", None),
                                              self._update_alarm_indicator(), self.alarm_page.refresh(),
-                                             self.var_page.refresh(), self.conn_page.refresh(),
+                                             self.var_page.refresh(), self.tags_page.refresh(),
+                                             self.conn_page.refresh(),
                                              self.props.refresh_icons()))
         QApplication.instance().installEventFilter(self._noflash)   # dialogs: no white flash
 
@@ -301,10 +317,13 @@ class DaqWindow(AppWindow):
         self.act_log.setShortcut(QKeySequence("Ctrl+Shift+L"))
         self.reg_icon(self.act_log, "panel-bottom")
         tb.addAction(self.act_log)
-        self.act_panel = self.right_dock.toggleViewAction()
-        self.act_panel.setText("Properties panel")
-        self.act_panel.setShortcut(QKeySequence("Ctrl+Shift+P"))
-        self.act_panel.triggered.connect(lambda on: setattr(self, "_auto_hidden_right", False))
+        # right side (Properties + Runtime) as one panel, like the left side
+        self.act_panel = self.act("Properties panel", self._toggle_right_docks, "Ctrl+Shift+P", None)
+        self.act_panel.setCheckable(True)
+        for d in (self.right_dock, self.runtime_dock):
+            d.toggleViewAction().toggled.connect(lambda _: self.act_panel.setChecked(
+                not (self.right_dock.isHidden() and self.runtime_dock.isHidden())))
+        self.act_panel.setChecked(True)
         self.reg_icon(self.act_panel, "panel-right")
         tb.addAction(self.act_panel)
         for a in (self.act_left, self.act_log, self.act_panel):   # panel toggles: icon only, always
@@ -323,6 +342,14 @@ class DaqWindow(AppWindow):
         else:
             for d in self._left_shown:
                 d.show()
+
+    def _toggle_right_docks(self):
+        """Hide / show the right side (Properties + Runtime) as one panel."""
+        self._auto_hidden_right = self._auto_hidden_rt = False
+        show = self.right_dock.isHidden()        # Properties decides: both follow it
+        for d in (self.right_dock, self.runtime_dock):
+            d.setVisible(show)
+        self.act_panel.setChecked(show)
 
     @staticmethod
     def _set_tip(a):
@@ -350,13 +377,12 @@ class DaqWindow(AppWindow):
         self.act_marker.setMenu(mm)
         proj = QMenu("&Project", self)
         mb.insertMenu(self.view_menu.menuAction(), proj)
-        add_dev = QMenu("Add device", self)
-        add_dev.setIcon(make_icon("server", T["text"]))
+        add_dev = QMenu("Add device", self)               # menus are text only (no icon column)
         for k, d in DRIVERS.items():
-            a = add_dev.addAction(d["label"] + "...", lambda kk=k: self.add_device(kk))
-            self.reg_icon(a, d["icon"])
+            add_dev.addAction(d["label"] + "...", lambda kk=k: self.add_device(kk))
         for a in (self.act("Quick View", lambda: self._show_doc("screen"), "Ctrl+1", "chart"),
                   self.act("Connectivity", lambda: self._show_doc("connectivity"), "Ctrl+2", "network"),
+                  self.act("Tags", lambda: self._show_doc("tags"), "Ctrl+6", "tag"),
                   self.act("Logging", lambda: self._show_doc("logging"), "Ctrl+3", "file-text"),
                   self.act_alarms,
                   self.act_vars,
@@ -378,7 +404,8 @@ class DaqWindow(AppWindow):
         v = self.view_menu
         first = v.actions()[0]
         v.insertSeparator(first)
-        for a in (self.data_dock.toggleViewAction(), self.log_dock.toggleViewAction()):
+        for a in (self.data_dock.toggleViewAction(), self.log_dock.toggleViewAction(),
+                  self.runtime_dock.toggleViewAction()):
             v.insertAction(first, a)
         v.insertSeparator(first)
         for a in (self.act_ml, self.act_marker, self.act_ml_settings,
@@ -415,8 +442,7 @@ class DaqWindow(AppWindow):
     def _build_project_files(self):
         add = QMenu(self)
         for k, d in DRIVERS.items():
-            a = add.addAction(d["label"] + "...", lambda kk=k: self.add_device(kk))
-            self.reg_icon(a, d["icon"])
+            add.addAction(d["label"] + "...", lambda kk=k: self.add_device(kk))
         bar = self._nav_bar([("Add device", "server", lambda: add.exec(self.cursor().pos())),
                              ("Add tag (Ctrl+T)", "tag", self._add_tag_current),
                              ("New view", "layout", self._new_view),
@@ -485,7 +511,8 @@ class DaqWindow(AppWindow):
         bar.installEventFilter(self)                  # middle click closes a tab
         for key, w, title, short, icon in (
                 ("screen", self._build_screen(), "Quick View", "Quick", "chart"),
-                ("connectivity", self._build_connectivity(), "Connectivity", "Tags", "network"),
+                ("connectivity", self._build_connectivity(), "Connectivity", "Devices", "network"),
+                ("tags", self._build_tags(), "Tags", "Tags", "tag"),
                 ("logging", self._build_logging_spec(), "Logging", "Logging", "file-text"),
                 ("alarms", self._build_alarms(), "Alarms", "Alarms", "bell"),
                 ("variables", self._build_variables(), "Variables", "Vars", "variable")):
@@ -552,6 +579,10 @@ class DaqWindow(AppWindow):
     def _build_connectivity(self):
         self.conn_page = ConnectivityPage(self)
         return self.conn_page
+
+    def _build_tags(self):
+        self.tags_page = TagsPage(self)
+        return self.tags_page
 
     def _build_logging_spec(self):
         w = QWidget()
@@ -652,12 +683,21 @@ class DaqWindow(AppWindow):
         self.var_page = VariablesPage(self)
         return self.var_page
 
-    # ---------------------------------------------------------------- right dock: Properties
+    # ---------------------------------------------------------------- right docks: Properties, Runtime
+    def build_docks(self):
+        super().build_docks()
+        # Runtime: its own dock, stacked under Properties (move / close / tabify like any dock)
+        self.runtime_dock = QDockWidget("Runtime", self)
+        self.runtime_dock.setObjectName("dockRuntime")
+        self.runtime_dock.setWidget(self._runtime)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.runtime_dock)
+        self.splitDockWidget(self.right_dock, self.runtime_dock, Qt.Orientation.Vertical)
+        self.resizeDocks([self.right_dock, self.runtime_dock], [560, 240], Qt.Orientation.Vertical)
+
     def build_right(self):
         self._build_side_docks()
-        rt = QFrame(); rt.setObjectName("propHead")
+        rt = QFrame(); rt.setObjectName("runtimePanel")
         v = QVBoxLayout(rt); v.setContentsMargins(10, 8, 10, 8); v.setSpacing(6)
-        v.addWidget(label("Runtime", name="sectionTitle"))
         chips = QHBoxLayout()
         self.chip_conn, self.chip_rec = Chip(), Chip()
         for c in (self.chip_conn, self.chip_rec):
@@ -676,7 +716,10 @@ class DaqWindow(AppWindow):
         self.last_session.setWordWrap(True)
         self.last_session.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.last_session)
-        self.props = PropertiesPanel(self.reg_icon, footer=rt)
+        v.addStretch(1)
+        self._runtime = rt                       # docked in build_docks (after the Properties dock)
+        self.props = PropertiesPanel(self.reg_icon, on_refresh=self._refresh_properties,
+                                     empty_hint=self._empty_hint)
         self.lbl_topics = self.add_status_label("")
         self.lbl_rx = self.add_status_label("")
         return self.props
@@ -720,6 +763,21 @@ class DaqWindow(AppWindow):
                 t = props.project_target(self)
         self.show_properties(t)
 
+    def _empty_hint(self) -> tuple[str, str]:
+        """Properties with nothing selected: say what to select on the tab in front."""
+        page = self.doc_tabs.currentWidget() if hasattr(self, "doc_tabs") else None
+        if page is getattr(self, "conn_page", None):
+            if not self.project.devices:
+                return "No devices", "Add or import a device to view its settings"
+            if len(self.conn_page.selected()) > 1:
+                return f"{len(self.conn_page.selected())} devices selected", "Select one device to view its settings"
+            return "No device selected", "Select a device to view its settings"
+        if page is getattr(self, "tags_page", None):
+            return "No tag selected", "Select a device, group or tag to view its settings"
+        if isinstance(page, dv.ViewPage):
+            return "No component selected", "Select a component to view its settings"
+        return "No selection", "Select an object to view its settings"
+
     def show_properties(self, t):
         self._prop_key = t.key if t is not None else None
         self.props.show_target(t)
@@ -746,11 +804,13 @@ class DaqWindow(AppWindow):
         page = self.doc_tabs.currentWidget()
         if isinstance(page, dv.ViewPage):
             self.view_selected(page, page.selected)
-        elif page is self.docs.get("connectivity", (None,))[0] and self._prop_key is None:
-            pass
+        elif page in (self.conn_page, self.tags_page):
+            page.activate()                      # its selected row and properties come back
         self._draw(force=True)
-        if page is self.docs.get("connectivity", (None,))[0]:
-            self.conn_page.update_live()
+        if page is self.tags_page:
+            self.tags_page.update_live()
+        elif page is self.conn_page:
+            self.conn_page.update_states()
 
     # ================================================================ project
     def _set_project(self, p: Project, path: str | None):
@@ -776,7 +836,8 @@ class DaqWindow(AppWindow):
         self._refresh_sessions()
         self._load_views()
         self.var_page.refresh()
-        self.conn_page.refresh(())
+        self.tags_page.refresh(())
+        self.conn_page.refresh([])
         self.show_properties(props.project_target(self))
         self._sync_comm()
         if p.ml_log.get("autostart") and self.ml_logger is None:   # unattended 24/7 logging
@@ -1041,9 +1102,13 @@ class DaqWindow(AppWindow):
         return ("Delete", "trash", run)
 
     # ---- devices
-    def _spec_device(self, did, driver: str | None = None):
+    def _device_popup(self, did, driver: str | None = None):
+        """Device settings pop-up (Add / Edit / double-click): the device joins the project or
+        changes only on Add device / Save."""
         new = did is None
         if new:
+            if not self._recording_guard():
+                return
             dev = new_device(driver or "sim", self._unique_name(driver_label(driver or "sim").split(" (")[0],
                                                                   {d.name for d in self.project.devices}))
             if dev.driver == "mqtt":                 # start from the broker used so far
@@ -1051,47 +1116,30 @@ class DaqWindow(AppWindow):
         else:
             dev = self.project.device(did)
             if dev is None:
-                return None
-        spec = {"key": f"edit:device:{dev.id}", "title": dev.name, "icon": DRIVERS[dev.driver]["icon"],
-                "path": f"Project / Connectivity / {dev.name}", "kind": f"{driver_label(dev.driver)} device",
-                "is_new": new, "locked": self._locked_reason}
-        taken = lambda: {d.name for d in self.project.devices if d is not dev}      # noqa: E731
-        spec["build"] = lambda: DeviceDialog(self, dev, taken(), new=spec["is_new"])
-
-        def apply(dlg):
-            if spec["is_new"]:
-                driver0 = dev.driver
-                dlg.apply(dev)
-                if dev.driver != driver0 and dev.driver != "sim":
-                    dev.tags = []                    # the simulator's starter tags don't fit
-                if dev.wave and not dev.tags:
-                    dev.tags = [TagCfg(i, f"CH{i + 1}", kind="array") for i in range(4)]
-                self.project.devices.append(dev)
-                self._mark_dirty()
-                self._structure_changed()
-                self.conn_page.refresh(("device", dev.id))
-                if self.drivers.any_running and dev.enabled and dev.driver not in PLANNED:
-                    self.drivers.start(dev)
-            else:
-                was_wave = dev.wave
-                dlg.apply(dev)
-                self.device_changed(dev.id, structure=was_wave != dev.wave)
-            spec["icon"] = DRIVERS[dev.driver]["icon"]
-            spec["kind"] = f"{driver_label(dev.driver)} device"
-            spec["tab"].set_identity(f"edit:device:{dev.id}", dev.name, f"Project / Connectivity / {dev.name}")
-            self.set_status(f"Device '{dev.name}' applied", "ok")
-            return True
-        spec["apply"] = apply
-        spec["new"] = lambda: self.open_editor("device", None, driver=dev.driver)
-        exists = lambda: self.project.device(dev.id) is not None                   # noqa: E731
-        need = lambda fn: (lambda: fn() if exists() else self.toast.popup("Apply the new device first"))  # noqa: E731
-        spec["actions"] = [("Connect", "play", need(lambda: self.start_device(dev.id))),
-                           ("Disconnect", "square", need(lambda: self.stop_device(dev.id))),
-                           ("Add tags...", "list", need(lambda: self.add_tags(dev.id, "", True)))]
-        if dev.driver == "opcua":
-            spec["actions"].append(("Browse...", "search", need(lambda: self.browse_opcua(dev.id, ""))))
-        spec["actions"].append(self._delete_action(spec, lambda: self.delete_device(dev.id), exists))
-        return spec
+                return
+        dlg = DeviceDialog(self, dev, {d.name for d in self.project.devices if d is not dev}, new=new,
+                           locked="Stop recording to change the device." if self.recording else "")
+        if not dlg.exec() or self.recording:
+            return
+        if new:
+            driver0 = dev.driver
+            dlg.apply(dev)
+            if dev.driver != driver0 and dev.driver != "sim":
+                dev.tags = []                        # the simulator's starter tags don't fit
+            if dev.wave and not dev.tags:
+                dev.tags = [TagCfg(i, f"CH{i + 1}", kind="array") for i in range(4)]
+            self.project.devices.append(dev)
+            self._mark_dirty()
+            self._structure_changed()
+            self.tags_page.refresh(("device", dev.id))
+            self.conn_page.select(dev.id)
+            if self.drivers.any_running and dev.enabled and dev.driver not in PLANNED:
+                self.drivers.start(dev)
+        else:
+            was_wave = dev.wave
+            dlg.apply(dev)
+            self.device_changed(dev.id, structure=was_wave != dev.wave)
+        self.set_status(f"Device '{dev.name}' " + ("added" if new else "saved"), "ok")
 
     # ---- tags
     def _spec_tag(self, ident, did: str | None = None, group: str = ""):
@@ -1174,7 +1222,7 @@ class DaqWindow(AppWindow):
                     x.group = fix(x.group)
             cur["path"] = newp
             self._mark_dirty()
-            self.conn_page.refresh(("group", dev.id, newp))
+            self.tags_page.refresh(("group", dev.id, newp))
             self._rebuild_project_tree()
             spec["tab"].set_identity(f"edit:group:{dev.id}:{newp}", title(), path())
             return True
@@ -1424,6 +1472,8 @@ class DaqWindow(AppWindow):
         self._ml_restart()                       # new device folders / names in meta.json
         self._stat_dirty = True
         self._rebuild_project_tree()
+        if hasattr(self, "conn_page"):
+            self.conn_page.refresh()             # tag counts, names, enabled
 
     def device_changed(self, did: str, restart: bool = True, structure: bool = False):
         """A device's properties changed: restart its driver if it runs, refresh views."""
@@ -1437,14 +1487,14 @@ class DaqWindow(AppWindow):
             self.drivers.stop(did)
             if dev is not None and dev.enabled:
                 self.drivers.start(dev)
-        QTimer.singleShot(0, lambda: (self._structure_changed(), self.conn_page.refresh(),
+        QTimer.singleShot(0, lambda: (self._structure_changed(), self.tags_page.refresh(),
                                       self._refresh_properties()))
 
     def tags_changed(self, did: str, restart: bool = False):
         self._mark_dirty()
         if restart and self.drivers.running(did):
             self.drivers.start(self.project.device(did))
-        QTimer.singleShot(0, lambda: (self._structure_changed(), self.conn_page.refresh(),
+        QTimer.singleShot(0, lambda: (self._structure_changed(), self.tags_page.refresh(),
                                       self._refresh_properties()))
 
     def _rebuild_colors(self):
@@ -1485,33 +1535,162 @@ class DaqWindow(AppWindow):
 
     def add_device(self, driver: str):
         if self._recording_guard():
-            self.open_editor("device", None, driver=driver)
+            self._device_popup(None, driver)
 
     def edit_device(self, did: str):
-        self.open_editor("device", did)
+        self._device_popup(did)
 
     def delete_device(self, did: str):
-        dev = self.project.device(did)
-        if dev is None or not self._recording_guard():
+        self.delete_devices([did])
+
+    def delete_devices(self, dids: list[str]):
+        devs = [d for d in (self.project.device(i) for i in dids) if d is not None]
+        if not devs or not self._recording_guard():
             return
-        if not confirm(self, "Delete device", f"Delete device '{dev.name}' and its {len(dev.tags)} tag(s)?",
-                       "Delete device", "Alarms, views and logging profiles that use its tags stop showing data."):
+        n = sum(len(d.tags) for d in devs)
+        what = f"device '{devs[0].name}'" if len(devs) == 1 else f"{len(devs)} devices"
+        if not confirm(self, "Delete devices" if len(devs) > 1 else "Delete device",
+                       f"Delete {what} and {n} tag(s)?",
+                       f"Delete {len(devs)} devices" if len(devs) > 1 else "Delete device",
+                       "Alarms, views and logging profiles that use their tags stop showing data."):
             return
-        self.drivers.stop(did)
-        self.project.devices.remove(dev)
-        self._close_editors(f"edit:device:{did}")
-        self._close_editors(f"edit:tag:{did}:")
-        self._close_editors(f"edit:group:{did}:")
-        self.streams.pop(did, None)
+        for dev in devs:
+            did = dev.id
+            self.drivers.stop(did)
+            self.project.devices.remove(dev)
+            self._close_editors(f"edit:tag:{did}:")
+            self._close_editors(f"edit:group:{did}:")
+            self.streams.pop(did, None)
         self._mark_dirty()
         self._structure_changed()
-        self.conn_page.refresh(())
+        self.tags_page.refresh(())
         self.show_properties(None)
-        self.toast.popup(f"Deleted '{dev.name}'")
+        self._sync_comm()
+        self.toast.popup(f"Deleted '{devs[0].name}'" if len(devs) == 1 else f"Deleted {len(devs)} devices")
+
+    def duplicate_device(self, did: str):
+        """Copy of a device with its settings, groups and tags (new id, not started)."""
+        src = self.project.device(did)
+        if src is None or not self._recording_guard():
+            return
+        dev = copy.deepcopy(src)
+        dev.id = uuid.uuid4().hex[:8]
+        dev.name = self._unique_name(f"{src.name} copy", {d.name for d in self.project.devices})
+        self.project.devices.insert(self.project.devices.index(src) + 1, dev)
+        self._mark_dirty()
+        self._structure_changed()
+        self.tags_page.refresh()
+        self.conn_page.select(dev.id)
+        self.toast.popup(f"Duplicated as '{dev.name}'")
+
+    def set_devices_enabled(self, dids: list[str], on: bool) -> bool:
+        """Enable / disable devices: a disabled device stops and is not logged; an enabled one
+        starts if communication runs."""
+        if not self._recording_guard():
+            return False
+        for did in dids:
+            dev = self.project.device(did)
+            if dev is None or dev.enabled == on:
+                continue
+            dev.enabled = on
+            if not on:
+                self.drivers.stop(did)
+            elif self.drivers.any_running and dev.driver not in PLANNED:
+                self.drivers.start(dev)
+        self._mark_dirty()
+        self._structure_changed()
+        self.tags_page.refresh()
+        self._update_device_states()
+        self._refresh_properties()
+        return True
+
+    def open_tags(self, did: str):
+        self._show_doc("tags")
+        self.tags_page.refresh(("device", did))
+
+    def _update_device_states(self):
+        self._sync_comm()
+        self.conn_page.update_states()
+        self.tags_page.update_states()
+
+    def export_devices_dialog(self, preselect: list[str] = ()):
+        """Export pop-up: tick devices, choose JSON / CSV, then where to save."""
+        if not self.project.devices:
+            self.toast.popup("No devices to export")
+            return
+        dlg = ExportDevicesDialog(self, self.project.devices, list(preselect))
+        if dlg.exec():
+            self.export_devices(dlg.chosen(), dlg.format())
+
+    def export_devices(self, dids: list[str], fmt: str):
+        """JSON: devices with groups and tags; CSV: the device list. No passwords."""
+        devs = [d for d in self.project.devices if d.id in dids]
+        if not devs:
+            return
+        base = dl.safe_name(devs[0].name if len(devs) == 1 else self.project.name) + "_devices"
+        ext = {"json": "JSON (*.json)", "csv": "CSV (*.csv)"}[fmt]
+        path, _ = QFileDialog.getSaveFileName(self, "Export devices",
+                                              os.path.join(self._project_dir(), f"{base}.{fmt}"), ext)
+        if not path:
+            return
+        try:
+            if fmt == "json":
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(devices_to_json(devs), f, indent=2, ensure_ascii=False)
+            else:
+                with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                    w = csv.DictWriter(f, DEVICE_COLS)
+                    w.writeheader(); w.writerows(devices_to_rows(devs))
+        except OSError as e:
+            self.banners.post("proj", f"Could not write {path}: {e}", "bad")
+            return
+        self._log(f"Exported {len(devs)} device(s) to {path}")
+        self.toast.popup(f"{len(devs)} device(s) exported" + (" with tags" if fmt == "json" else ""))
+
+    def import_devices(self):
+        """JSON export (or a .nxl project: its devices) with tags, or a CSV device list."""
+        if not self._recording_guard():
+            return
+        dlg = ImportDevicesDialog(self, {d.name for d in self.project.devices}, self._project_dir())
+        if not dlg.exec():                       # the dialog checks the file: only valid files get here
+            return
+        path, csv_file = dlg.path, dlg.is_csv
+        mode, ids, added, replaced = dlg.mode(), {d.id for d in self.project.devices}, [], 0
+        for dev in dlg.chosen():
+            old = next((d for d in self.project.devices if d.name == dev.name), None)
+            if old is not None and mode == "skip":
+                continue
+            if old is not None and mode == "replace":
+                self.drivers.stop(old.id)
+                self.streams.pop(old.id, None)
+                dev.id = old.id                  # alarms, views, logging keep pointing at it
+                if csv_file:                     # a CSV row has no tags: keep the old ones
+                    dev.tags, dev.groups = old.tags, old.groups
+                if old.driver == dev.driver:     # passwords are not exported: keep the old ones
+                    dev.settings.update({k: old.settings[k] for k in secret_keys(dev.driver) if old.settings.get(k)})
+                self.project.devices[self.project.devices.index(old)] = dev
+                replaced += 1
+            else:
+                if old is not None:
+                    dev.name = self._unique_name(dev.name, {d.name for d in self.project.devices})
+                if dev.id in ids:
+                    dev.id = uuid.uuid4().hex[:8]
+                self.project.devices.append(dev)
+                added.append(dev.id)
+            ids.add(dev.id)
+        if not added and not replaced:
+            return
+        self._mark_dirty()
+        self._structure_changed()
+        self.tags_page.refresh()
+        self.conn_page.refresh(added)
+        self._show_doc("connectivity")
+        self._log(f"Imported devices from {path}: {len(added)} added, {replaced} replaced")
+        self.toast.popup(f"{len(added)} device(s) added" + (f", {replaced} replaced" if replaced else ""))
 
     def _add_tag_current(self):
         """Ctrl+T: add a tag to the device selected in Connectivity (or the first one)."""
-        sel = self.conn_page._sel
+        sel = self.tags_page._sel
         did = sel[1] if len(sel) > 1 else (self.project.devices[0].id if self.project.devices else None)
         if did is None:
             self._show_doc("connectivity")
@@ -1541,9 +1720,9 @@ class DaqWindow(AppWindow):
             new = [t]
         dev.tags.extend(new)
         dev.tags.sort(key=lambda t: t.index) if dev.wave else None
-        self._show_doc("connectivity")
+        self._show_doc("tags")
         self.tags_changed(did, restart=True)
-        QTimer.singleShot(0, lambda: (self.conn_page.select_tag(did, new[-1].index),
+        QTimer.singleShot(0, lambda: (self.tags_page.select_tag(did, new[-1].index),
                                       self.select_object(("tag", did, new[-1].index))))
 
     def edit_tag(self, did: str, idx: int):
@@ -1599,7 +1778,7 @@ class DaqWindow(AppWindow):
         for t in dev.tags:
             t.group = fix(t.group)
         self._mark_dirty()
-        self.conn_page.refresh(("group", did, new))
+        self.tags_page.refresh(("group", did, new))
         self.select_object(("group", did, new))
 
     def delete_group(self, did: str, path: str):
@@ -1627,7 +1806,7 @@ class DaqWindow(AppWindow):
                     t.group = parent
         dev.groups = [g for g in dev.groups if not (g == path or g.startswith(path + "/"))]
         self.show_properties(None)
-        self.conn_page.refresh(("device", did))
+        self.tags_page.refresh(("device", did))
         self.tags_changed(did, restart=bool(inside))
 
     def write_tag(self, did: str, idx: int):
@@ -1712,11 +1891,11 @@ class DaqWindow(AppWindow):
             return
         self.drivers.start(dev)
         self._log(f"{dev.name}: starting ({driver_label(dev.driver)}, {dev.topic})")
-        self._sync_comm(); self.conn_page.update_states(); self._refresh_properties()
+        self._update_device_states(); self._refresh_properties()
 
     def stop_device(self, did: str):
         self.drivers.stop(did)
-        self._sync_comm(); self.conn_page.update_states(); self._refresh_properties()
+        self._update_device_states(); self._refresh_properties()
 
     def _start_all(self):
         devs = [d for d in self.project.devices if d.enabled and d.driver not in PLANNED]
@@ -1728,13 +1907,13 @@ class DaqWindow(AppWindow):
             if not self.drivers.running(d.id):
                 self.drivers.start(d)
         self._log(f"Communication started: {len(devs)} device(s)")
-        self._sync_comm(); self.conn_page.update_states(); self._refresh_properties()
+        self._update_device_states(); self._refresh_properties()
 
     def _stop_all(self):
         with self._waiting():
             self.drivers.stop_all()
         self._log("Communication stopped")
-        self._sync_comm(); self.conn_page.update_states(); self._refresh_properties()
+        self._update_device_states(); self._refresh_properties()
 
     def _toggle_comm(self):
         self._stop_all() if self.drivers.any_running else self._start_all()
@@ -1940,15 +2119,16 @@ class DaqWindow(AppWindow):
             if page is not None:
                 self.show_properties(props.view_target(self, page))
         elif d[0] in ("device", "tagdev"):
-            self.conn_page.refresh(("device", d[1]))
+            self.tags_page.refresh(("device", d[1]))
+            self.conn_page.select(d[1])
             self.select_object(("device", d[1]))
         elif d[0] == "tagsroot":
-            self._show_doc("connectivity")
+            self._show_doc("tags")
         elif d[0] == "group":
-            self.conn_page.refresh(("group", d[1], d[2]))
+            self.tags_page.refresh(("group", d[1], d[2]))
             self.select_object(("group", d[1], d[2]))
         elif d[0] == "tag":
-            self.conn_page.select_tag(d[1], d[2])
+            self.tags_page.select_tag(d[1], d[2])
             self.select_object(("tag", d[1], d[2]))
         elif d[0] == "lprof":
             self._select_log_profile(d[1])
@@ -1979,8 +2159,8 @@ class DaqWindow(AppWindow):
         d = self._nav_data(it)
         if not d:
             return
-        go = {"device": lambda: self.open_editor("device", d[1]),
-              "tagdev": lambda: self.open_editor("device", d[1]),
+        go = {"device": lambda: self.edit_device(d[1]),
+              "tagdev": lambda: self.edit_device(d[1]),
               "tag": lambda: self.open_editor("tag", (d[1], d[2])),
               "group": lambda: self.open_editor("group", (d[1], d[2])),
               "lprof": lambda: self.open_editor("lprofile", d[1]),
@@ -1998,7 +2178,7 @@ class DaqWindow(AppWindow):
         if d[0] == "device":
             dev = self.project.device(d[1])
             run = self.drivers.running(d[1])
-            m.addAction("Edit device...", later(lambda: self.open_editor("device", d[1])))
+            m.addAction("Edit device...", later(lambda: self.edit_device(d[1])))
             m.addAction("Disconnect" if run else "Connect",
                         lambda: (self.stop_device if run else self.start_device)(d[1]))
             if dev and dev.driver == "opcua":
@@ -2363,7 +2543,8 @@ class DaqWindow(AppWindow):
         self.act_stop.setEnabled(rec)
         if hasattr(self, "var_page"):                 # variables are locked while recording too
             self.var_page.refresh()
-        if hasattr(self, "conn_page"):
+        if hasattr(self, "tags_page"):
+            self.tags_page.update_states()
             self.conn_page.update_states()
 
     # ================================================================ recording
@@ -2565,7 +2746,7 @@ class DaqWindow(AppWindow):
         if new_ch:
             self._mark_dirty()
             if self.recorder is None:
-                self._structure_changed(); self.conn_page.refresh()
+                self._structure_changed(); self.tags_page.refresh()
         self._draw()
 
     def _ingest(self, dev: DeviceCfg, rx: float, payload: bytes, blk):
@@ -2599,10 +2780,11 @@ class DaqWindow(AppWindow):
         self._log(f"{dev.name}: {state}" + (f" - {text}" if text else ""))
         if state == "error":
             self.banners.post(f"dev:{dev.id}", f"{dev.name}: {text}", "bad", "Device",
-                              lambda: (self._show_doc("connectivity"), self.conn_page.refresh(("device", dev.id))))
+                              lambda: (self._show_doc("connectivity"), self.conn_page.select(dev.id)))
         elif state == "online":
             self.banners.dismiss(f"dev:{dev.id}")
             self.set_status(f"{dev.name} online - {text}", "ok")
+        self.tags_page.update_states()
         self.conn_page.update_states()
         self._update_nav_dots()
         if self._prop_key == ("device", dev.id):
@@ -2827,8 +3009,10 @@ class DaqWindow(AppWindow):
         page = self.doc_tabs.currentWidget()
         if isinstance(page, dv.ViewPage):
             page.update_values()
+        elif page is self.tags_page:
+            self.tags_page.update_live()
+            self.tags_page.update_states()
         elif page is self.conn_page:
-            self.conn_page.update_live()
             self.conn_page.update_states()
         self._sync_comm()
 
@@ -3409,6 +3593,7 @@ class DaqWindow(AppWindow):
                 text = mode == "wide" or (mode == "medium" and a in keep)
                 btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon if text
                                        else Qt.ToolButtonStyle.ToolButtonIconOnly)
+                refit(btn)
 
         short = mode == "compact"
         for key, (w, full, abbr, _) in self.docs.items():
@@ -3418,14 +3603,19 @@ class DaqWindow(AppWindow):
 
         # Properties panel: auto-hide when narrow, bring back when there is room again
         if short:
-            if self.right_dock.isVisible() and not self.right_dock.isFloating():
+            if not self.right_dock.isHidden() and not self.right_dock.isFloating():
                 self.right_dock.hide()
                 self._auto_hidden_right = True
+                self._auto_hidden_rt = not self.runtime_dock.isHidden() and not self.runtime_dock.isFloating()
+                if self._auto_hidden_rt:
+                    self.runtime_dock.hide()
                 if prev is not None:
                     self.toast.popup("Properties panel hidden - Ctrl+Shift+P shows it")
         elif self._auto_hidden_right:
             self.right_dock.show()
-            self._auto_hidden_right = False
+            if self._auto_hidden_rt:
+                self.runtime_dock.show()
+            self._auto_hidden_right = self._auto_hidden_rt = False
 
         left, right = DOCK_W[mode]
         docks, sizes = [self.left_dock], [left]

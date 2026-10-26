@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from nxlogger.comms.drivers import make_driver
+from nxlogger.comms.drivers import make_driver, test_connection as try_connection
 from nxlogger.comms.drivers.mqtt import json_value
 from nxlogger.core.tags import DeviceCfg, TagCfg, new_device, new_tag
 
@@ -101,9 +101,22 @@ def test_modbus_tcp_round_trip():
         assert _drain(q, "write", 1)[0][2] is True
         time.sleep(0.3)
         assert _drain(q, "scan", 1)[0][5][1] == 123.0
+        ok, text = try_connection(dev)                  # the device pop-up's Test connection
+        assert ok and text.startswith("connected in ") and "2/2 tag(s)" in text, text
     finally:
         d.stop()
         ServerStop()
+
+
+def test_connection_test_reports_failures():
+    ok, text = try_connection(new_device("sim"))
+    assert ok and "4/4" in text
+    port = _free_port()                                 # nothing listens there
+    ok, text = try_connection(DeviceCfg("plc", "modbus_tcp", settings={"host": "127.0.0.1", "port": port,
+                                                                       "timeout_s": 0.5}))
+    assert not ok and text, text
+    ok, text = try_connection(DeviceCfg("da", "opcda"))
+    assert not ok and "not available" in text
 
 
 def test_opcua_round_trip():

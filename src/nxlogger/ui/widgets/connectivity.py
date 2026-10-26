@@ -1,39 +1,39 @@
 """
-connectivity.py - the Connectivity document (like Genesis64 Connectivity / FUXA Connections):
+connectivity.py - the Connectivity document (like FUXA Connections / Genesis64 Connectivity):
+the device table only. Tags are managed in the Tags document (tags_page.py).
 
-  left   devices (connector icon, state dot) with their groups (folders)
-  right  tag table of the selected device / group: name, group, address, type, access,
-         unit, live value, quality, time of the last value, description
-  bar    add device (per connector), add tag, add tags (bulk), add group, browse (OPC UA),
-         start / stop, import / export tag list (CSV), delete
+  bar    add (per connector), edit, duplicate, delete, import... (checked JSON / CSV file),
+         export... (tick devices, JSON with tags / CSV device list), columns (show / hide, remembered) -
+         fixed buttons, nothing appears or renames
+  table  name (state icon), connector, address, scan, tags, status, enabled (check box),
+         description - multi-select, sortable, filter
 
-Select anything to edit it in the Properties panel; double-click a tag for all its settings
-(scaling, display). Tags can be multi-selected (delete, enable / disable, move to a group).
+Select a row: its properties in the Properties panel; double-click (or Enter): the device
+settings pop-up (the Enabled check box is an indicator, not a control); right-click a row:
+Edit device, Enable / Disable, Duplicate, Export, Delete (Enable / Disable, Export and Delete
+act on every selected row).
 
 Host API (duck-typed, DaqWindow):
-  host.project, host.reg_icon(target, name, token), host.recording (bool), host.color_of(did, idx)
+  host.project, host.reg_icon(target, name, token), host.recording (bool)
   host.device_state(did) -> (state, text)
-  host.tag_live(did, idx) -> (value text, quality text, good: bool | None, time text)
-  host.select_object(ref)            ref: ("device", did) | ("group", did, path) | ("tag", did, idx) | None
-  host.add_device(driver) / host.edit_device(did) / host.delete_device(did)
-  host.add_tags(did, group, bulk) / host.edit_tag(did, idx) / host.delete_tags(did, [idx])
-  host.add_group(did, parent) / host.delete_group(did, path) / host.move_tags(did, [idx], group)
-  host.set_tags_enabled(did, [idx], on) / host.write_tag(did, idx) / host.browse_opcua(did, group)
-  host.start_device(did) / host.stop_device(did) / host.import_tags(did) / host.export_tags(did)
+  host.select_object(ref)            ref: ("device", did) | None
+  host.add_device(driver) / host.edit_device(did) / host.duplicate_device(did)
+  host.delete_devices([did]) / host.set_devices_enabled([did], on) -> bool
+  host.import_devices() / host.export_devices_dialog([did])     (pop-ups)
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLineEdit, QMenu,
-                               QSplitter, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtGui import QBrush, QColor, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QLineEdit, QMenu,
+                               QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from nxlogger.core.tags import DRIVERS, PLANNED, describe_address, driver_label
-from nxlogger.ui.icons import swatch
-from nxlogger.ui.theme.ui_kit import T, label, make_icon
+from nxlogger.core.tags import DRIVERS, PLANNED, driver_label
+from nxlogger.ui.theme.ui_kit import T, label, make_icon, vsep
 
-COLS = ["Name", "Group", "Address", "Type", "Access", "Unit", "Value", "Quality", "Updated", "Description"]
-C_VALUE, C_QUAL, C_TIME = COLS.index("Value"), COLS.index("Quality"), COLS.index("Updated")
+COLS = ["Name", "Connector", "Address", "Scan", "Tags", "Status", "Enabled", "Description"]
+C_STATUS, C_EN = COLS.index("Status"), COLS.index("Enabled")
+HIDDEN_KEY = "connectivity/hidden_columns"        # QSettings: column names the user hid
 STATE_TOKEN = {"online": "ok", "connecting": "warn", "error": "bad", "stopped": "muted"}
 
 
@@ -50,48 +50,41 @@ class ConnectivityPage(QWidget):
     def __init__(self, host):
         super().__init__()
         self.host = host
-        self._sel: tuple = ()                        # ("device", did) / ("group", did, path)
-        self._rows: dict[tuple[str, int], QTreeWidgetItem] = {}
-        self._dev_items: dict[str, QTreeWidgetItem] = {}
+        self._rows: dict[str, QTreeWidgetItem] = {}
+        self._last: list[str] = []                   # selection to bring back when the tab returns
 
         bar = QFrame(); bar.setObjectName("docBar")
         bl = QHBoxLayout(bar); bl.setContentsMargins(8, 4, 8, 4); bl.setSpacing(2)
-        add_dev = self._button("Add device", "server", None, "Add a device: choose the connector")
-        m = QMenu(add_dev)
-        for k, d in DRIVERS.items():
-            a = m.addAction(d["label"] + "...", lambda kk=k: host.add_device(kk))
-            host.reg_icon(a, d["icon"])
-        add_dev.setMenu(m); add_dev.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.btn_tag = self._button("Add tag", "tag", lambda: self._add_tags(False), "Add one tag to the device")
-        self.btn_tags = self._button("Add tags...", "list", lambda: self._add_tags(True),
-                                     "Add several tags with consecutive addresses")
-        self.btn_group = self._button("Group", "folder-plus", self._add_group, "Add a group (folder)")
-        self.btn_browse = self._button("Browse...", "search", self._browse, "Browse the OPC UA server")
-        self.btn_start = self._button("Start", "play", self._start, "Connect this device")
-        self.btn_stop = self._button("Stop", "square", self._stop, "Disconnect this device")
-        self.btn_imp = self._button("", "download", self._import, "Import tags from CSV")
-        self.btn_exp = self._button("", "upload", self._export, "Export the tag list to CSV")
-        self.btn_del = self._button("", "trash", self._delete, "Delete the selected tags / group / device")
-        for w in (add_dev, None, self.btn_tag, self.btn_tags, self.btn_group, self.btn_browse, None,
-                  self.btn_start, self.btn_stop, None, self.btn_imp, self.btn_exp, self.btn_del):
+        add = self._button("Add", "plus", None, "Add a device: choose the connector")
+        m = QMenu(add)
+        for k, d in DRIVERS.items():                   # text only, like every menu (no icon column)
+            m.addAction(d["label"] + "...", lambda kk=k: host.add_device(kk))
+        add.setMenu(m); add.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.btn_add = add
+        self.btn_edit = self._button("Edit", "pencil", self._edit, "Edit the device settings (double-click a row)")
+        self.btn_dup = self._button("", "copy", self._duplicate, "Duplicate the device (settings and tags)")
+        self.btn_del = self._button("", "trash", self._delete, "Delete the selected devices (Del)")
+        self.btn_imp = self._button("Import...", "download", lambda: host.import_devices(),
+                                    "Import devices from JSON (with tags) or CSV")
+        self.btn_exp = self._button("Export...", "upload", lambda: host.export_devices_dialog(self.selected()),
+                                    "Export devices: tick them, JSON (with tags) or CSV")
+        for w in (add, self.btn_edit, self.btn_dup, self.btn_del, None, self.btn_imp, self.btn_exp):
             if w is None:
-                sep = QFrame(); sep.setFrameShape(QFrame.Shape.VLine); sep.setObjectName("vsep")
-                bl.addSpacing(4); bl.addWidget(sep); bl.addSpacing(4)
+                bl.addWidget(vsep())
             else:
                 bl.addWidget(w)
         bl.addStretch(1)
-        self.filter = QLineEdit(); self.filter.setPlaceholderText("Filter tags")
+        self.btn_cols = self._button("Columns", "columns", None, "Show / hide table columns")
+        self.cols_menu = QMenu(self.btn_cols)
+        self.cols_menu.aboutToShow.connect(lambda: self._fill_columns_menu(self.cols_menu))
+        self.btn_cols.setMenu(self.cols_menu)
+        self.btn_cols.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        bl.addWidget(self.btn_cols)
+        self.filter = QLineEdit(); self.filter.setPlaceholderText("Filter devices")
         self.filter.setClearButtonEnabled(True); self.filter.setMaximumWidth(220)
+        self.filter.setMinimumWidth(120)
         self.filter.textChanged.connect(lambda _: self._apply_filter())
         bl.addWidget(self.filter)
-
-        self.dtree = QTreeWidget(); self.dtree.setObjectName("navTree")
-        self.dtree.setHeaderHidden(True); self.dtree.setIndentation(14)
-        self.dtree.currentItemChanged.connect(lambda cur, _p: self._device_selected(cur))
-        self.dtree.itemClicked.connect(lambda it, _c: self._device_selected(it, force=True))
-        self.dtree.itemDoubleClicked.connect(self._device_double)
-        self.dtree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.dtree.customContextMenuRequested.connect(self._device_menu)
 
         self.table = QTreeWidget()
         self.table.setHeaderLabels(COLS)
@@ -101,25 +94,29 @@ class ConnectivityPage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setSortingEnabled(True)
         self.table.sortByColumn(-1, Qt.SortOrder.AscendingOrder)
-        for c, w in enumerate((160, 110, 170, 60, 52, 60, 100, 70, 80)):
+        for c, w in enumerate((160, 120, 210, 64, 46, 130, 74)):
             self.table.header().resizeSection(c, w)
-        self.table.header().setSectionResizeMode(len(COLS) - 1, QHeaderView.ResizeMode.Stretch)
-        for c in (C_VALUE,):
-            self.table.headerItem().setTextAlignment(c, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.table.itemSelectionChanged.connect(self._tags_selected)
+        self.table.header().setStretchLastSection(True)
+        self.table.header().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.header().customContextMenuRequested.connect(self._header_menu)
+        hidden = QSettings().value(HIDDEN_KEY, [])
+        for c in range(1, len(COLS)):                 # Name always shows
+            self.table.setColumnHidden(c, COLS[c] in (hidden if isinstance(hidden, list) else [hidden]))
+        self.table.itemSelectionChanged.connect(self._selected)
         self.table.itemDoubleClicked.connect(lambda it, _c: QTimer.singleShot(
-            0, lambda: host.edit_tag(*it.data(0, Qt.ItemDataRole.UserRole))))
+            0, lambda: host.edit_device(it.data(0, Qt.ItemDataRole.UserRole))))
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._tag_menu)
+        self.table.customContextMenuRequested.connect(self._menu)
+        for key, slot in ((QKeySequence.StandardKey.Delete, self._delete), (Qt.Key.Key_Return, self._edit),
+                          (Qt.Key.Key_Enter, self._edit)):
+            sc = QShortcut(QKeySequence(key), self.table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(slot)
         self.hint = label("", muted=True, small=True)
         self.hint.setContentsMargins(8, 2, 8, 2)
 
-        right = QWidget(); rv = QVBoxLayout(right); rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(0)
-        rv.addWidget(self.table, 1); rv.addWidget(self.hint)
-        split = QSplitter(); split.addWidget(self.dtree); split.addWidget(right)
-        split.setStretchFactor(1, 1); split.setSizes([230, 800]); split.setChildrenCollapsible(False)
         v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
-        v.addWidget(bar); v.addWidget(split, 1)
+        v.addWidget(bar); v.addWidget(self.table, 1); v.addWidget(self.hint)
 
     def _button(self, text, icon, slot, tip) -> QToolButton:
         b = QToolButton(); b.setToolTip(tip)
@@ -130,290 +127,197 @@ class ConnectivityPage(QWidget):
             b.clicked.connect(slot)
         return b
 
-    # ---------------------------------------------------------------- devices
-    def refresh(self, select: tuple | None = None):
-        """Model changed: rebuild the device tree and the tag table (keeps the selection)."""
-        if select is not None:
-            self._sel = select
-        self.dtree.blockSignals(True)
-        self.dtree.clear(); self._dev_items.clear()
-        cur = None
+    # ---------------------------------------------------------------- table
+    def refresh(self, select: list[str] | None = None):
+        """Model changed: rebuild the table (keeps the selection unless `select` is given)."""
+        keep = self.selected() if select is None else list(select)
+        self.table.blockSignals(True)
+        self.table.setSortingEnabled(False)
+        self.table.clear(); self._rows.clear()
+        muted = QBrush(QColor(T["muted"]))
         for d in self.host.project.devices:
-            it = QTreeWidgetItem([d.name])
-            it.setData(0, Qt.ItemDataRole.UserRole, ("device", d.id))
-            it.setToolTip(0, f"{driver_label(d.driver)} · {d.topic}" + ("" if d.enabled else " · disabled"))
+            it = QTreeWidgetItem([d.name, driver_label(d.driver), d.topic,
+                                  "-" if d.wave else f"{d.scan_ms} ms", str(len(d.tags)), "", "",
+                                  d.description])
+            it.setData(0, Qt.ItemDataRole.UserRole, d.id)
+            it.setCheckState(C_EN, Qt.CheckState.Checked if d.enabled else Qt.CheckState.Unchecked)
+            it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)    # indicator only: set in the pop-up
+            it.setText(C_EN, "Yes" if d.enabled else "No")
+            it.setToolTip(0, DRIVERS[d.driver]["note"])
             if not d.enabled:
-                it.setForeground(0, QBrush(QColor(T["muted"])))
-            self.dtree.addTopLevelItem(it)
-            self._dev_items[d.id] = it
-            folders = {"": it}
-            for g in d.all_groups():
-                parent = folders.get(g.rsplit("/", 1)[0] if "/" in g else "", it)
-                gi = QTreeWidgetItem([g.rsplit("/", 1)[-1]])
-                gi.setIcon(0, make_icon("folder", T["muted"]))
-                gi.setData(0, Qt.ItemDataRole.UserRole, ("group", d.id, g))
-                n = sum(1 for t in d.tags if t.group == g or t.group.startswith(g + "/"))
-                gi.setToolTip(0, f"{g} · {n} tag(s)")
-                parent.addChild(gi)
-                folders[g] = gi
-                if self._sel == ("group", d.id, g):
-                    cur = gi
-            it.setExpanded(True)
-            if self._sel[:2] == ("device", d.id) or (cur is None and self._sel[1:2] == (d.id,)):
-                cur = cur or it
-        if cur is None and self.dtree.topLevelItemCount():
-            cur = self.dtree.topLevelItem(0)
+                for c in range(len(COLS)):
+                    it.setForeground(c, muted)
+            self.table.addTopLevelItem(it)
+            self._rows[d.id] = it
+            it.setSelected(d.id in keep)
+        self.table.setSortingEnabled(True)
+        self.table.blockSignals(False)
+        cur = next((self._rows[k] for k in keep if k in self._rows), None)
         if cur is not None:
-            self.dtree.setCurrentItem(cur)
-            self._sel = tuple(cur.data(0, Qt.ItemDataRole.UserRole))
-        else:
-            self._sel = ()
-        self.dtree.blockSignals(False)
+            self.table.setCurrentItem(cur, 0, self.table.selectionModel().SelectionFlag.NoUpdate)
+        self._apply_filter()
         self.update_states(force=True)
-        self._fill_tags()
+
+    def select(self, did: str):
+        """Select one device (project tree, banners) and show its properties."""
+        if did not in self._rows:
+            self.refresh([did])
+        it = self._rows.get(did)
+        if it is not None:
+            self.table.clearSelection()
+            it.setSelected(True)
+            self.table.setCurrentItem(it)
+            self.table.scrollToItem(it)
 
     def update_states(self, force: bool = False):
+        """Status column and state icon (twice a second while visible, and on state changes)."""
+        bad = QBrush(QColor(T["bad"]))
         for d in self.host.project.devices:
-            it = self._dev_items.get(d.id)
+            it = self._rows.get(d.id)
             if it is None:
                 continue
             state, text = self.host.device_state(d.id)
             tok = STATE_TOKEN.get(state, "muted") if d.enabled else "muted"
-            key = (tok, text)
-            if force or it.data(1, Qt.ItemDataRole.UserRole) != key:
-                it.setData(1, Qt.ItemDataRole.UserRole, key)
-                it.setIcon(0, self._device_icon(d.driver, tok))
-                it.setToolTip(0, f"{driver_label(d.driver)} · {d.topic}\n{state.capitalize()}"
-                                 + (f": {text}" if text else ""))
-        self._update_buttons()
-
-    @staticmethod
-    def _device_icon(driver: str, tok: str) -> QIcon:
-        """Connector icon in the state colour (green online, amber connecting, red error)."""
-        return make_icon(DRIVERS.get(driver, {}).get("icon", "server"), T[tok if tok != "muted" else "text"])
-
-    def _device(self):
-        return self.host.project.device(self._sel[1]) if len(self._sel) > 1 else None
-
-    def _device_selected(self, it, force: bool = False):
-        if it is None:
-            return
-        sel = tuple(it.data(0, Qt.ItemDataRole.UserRole))
-        if sel != self._sel or force:
-            self._sel = sel
-            self._fill_tags()
-            self.host.select_object(sel)
-
-    def _device_double(self, it, _c):
-        d = it.data(0, Qt.ItemDataRole.UserRole)
-        if d[0] == "device":
-            QTimer.singleShot(0, lambda: self.host.edit_device(d[1]))
-
-    def _device_menu(self, pos):
-        it = self.dtree.itemAt(pos)
-        m = QMenu(self)
-        if it is not None:
-            self.dtree.setCurrentItem(it)
-            d = tuple(it.data(0, Qt.ItemDataRole.UserRole))
-            dev = self.host.project.device(d[1])
-            if d[0] == "device":
-                m.addAction("Edit device...", lambda: QTimer.singleShot(0, lambda: self.host.edit_device(d[1])))
-                run = self.host.device_state(d[1])[0] != "stopped"
-                m.addAction("Stop" if run else "Start", lambda: (self.host.stop_device if run
-                                                                 else self.host.start_device)(d[1]))
-            m.addAction("Add tag", lambda: self._add_tags(False))
-            m.addAction("Add tags...", lambda: self._add_tags(True))
-            m.addAction("Add group...", self._add_group)
-            if dev is not None and dev.driver == "opcua":
-                m.addAction("Browse server...", self._browse)
-            m.addSeparator()
-            if d[0] == "device":
-                m.addAction("Import tags (CSV)...", self._import)
-                m.addAction("Export tags (CSV)...", self._export)
-                m.addSeparator()
-                m.addAction("Delete device", self._delete)
-            else:
-                m.addAction("Delete group", self._delete)
-        else:
-            for k, d in DRIVERS.items():
-                m.addAction(f"Add {d['label']} device...", lambda kk=k: self.host.add_device(kk))
-        self._lock_menu(m)
-        m.exec(self.dtree.viewport().mapToGlobal(pos))
-
-    # ---------------------------------------------------------------- tags
-    def _fill_tags(self):
-        dev = self._device()
-        self.table.setSortingEnabled(False)
-        self.table.clear(); self._rows.clear()
-        if dev is None:
-            self.hint.setText("Add a device: Add device ▾ - Simulation, Modbus TCP / RTU, MQTT or OPC UA.")
-            self._update_buttons()
-            return
-        group = self._sel[2] if self._sel[0] == "group" else None
-        muted = QBrush(QColor(T["muted"]))
-        for t in dev.tags:
-            if group is not None and not (t.group == group or t.group.startswith(group + "/")):
+            status = "Disabled" if not d.enabled else ("Planned" if d.driver in PLANNED else state.capitalize())
+            key = (tok, status, text)
+            if not force and it.data(1, Qt.ItemDataRole.UserRole) == key:
                 continue
-            typ = "Array" if t.kind == "array" else (t.address.get("dtype", "Number")
-                                                     if dev.driver.startswith("modbus") else "Number")
-            it = QTreeWidgetItem([t.name, t.group, describe_address(dev.driver, "", t), typ,
-                                  t.access, t.unit, "", "", "", t.description])
-            it.setData(0, Qt.ItemDataRole.UserRole, (dev.id, t.index))
-            it.setIcon(0, swatch(self.host.color_of(dev.id, t.index)))
-            it.setTextAlignment(C_VALUE, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            if not t.enabled:
-                for c in range(len(COLS)):
-                    it.setForeground(c, muted)
-            self.table.addTopLevelItem(it)
-            self._rows[(dev.id, t.index)] = it
-        self.table.setSortingEnabled(True)
-        n = len(self._rows)
-        where = f"group {group}" if group else dev.name
-        self.hint.setText(f"{n} tag(s) in {where} · {driver_label(dev.driver)} · {dev.topic} · "
-                          "double-click a tag for all settings, right-click for more")
-        self._apply_filter()
-        self.update_live()
+            it.setData(1, Qt.ItemDataRole.UserRole, key)
+            it.setIcon(0, make_icon(DRIVERS[d.driver]["icon"], T[tok if tok != "muted" else "text"]))
+            it.setIcon(C_STATUS, dot(tok))
+            it.setText(C_STATUS, status + (f": {text}" if text and state == "error" else ""))
+            it.setToolTip(C_STATUS, f"{state.capitalize()}" + (f": {text}" if text else ""))
+            it.setForeground(C_STATUS, bad if tok == "bad" else it.foreground(1))
+        self._update_hint()
         self._update_buttons()
 
-    def update_live(self):
-        """Value / quality / time columns (called twice a second while the page is visible)."""
-        bad, ok, muted = QBrush(QColor(T["bad"])), QBrush(QColor(T["ok"])), QBrush(QColor(T["muted"]))
-        for (did, idx), it in self._rows.items():
-            val, qual, good, stamp = self.host.tag_live(did, idx)
-            if it.text(C_VALUE) != val:
-                it.setText(C_VALUE, val)
-            if it.text(C_QUAL) != qual:
-                it.setText(C_QUAL, qual)
-                it.setForeground(C_QUAL, ok if good else (bad if good is False else muted))
-                it.setForeground(C_VALUE, bad if good is False else QBrush())
-            if it.text(C_TIME) != stamp:
-                it.setText(C_TIME, stamp)
+    def _update_hint(self):
+        devs = self.host.project.devices
+        if not devs:
+            self.hint.setText("No devices - Add ▾: Simulation, Modbus TCP / RTU, MQTT or OPC UA, or Import...")
+            return
+        on = sum(1 for d in devs if self.host.device_state(d.id)[0] == "online")
+        self.hint.setText(f"{len(devs)} device(s) · {sum(d.enabled for d in devs)} enabled · {on} online · "
+                          "double-click a device to edit it, right-click for more")
 
     def _apply_filter(self):
         text = self.filter.text().strip().lower()
         for it in self._rows.values():
-            it.setHidden(bool(text) and not any(text in it.text(c).lower() for c in (0, 1, 2, 9)))
+            it.setHidden(bool(text) and not any(text in it.text(c).lower() for c in (0, 1, 2, 7)))
 
-    def selected_tags(self) -> list[tuple[str, int]]:
-        return [tuple(it.data(0, Qt.ItemDataRole.UserRole)) for it in self.table.selectedItems()]
+    def selected(self) -> list[str]:
+        return [it.data(0, Qt.ItemDataRole.UserRole) for it in self.table.selectedItems()]
 
-    def select_tag(self, did: str, idx: int):
-        if self._sel[1:2] != (did,):
-            self.refresh(("device", did))
-        it = self._rows.get((did, idx))
-        if it is None:                                   # filtered by group: show the whole device
-            self.refresh(("device", did))
-            it = self._rows.get((did, idx))
-        if it is not None:
-            self.table.clearSelection()
-            it.setSelected(True)
-            self.table.scrollToItem(it)
+    def _devices(self):
+        p = self.host.project
+        return [d for d in (p.device(i) for i in self.selected()) if d is not None]
 
-    def _tags_selected(self):
-        sel = self.selected_tags()
-        if len(sel) == 1:
-            self.host.select_object(("tag", *sel[0]))
-        elif len(sel) > 1:
-            self.host.select_object(("tags", sel[0][0], [i for _, i in sel]))
+    def _selected(self):
+        sel = self.selected()
+        if sel:
+            self._last = sel
+        self.host.select_object(("device", sel[0]) if len(sel) == 1 else None)
         self._update_buttons()
 
-    def _tag_menu(self, pos):
+    def activate(self):
+        """The tab came to the front (other tabs used the Properties panel meanwhile): keep or
+        bring back the selected rows - else the first device - and show its properties again."""
+        if not self.selected():
+            keep = [d for d in self._last if d in self._rows]
+            first = self.table.topLevelItem(0)
+            if not keep and first is not None:
+                keep = [first.data(0, Qt.ItemDataRole.UserRole)]
+            self.table.blockSignals(True)
+            for did in keep:
+                self._rows[did].setSelected(True)
+            if keep:
+                self.table.setCurrentItem(self._rows[keep[0]], 0,
+                                          self.table.selectionModel().SelectionFlag.NoUpdate)
+            self.table.blockSignals(False)
+        self._selected()
+
+    def _menu(self, pos):
         it = self.table.itemAt(pos)
         if it is not None and not it.isSelected():
             self.table.clearSelection(); it.setSelected(True)
-        sel = self.selected_tags()
-        dev = self._device()
+        self.build_menu(self._devices() if it is not None else []).exec(self.table.viewport().mapToGlobal(pos))
+
+    def build_menu(self, devs) -> QMenu:
+        """Right-click menu: on rows the device actions, on empty space add / import / export."""
+        rec = self.host.recording
         m = QMenu(self)
-        if sel and dev is not None:
-            did, ids = sel[0][0], [i for _, i in sel]
-            if len(sel) == 1:
-                m.addAction("Edit tag...", lambda: QTimer.singleShot(0, lambda: self.host.edit_tag(did, ids[0])))
-                tag = dev.tag(ids[0])
-                w = m.addAction("Write value...", lambda: self.host.write_tag(did, ids[0]))
-                w.setEnabled(tag is not None and tag.access == "RW" and self.host.device_state(did)[0] == "online")
-                m.addSeparator()
-            m.addAction("Enable", lambda: self.host.set_tags_enabled(did, ids, True))
-            m.addAction("Disable", lambda: self.host.set_tags_enabled(did, ids, False))
-            mv = m.addMenu("Move to group")
-            mv.addAction("(no group)", lambda: self.host.move_tags(did, ids, ""))
-            for g in dev.all_groups():
-                mv.addAction(g, lambda gg=g: self.host.move_tags(did, ids, gg))
+        if devs:                                     # edit, enable / disable, duplicate, export, delete
+            one, n = len(devs) == 1, len(devs)
+            what = "device" if one else f"{n} devices"
+            off = all(x.enabled for x in devs)           # all on: Disable, else Enable
+            items = [("Edit device...", self._edit, one),
+                     (f"{'Disable' if off else 'Enable'} {what}", self._toggle_enabled, not rec),
+                     ("Duplicate", self._duplicate, one and not rec),
+                     None,
+                     ("Export...", lambda: self.host.export_devices_dialog([x.id for x in devs]), True),
+                     None,
+                     (f"Delete {what}", self._delete, not rec)]
+            for item in items:
+                if item is None:
+                    m.addSeparator(); continue
+                text, slot, on = item
+                m.addAction(text, slot).setEnabled(on)
+        else:
+            add = m.addMenu("Add device")
+            for k, dd in DRIVERS.items():
+                add.addAction(dd["label"] + "...", lambda kk=k: self.host.add_device(kk))
+            add.setEnabled(not rec)
             m.addSeparator()
-            if len(sel) == 1:
-                m.addAction("Add alarm for this tag...", lambda: self.host.add_alarm_for((did, ids[0])))
-            m.addAction(f"Delete {len(sel)} tag(s)", self._delete)
-            m.addSeparator()
-        m.addAction("Add tag", lambda: self._add_tags(False))
-        m.addAction("Add tags...", lambda: self._add_tags(True))
-        self._lock_menu(m, keep=("Write value...", "Add alarm for this tag..."))
-        m.exec(self.table.viewport().mapToGlobal(pos))
+            m.addAction("Import devices...", self.host.import_devices).setEnabled(not rec)
+            m.addAction("Export devices...", lambda: self.host.export_devices_dialog([])).setEnabled(
+                bool(self.host.project.devices))
+        return m
+
+    # ---------------------------------------------------------------- columns
+    def _fill_columns_menu(self, m: QMenu):
+        m.clear()
+        for c in range(1, len(COLS)):
+            a = m.addAction(COLS[c])
+            a.setCheckable(True); a.setChecked(not self.table.isColumnHidden(c))
+            a.toggled.connect(lambda on, cc=c: self._show_column(cc, on))   # toggled passes the state
+        m.addSeparator()
+        m.addAction("Show all columns", lambda: [self._show_column(c, True) for c in range(1, len(COLS))])
+
+    def _header_menu(self, pos):
+        m = QMenu(self)
+        self._fill_columns_menu(m)
+        m.exec(self.table.header().mapToGlobal(pos))
+
+    def _show_column(self, c: int, on: bool):
+        self.table.setColumnHidden(c, not on)
+        QSettings().setValue(HIDDEN_KEY, [COLS[i] for i in range(1, len(COLS)) if self.table.isColumnHidden(i)])
 
     # ---------------------------------------------------------------- actions
-    def _lock_menu(self, m: QMenu, keep=()):
-        """While recording the tag list is locked (files have fixed columns)."""
-        if self.host.recording:
-            for a in m.actions():
-                if a.text() not in keep and not a.text().startswith(("Start", "Stop")):
-                    a.setEnabled(False)
+    def _edit(self):
+        sel = self.selected()
+        if sel:
+            QTimer.singleShot(0, lambda: self.host.edit_device(sel[0]))
 
-    def _group(self) -> str:
-        return self._sel[2] if self._sel and self._sel[0] == "group" else ""
-
-    def _add_tags(self, bulk: bool):
-        dev = self._device()
-        if dev is not None:
-            self.host.add_tags(dev.id, self._group(), bulk)
-
-    def _add_group(self):
-        dev = self._device()
-        if dev is not None:
-            self.host.add_group(dev.id, self._group())
-
-    def _browse(self):
-        dev = self._device()
-        if dev is not None and dev.driver == "opcua":
-            self.host.browse_opcua(dev.id, self._group())
-
-    def _start(self):
-        dev = self._device()
-        if dev is not None:
-            self.host.start_device(dev.id)
-
-    def _stop(self):
-        dev = self._device()
-        if dev is not None:
-            self.host.stop_device(dev.id)
-
-    def _import(self):
-        dev = self._device()
-        if dev is not None:
-            self.host.import_tags(dev.id)
-
-    def _export(self):
-        dev = self._device()
-        if dev is not None:
-            self.host.export_tags(dev.id)
+    def _duplicate(self):
+        sel = self.selected()
+        if len(sel) == 1:
+            self.host.duplicate_device(sel[0])
 
     def _delete(self):
-        sel = self.selected_tags()            # tags selected: delete them, else the group / device
+        sel = self.selected()
         if sel:
-            self.host.delete_tags(sel[0][0], [i for _, i in sel])
-        elif self._sel and self._sel[0] == "group":
-            self.host.delete_group(self._sel[1], self._sel[2])
-        elif self._sel and self._sel[0] == "device":
-            self.host.delete_device(self._sel[1])
+            self.host.delete_devices(sel)
+
+    def _toggle_enabled(self):
+        devs = self._devices()
+        if devs:
+            self.host.set_devices_enabled([d.id for d in devs], not all(d.enabled for d in devs))
 
     def _update_buttons(self):
-        dev = self._device()
+        devs = self._devices()
         rec = self.host.recording
-        has = dev is not None
-        for b in (self.btn_tag, self.btn_tags, self.btn_group, self.btn_imp):
-            b.setEnabled(has and not rec)
-        self.btn_tags.setEnabled(has and not rec)
-        self.btn_browse.setVisible(has and dev.driver == "opcua")
-        self.btn_browse.setEnabled(not rec)
-        self.btn_exp.setEnabled(has)
-        self.btn_del.setEnabled(has and not rec)
-        state = self.host.device_state(dev.id)[0] if has else "stopped"
-        self.btn_start.setEnabled(has and dev.enabled and state == "stopped" and dev.driver not in PLANNED)
-        self.btn_stop.setEnabled(has and state != "stopped")
+        self.btn_add.setEnabled(not rec)
+        self.btn_imp.setEnabled(not rec)
+        self.btn_edit.setEnabled(len(devs) == 1)
+        self.btn_dup.setEnabled(len(devs) == 1 and not rec)
+        self.btn_del.setEnabled(bool(devs) and not rec)

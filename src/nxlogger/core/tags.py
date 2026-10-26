@@ -21,7 +21,7 @@ and the device / tag dialogs build their editors from them.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
@@ -323,8 +323,7 @@ def tag_from_row(dev: DeviceCfg, row: dict) -> TagCfg:
         if f is None:
             continue
         try:
-            t.address[k] = {"int": int, "float": float, "bool": lambda s: s.lower() in ("1", "true", "yes")}\
-                .get(f["type"], str)(v)
+            t.address[k] = _typed(f, v)
         except ValueError:
             pass
     t.unit = row.get("unit", "") or ""
@@ -336,3 +335,200 @@ def tag_from_row(dev: DeviceCfg, row: dict) -> TagCfg:
     except ValueError:
         pass
     return t
+
+
+# ====================================================================== device list (JSON / CSV)
+# Export / import of the Connectivity table. JSON is the full device (settings + groups + tags),
+# CSV is one row per device (no tags) for spreadsheets. Passwords are never written: export
+# files get mailed around; the project file keeps them.
+DEVICES_FORMAT = "nxlogger-devices"
+DEVICE_COLS = ["name", "driver", "enabled", "scan_ms", "description", "settings"]
+
+
+def secret_keys(driver: str) -> set[str]:
+    return {f["key"] for f in DRIVERS.get(driver, {}).get("settings") or [] if f["type"] == "password"}
+
+
+def _typed(f: dict, v: str):
+    """Text from a CSV cell -> the schema field's type (ValueError if it does not parse)."""
+    return {"int": int, "float": float, "bool": lambda s: s.strip().lower() in ("1", "true", "yes", "on")}\
+        .get(f["type"], str)(v)
+
+
+def devices_to_json(devs: list[DeviceCfg], tags: bool = True) -> dict:
+    out = []
+    for d in devs:
+        x = asdict(d)
+        x["settings"] = {k: v for k, v in d.settings.items() if k not in secret_keys(d.driver)}
+        if not tags:
+            x["tags"], x["groups"] = [], []
+        out.append(x)
+    return {"format": DEVICES_FORMAT, "version": 1, "devices": out}
+
+
+def devices_from_json(data) -> list[DeviceCfg]:
+    """An export file, a project file (.nxl, its "devices") or a bare list of devices."""
+    items = data.get("devices") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        raise ValueError("no device list in the file")
+    out = []
+    for x in items:
+        if not isinstance(x, dict) or x.get("driver") not in DRIVERS or not str(x.get("name", "")).strip():
+            raise ValueError(f"not a device: {str(x)[:60]}")
+        out.append(device_from_dict(x))
+    return out
+
+
+def devices_to_rows(devs: list[DeviceCfg]) -> list[dict]:
+    """CSV rows (settings as key=value;key=value, like the tag list's address)."""
+    return [{"name": d.name, "driver": d.driver, "enabled": int(d.enabled), "scan_ms": d.scan_ms,
+             "description": d.description,
+             "settings": ";".join(f"{k}={v}" for k, v in d.settings.items() if k not in secret_keys(d.driver))}
+            for d in devs]
+
+
+def device_from_row(row: dict) -> DeviceCfg:
+    """One CSV row -> device without tags. The connector is its key or its label
+    ("modbus_tcp" / "Modbus TCP"); unknown settings are ignored, bad numbers keep the default."""
+    drv = (row.get("driver") or "").strip()
+    drv = drv if drv in DRIVERS else next((k for k, v in DRIVERS.items() if v["label"].lower() == drv.lower()), "")
+    name = (row.get("name") or "").strip()
+    if not drv or not name:
+        raise ValueError(f"row needs a name and a connector: {name or '?'} / {drv or row.get('driver') or '?'}")
+    d = DeviceCfg(name, drv)
+    schema = {f["key"]: f for f in DRIVERS[drv]["settings"]}
+    for part in (row.get("settings") or "").split(";"):
+        k, _, v = part.partition("=")
+        f = schema.get(k.strip())
+        if f is not None:
+            try:
+                d.settings[f["key"]] = _typed(f, v.strip())
+            except ValueError:
+                pass
+    d.enabled = str(row.get("enabled", "1")).strip().lower() not in ("0", "false", "no", "off")
+    try:
+        d.scan_ms = max(20, int(float(row.get("scan_ms") or 1000)))
+    except ValueError:
+        pass
+    d.description = row.get("description", "") or ""
+    return d
+
+
+class DeviceFileError(ValueError):
+    """A device file that must not be imported; `problems` lists every reason (line numbers)."""
+
+    def __init__(self, problems: list[str]):
+        super().__init__("; ".join(problems[:3]) + (f" (+{len(problems) - 3} more)" if len(problems) > 3 else ""))
+        self.problems = problems
+
+
+def read_devices_file(path: str) -> list[DeviceCfg]:
+    """Strict import check: JSON (device export, .nxl project, list) or CSV device list.
+    Any problem - wrong format, unknown connector or setting, bad number, duplicate name -
+    raises DeviceFileError with all of them; nothing is imported from a file that fails."""
+    import csv
+    import json
+    low = path.lower()
+    if not low.endswith((".json", ".nxl", ".csv")):
+        raise DeviceFileError(["not a device file: use .json, .nxl or .csv"])
+    problems, devs = [], []
+    try:
+        if low.endswith(".csv"):
+            with open(path, encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                cols = [c.strip() for c in reader.fieldnames or []]
+                missing = [c for c in ("name", "driver") if c not in cols]
+                unknown = [c for c in cols if c not in DEVICE_COLS]
+                if missing or unknown:
+                    raise DeviceFileError(
+                        ([f"missing column(s): {', '.join(missing)}"] if missing else [])
+                        + ([f"unknown column(s): {', '.join(unknown)}"] if unknown else [])
+                        + [f"expected header: {','.join(DEVICE_COLS)}"])
+                for n, row in enumerate(reader, start=2):
+                    row = {(k or "").strip(): v for k, v in row.items()}
+                    if not any(isinstance(v, str) and v.strip() for v in row.values()):
+                        continue                                     # blank line
+                    problems += [f"line {n}: {p}" for p in _row_problems(row)]
+                    if not problems:
+                        devs.append(device_from_row(row))
+        else:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data.get("format") not in (DEVICES_FORMAT, "nxlogger"):
+                raise DeviceFileError([f"not an NX Logger device or project file (format: {data.get('format')!r})"])
+            items = data.get("devices") if isinstance(data, dict) else data
+            if not isinstance(items, list):
+                raise DeviceFileError(["no device list in the file"])
+            for n, x in enumerate(items, start=1):
+                p = _json_problems(x)
+                problems += [f"device {n}: {q}" for q in p]
+                if not p:
+                    try:
+                        devs.append(device_from_dict(x))
+                    except (TypeError, ValueError) as e:
+                        problems.append(f"device {n}: {e}")
+    except DeviceFileError:
+        raise
+    except UnicodeDecodeError:
+        raise DeviceFileError(["not a text file (UTF-8)"])
+    except json.JSONDecodeError as e:
+        raise DeviceFileError([f"not valid JSON: line {e.lineno}, column {e.colno}: {e.msg}"])
+    except (OSError, csv.Error) as e:
+        raise DeviceFileError([str(e)])
+    names = [d.name for d in devs]
+    problems += [f"device name used twice: {x}" for x in sorted({x for x in names if names.count(x) > 1})]
+    if not problems and not devs:
+        problems.append("no devices in the file")
+    if problems:
+        raise DeviceFileError(problems)
+    return devs
+
+
+def _row_problems(row: dict) -> list[str]:
+    out = []
+    drv = (row.get("driver") or "").strip()
+    key = drv if drv in DRIVERS else next((k for k, v in DRIVERS.items() if v["label"].lower() == drv.lower()), "")
+    if not (row.get("name") or "").strip():
+        out.append("empty name")
+    if not key:
+        out.append(f"unknown connector {drv!r} (use {', '.join(DRIVERS)})")
+    if str(row.get("enabled", "1")).strip().lower() not in ("", "0", "1", "true", "false", "yes", "no", "on", "off"):
+        out.append(f"enabled must be 1 or 0, not {row.get('enabled')!r}")
+    try:
+        if int(float(row.get("scan_ms") or 1000)) < 20:
+            out.append("scan_ms below 20")
+    except ValueError:
+        out.append(f"scan_ms is not a number: {row.get('scan_ms')!r}")
+    if key:
+        schema = {f["key"]: f for f in DRIVERS[key]["settings"]}
+        for part in (row.get("settings") or "").split(";"):
+            if not part.strip():
+                continue
+            k, eq, v = part.partition("=")
+            f = schema.get(k.strip())
+            if not eq or f is None:
+                out.append(f"unknown setting {k.strip()!r} for {DRIVERS[key]['label']}")
+                continue
+            try:
+                _typed(f, v.strip())
+            except ValueError:
+                kind = {"int": "whole number", "float": "number", "bool": "yes / no"}.get(f["type"], f["type"])
+                out.append(f"setting {k.strip()}: {v.strip()!r} is not a {kind}")
+    return out
+
+
+def _json_problems(x) -> list[str]:
+    if not isinstance(x, dict):
+        return ["not a device object"]
+    out = []
+    if not str(x.get("name") or "").strip():
+        out.append("empty name")
+    if x.get("driver") not in DRIVERS:
+        out.append(f"unknown connector {x.get('driver')!r}")
+    if not isinstance(x.get("settings", {}), dict):
+        out.append("settings is not an object")
+    tags = x.get("tags", [])
+    if not isinstance(tags, list) or not all(isinstance(t, dict) and isinstance(t.get("index"), int)
+                                             and str(t.get("name") or "").strip() for t in tags):
+        out.append("tags must be a list of {index, name, ...}")
+    return out

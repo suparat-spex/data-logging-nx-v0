@@ -236,7 +236,7 @@ def start():
 
 def screens():
     w._update_stats()
-    for key in ("screen", "connectivity", "logging"):
+    for key in ("screen", "connectivity", "tags", "logging"):
         w._show_doc(key); w._update_stats(); shot(key)
     w._show_doc(f"view:{view['id']}"); w._update_stats(); shot("view_live")
     page = w.view_pages[view["id"]]

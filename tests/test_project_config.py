@@ -3,7 +3,8 @@ import json
 
 from nxlogger import config, paths
 from nxlogger.core.project import PROJECT_EXT, Project
-from nxlogger.core.tags import DeviceCfg, new_device, new_tag, tag_from_row, tags_to_rows
+from nxlogger.core.tags import (DeviceCfg, DeviceFileError, read_devices_file, device_from_row, devices_from_json, devices_to_json, devices_to_rows,
+                                new_device, new_tag, tag_from_row, tags_to_rows)
 
 
 def test_round_trip():
@@ -42,6 +43,53 @@ def test_tag_csv_round_trip():
     t = tag_from_row(DeviceCfg("Other", "modbus_tcp"), row)
     assert (t.name, t.group, t.unit, t.access) == ("Flow", "Line 1", "m3/h", "RW")
     assert t.address["addr"] == 10 and t.address["order"] == "CDAB" and t.address["dtype"] == "float32"
+
+
+def test_device_export_import():
+    plc = DeviceCfg("PLC", "modbus_tcp", settings={"host": "10.0.0.5", "port": 1502}, scan_ms=500)
+    plc.tags.append(new_tag(plc, "Flow", "Line 1", addr=10))
+    mq = DeviceCfg("Broker", "mqtt", enabled=False, settings={"password": "s3cret", "username": "u"})
+    data = json.loads(json.dumps(devices_to_json([plc, mq])))       # through a file
+    assert "password" not in data["devices"][1]["settings"]          # never exported
+    a, b = devices_from_json(data)
+    assert (a.name, a.settings["host"], a.scan_ms, a.tags[0].address["addr"]) == ("PLC", "10.0.0.5", 500, 10)
+    assert not b.enabled and b.settings["password"] == "" and b.settings["username"] == "u"
+    assert [d.name for d in devices_from_json(Project("x", devices=[plc]).to_dict())] == ["PLC"]  # a .nxl
+    rows = devices_to_rows([plc, mq])
+    assert "password" not in rows[1]["settings"]
+    c = device_from_row({**rows[0], "driver": "Modbus TCP"})                     # label works too
+    assert (c.driver, c.settings["host"], c.settings["port"], c.scan_ms, c.tags) == \
+        ("modbus_tcp", "10.0.0.5", 1502, 500, [])
+    assert device_from_row({"name": "S", "driver": "sim", "enabled": "0"}).enabled is False
+    for bad in ({"name": "", "driver": "sim"}, {"name": "X", "driver": "nope"}):
+        try:
+            device_from_row(bad)
+            raise AssertionError("bad row accepted")
+        except ValueError:
+            pass
+
+
+def test_device_file_validation(tmp_path):
+    good = tmp_path / "d.csv"
+    good.write_text("name,driver,enabled,scan_ms,description,settings\nPLC,Modbus TCP,1,500,,host=1.2.3.4;port=502\n",
+                    encoding="utf-8")
+    assert [d.settings["host"] for d in read_devices_file(str(good))] == ["1.2.3.4"]
+    cases = {"tags.csv": "device,group,name,unit\nPLC,,T,C\n",                     # a tag list, not devices
+             "dup.csv": "name,driver\nA,sim\nA,sim\n",
+             "num.csv": "name,driver,scan_ms\nA,sim,fast\n",
+             "set.csv": "name,driver,settings\nA,sim,host=x\n",
+             "x.json": '{"format": "other", "devices": []}',
+             "broken.json": "{not json",
+             "empty.json": '{"format": "nxlogger-devices", "devices": []}',
+             "d.txt": "name,driver\nA,sim\n"}
+    for name, text in cases.items():
+        f = tmp_path / name
+        f.write_text(text, encoding="utf-8")
+        try:
+            read_devices_file(str(f))
+            raise AssertionError(f"{name} accepted")
+        except DeviceFileError as e:
+            assert e.problems, name
 
 
 def test_default_project_has_simulator_and_view():

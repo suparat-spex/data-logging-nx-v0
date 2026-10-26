@@ -9,8 +9,10 @@ The panel knows nothing about the project. Callers hand it a PropTarget:
                                 key, label, type, default, extra, tip (+ optional "readonly")
   values                        {key: value}
   apply(key, value)             called on every edit (the caller changes the model)
-  actions                       [(text, icon, callable)] buttons under the header
+  actions                       [(text, icon, callable)] icon buttons in the dock bar (text = tooltip),
+                                between Refresh and Expand all / Collapse (like the Project dock)
   live()                        optional {key: value} refreshed twice a second (read-only fields)
+  readonly                      every field shown as text (no editors)
 
 Field types: str, password, text (multi-line), int, float, bool, choice (extra = list or
 {value: label}), combo (editable choice), color, info (read-only text), button (extra =
@@ -21,13 +23,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QHeaderView,
                                QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSpinBox,
                                QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from nxlogger.ui.dialogs.common import ColorButton
+from nxlogger.ui.theme.app_style import blend
 from nxlogger.ui.theme.ui_kit import T, label, make_icon
 
 
@@ -42,6 +45,7 @@ class PropTarget:
     actions: list = field(default_factory=list)
     live: object = None
     key: tuple = ()                       # identity: the same object is not rebuilt on refresh
+    readonly: bool = False                # information only (devices: edited in their pop-up)
 
 
 class _TextEdit(QPlainTextEdit):
@@ -66,30 +70,41 @@ class PropertyGrid(QTreeWidget):
         self.setObjectName("propGrid")
         self.setColumnCount(2)
         self.setHeaderHidden(True)
-        self.setIndentation(10)
+        self.setIndentation(16)                  # room left of the section arrow
         self.setRootIsDecorated(True)
         self.setUniformRowHeights(False)
         self.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         self.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.header().resizeSection(0, 132)
+        self.header().resizeSection(0, 150)          # labels sit 32 px in (two indent steps)
         self.editors: dict[str, QWidget] = {}
         self._fields: dict[str, dict] = {}
         self._quiet = False
+
+    def drawRow(self, painter, option, index):
+        """Section rows are a full-width band (arrow area included) with a border, like the
+        channel groups of a measurement tool; neutral theme colours, read from T at paint time."""
+        if not index.parent().isValid():
+            r = option.rect
+            painter.fillRect(r, QColor(blend(T["hover"], T["panel"], 0.7)))
+            painter.setPen(QColor(T["border"]))
+            painter.drawLine(r.left(), r.top(), r.right(), r.top())
+            painter.drawLine(r.left(), r.bottom(), r.right(), r.bottom())
+        super().drawRow(painter, option, index)
 
     def set_fields(self, sections, values: dict, readonly: bool = False):
         open_sections = {self.topLevelItem(i).text(0) for i in range(self.topLevelItemCount())
                          if not self.topLevelItem(i).isExpanded()}
         self.clear(); self.editors.clear(); self._fields.clear()
-        bold = self.font(); bold.setBold(True)
+        semi = self.font(); semi.setWeight(semi.Weight.DemiBold)
         for name, fields in sections:
             if not fields:
                 continue
             sec = QTreeWidgetItem([name])
             sec.setFirstColumnSpanned(True)
-            sec.setFont(0, bold)
-            sec.setForeground(0, QBrush(QColor(T["muted"])))
+            sec.setFont(0, semi)
+            sec.setSizeHint(0, QSize(0, 24))
             sec.setFlags(Qt.ItemFlag.ItemIsEnabled)
             self.addTopLevelItem(sec)
             for f in fields:
@@ -176,6 +191,8 @@ class PropertyGrid(QTreeWidget):
 
     @staticmethod
     def _text(f, value) -> str:
+        if f["type"] == "password":
+            return "••••••" if value else ""
         if f["type"] in ("choice", "combo"):
             return dict(_choices(f.get("extra"))).get(value, "" if value is None else str(value))
         if f["type"] == "bool":
@@ -209,11 +226,25 @@ class PropertyGrid(QTreeWidget):
 class PropertiesPanel(QWidget):
     """Header (icon, name, type) + action buttons + PropertyGrid + an optional footer widget."""
 
-    def __init__(self, reg_icon, footer: QWidget | None = None):
+    def __init__(self, reg_icon, footer: QWidget | None = None, on_refresh=None, empty_hint=None):
         super().__init__()
         self.reg_icon = reg_icon
+        self.empty_hint = empty_hint                 # () -> (title, text) for "nothing selected" here
         self.target: PropTarget | None = None
-        head = QFrame(); head.setObjectName("propHead")
+        self._act_btns: list[tuple[QToolButton, str]] = []
+        # dock bar, the same pattern as the Project / Data docks: Refresh, item actions | Expand, Collapse
+        self.bar = bar = QFrame(); bar.setObjectName("navBar")
+        bl = QHBoxLayout(bar); bl.setContentsMargins(4, 2, 4, 2); bl.setSpacing(0)
+        self.btn_refresh = self._bar_button("Refresh (read the item again)", "refresh",
+                                            on_refresh or (lambda: self.show_target(self.target)))
+        bl.addWidget(self.btn_refresh)
+        self.actions_row = QHBoxLayout(); self.actions_row.setSpacing(0)
+        bl.addLayout(self.actions_row)
+        bl.addStretch(1)
+        for tip, icon, slot in (("Expand all", "expand", lambda: self.grid.expandAll()),
+                                ("Collapse", "collapse", lambda: self.grid.collapseAll())):
+            bl.addWidget(self._bar_button(tip, icon, slot))
+        self.head = head = QFrame(); head.setObjectName("propHead")
         hv = QVBoxLayout(head); hv.setContentsMargins(10, 8, 10, 8); hv.setSpacing(2)
         top = QHBoxLayout(); top.setSpacing(8)
         self.icon = QLabel(); self.icon.setFixedSize(20, 20)
@@ -223,41 +254,59 @@ class PropertiesPanel(QWidget):
         hv.addLayout(top)
         self.subtitle = label("", muted=True, small=True); self.subtitle.setWordWrap(True)
         hv.addWidget(self.subtitle)
-        self.actions_row = QHBoxLayout(); self.actions_row.setSpacing(2)
-        hv.addLayout(self.actions_row)
         self.grid = PropertyGrid()
         self.grid.edited.connect(self._edited)
-        self.empty = label("Select a device, tag, view cell or component to see its properties.",
-                           muted=True, small=True)
-        self.empty.setWordWrap(True); self.empty.setContentsMargins(12, 12, 12, 12)
+        # nothing selected: only a centred message - no bar, no header, no lines
+        self.empty = QWidget()
+        ev = QVBoxLayout(self.empty); ev.setContentsMargins(16, 0, 16, 0); ev.setSpacing(2)
+        ev.addStretch(1)
+        self.empty_title = QLabel(); self.empty_title.setObjectName("emptyTitle")
+        self.empty_text = label("", muted=True)
+        for w in (self.empty_title, self.empty_text):
+            w.setAlignment(Qt.AlignmentFlag.AlignHCenter); w.setWordWrap(True); ev.addWidget(w)
+        ev.addStretch(4)                             # message in the upper part, like other tools
         v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
-        v.addWidget(head); v.addWidget(self.empty); v.addWidget(self.grid, 1)
+        v.addWidget(bar); v.addWidget(head); v.addWidget(self.empty, 1); v.addWidget(self.grid, 1)
         if footer is not None:
             v.addWidget(footer)
         self._timer = QTimer(self, interval=500, timeout=self._refresh_live)
         self._timer.start()
         self.show_target(None)
 
+    def _bar_button(self, tip, icon, slot) -> QToolButton:
+        b = QToolButton(); b.setToolTip(tip); b.setAutoRaise(True)
+        self.reg_icon(b, icon)
+        b.clicked.connect(slot)
+        return b
+
     def show_target(self, t: PropTarget | None):
         self.target = t
+        self._act_btns.clear()
         while self.actions_row.count():
             w = self.actions_row.takeAt(0).widget()
             if w is not None:                        # off the screen now, deleted later
                 w.hide(); w.setParent(None); w.deleteLater()
         if t is None:
-            self.title.setText("Nothing selected"); self.subtitle.setText("")
-            self.icon.setPixmap(make_icon("info", T["muted"]).pixmap(18, 18))
-            self.grid.clear(); self.grid.hide(); self.empty.show()
+            title, text = self.empty_hint() if self.empty_hint else ("No selection", "Select an object to view its settings")
+            self.empty_title.setText(title); self.empty_text.setText(text)
+            self.grid.clear()
+            for w in (self.bar, self.head, self.grid):
+                w.hide()
+            self.empty.show()
             return
-        self.empty.hide(); self.grid.show()
+        self.empty.hide()
+        for w in (self.bar, self.head, self.grid):
+            w.show()
         self.title.setText(t.title)
         self.subtitle.setText(t.subtitle); self.subtitle.setVisible(bool(t.subtitle))
         self.icon.setPixmap(make_icon(t.icon, T["accent"]).pixmap(18, 18))
         for text, icon, slot in t.actions:
-            b = QToolButton(); b.setText(text); b.setAutoRaise(True)
-            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            if icon:
-                b.setIcon(make_icon(icon, T["text"]))
+            b = QToolButton(); b.setAutoRaise(True)
+            b.setToolTip(text.rstrip(".") or {"trash": "Delete", "copy": "Duplicate"}.get(icon, icon))
+            if icon:                                  # icon only, like the other dock bars
+                b.setIcon(make_icon(icon, T["text"])); self._act_btns.append((b, icon))
+            else:
+                b.setText(text)
             if isinstance(slot, list):               # [(text, callable)] -> menu
                 m = QMenu(b)
                 for mt, ms in slot:
@@ -266,10 +315,11 @@ class PropertiesPanel(QWidget):
             else:
                 b.clicked.connect(slot)
             self.actions_row.addWidget(b)
-        self.actions_row.addStretch(1)
-        self.grid.set_fields(t.sections, t.values)
+        self.grid.set_fields(t.sections, t.values, t.readonly)
 
     def refresh_icons(self):
+        for b, icon in self._act_btns:
+            b.setIcon(make_icon(icon, T["text"]))
         if self.target is not None:
             self.icon.setPixmap(make_icon(self.target.icon, T["accent"]).pixmap(18, 18))
 

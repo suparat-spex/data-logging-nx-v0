@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, Q
 
 from nxlogger import config
 from nxlogger.comms.mqtt_client import MqttClient, TRANSPORTS
-from nxlogger.ui.theme.ui_kit import set_prop
+from nxlogger.ui.theme.ui_kit import fixed_width, set_prop
 
 
 class MqttPanel(QGroupBox):
@@ -46,6 +46,7 @@ class MqttPanel(QGroupBox):
         self.retain = QCheckBox("Retain")
         self.btn = QPushButton("Connect", clicked=self._toggle)
         self.btn.setMinimumHeight(30)
+        fixed_width(self.btn, "Connect", "Disconnect")
         self.led = QLabel()
         self.state = QLabel("Disconnected")
         self._set_led("#9aa0a6")
