@@ -33,6 +33,7 @@ import numpy as np
 from nxlogger.core import analysis as an
 from nxlogger.core import channel_math as cm
 from nxlogger.core import stat_buffer as sb
+from nxlogger.core.system_tags import is_sys
 
 
 KINDS = {"formula": "Formula", "statistic": "Statistic", "process": "Signal processing"}
@@ -292,7 +293,8 @@ class VariableEngine:
                     b = visit(dv)
                 else:
                     b = d[0]
-                base = base or b
+                if base is None or (is_sys(base) and b is not None and not is_sys(b)):
+                    base = b                     # a device drives it, not the 2 Hz System Tags
             state[vid] = 2
             if base is None:
                 self.errors.setdefault(vid, "No source data.")

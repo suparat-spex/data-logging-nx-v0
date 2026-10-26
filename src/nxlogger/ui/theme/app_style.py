@@ -56,6 +56,7 @@ QTreeWidget::item:selected { background: @sel@; color: @text@; }
 QFrame#docBar { background: @panel@; border-bottom: 1px solid @border@; }
 QTreeWidget#navTree { background: @panel2@; border: none; }
 QTreeWidget#navTree::item { padding: 4px 0; }
+QTreeWidget#navTree[plainSel="true"]::item:selected { background: @hover@; color: @text@; }  /* Tags list: no accent */
 QFrame#navBar { background: transparent; border-bottom: 1px solid @border@; }
 QFrame#navBar QToolButton { padding: 4px; }
 QFrame#docBar QLabel { background: transparent; }

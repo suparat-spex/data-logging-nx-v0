@@ -11,12 +11,12 @@ pop-ups. One question decides it:
 
 | Place | For | Examples | Buttons |
 |---|---|---|---|
-| **Editor tab** (closable document) | configuring one saved item | tag, group, alarm, notification profile, variable, logging profile, view, view component (*All settings*), AI/ML log settings | Apply · Refresh · Close · New... · Apply & Close · Apply & New... |
+| **Editor tab** (closable document) | configuring one saved item | alarm, notification profile, variable, logging profile, view, view component (*All settings*), AI/ML log settings | Apply · Refresh · Close · New... · Apply & Close · Apply & New... |
 | **Work page** (document tab) | working with many items / watching live data | Quick View, Connectivity (device table), Tags, Logging, Alarms, Variables, views | none - they act at once |
-| **Properties panel** (right) | quick changes to the selection | a tag's unit, a component's position, a view's grid; a device is **read-only** there (its settings pop-up is the one place to change it) | none - applies at once; devices: *Edit...* |
-| **Pop-up** (modal dialog) | one action, finished when it closes | device settings (Add / Edit - Cancel · *Add device* / *Save*), delete?, write value, add tags in bulk, browse OPC UA, pick tags, new view, marker, import devices / tags, export, unsaved changes | Cancel · **Verb** |
+| **Properties panel** (right) | quick changes to the selection | a component's position, a view's grid; devices, tags and groups are **read-only** there (their pop-up is the one place to change them) | none - applies at once; devices / tags / groups: *Edit...* |
+| **Pop-up** (modal dialog) | one action, finished when it closes | device, tag and group settings (Add / Edit - Cancel · *Add device* / *Add tag* / *Add group* / *Save*), delete?, write value, add tags in bulk, browse OPC UA, pick tags, new view, marker, import devices / tags, export, unsaved changes | Cancel · **Verb** |
 
-Opening: single-click selects (Properties panel), **double-click opens the editor tab** (a device: its settings pop-up),
+Opening: single-click selects (Properties panel), **double-click opens the editor tab** (a device, tag or group: its settings pop-up),
 right-click lists the actions. The same item never opens twice: a second double-click
 brings its tab to the front.
 
@@ -48,6 +48,14 @@ brings its tab to the front.
   Close all editors.
 
 ## Pop-ups
+
+The Connectivity and Tags pages work alike: their items (devices, tags, groups) are added and
+edited in a settings pop-up (header band, body, footer *Cancel* · *verb*) and are
+read-only in the Properties panel. A tabbed form gets that look with `common.popup_form()`.
+The body is tabs (default - long forms) or one page of titled sections (`common.POPUP_STYLE`);
+both are kept and described in the nxlogger-dev skill, `references/popup-styles.md`.
+Right-clicking a section header of the Project tree (Connectivity, Tags, Logging, Alarms,
+Variables, Views, the project) shows no menu - the items under it have theirs.
 
 - Title, **one line saying what will happen**, the form, a message line, then
   `[Cancel] [Verb]`. The primary button names the action: *Write*, *Create view*,

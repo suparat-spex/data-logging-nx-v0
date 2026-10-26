@@ -111,3 +111,36 @@ def test_config_defaults_and_override(tmp_path, monkeypatch):
 def test_resources_present():
     assert paths.resource("config.default.ini").exists()
     assert len(list(paths.resource("icons", "ui").glob("*.svg"))) >= 60
+
+
+def test_read_tags_file(tmp_path):
+    import csv as _csv
+    from nxlogger.core.tags import CSV_COLS, DeviceFileError, read_tags_file
+    plc = DeviceCfg("PLC", "modbus_tcp")
+    plc.tags.append(new_tag(plc, "Flow", "Line 1", addr=10))
+    plc.tags.append(new_tag(plc, "Level", "", addr=12))
+    other = DeviceCfg("Boiler", "modbus_tcp")
+    other.tags.append(new_tag(other, "Steam", "", addr=1))
+    good = tmp_path / "tags.csv"
+    with open(good, "w", encoding="utf-8-sig", newline="") as f:
+        w = _csv.DictWriter(f, CSV_COLS); w.writeheader()
+        w.writerows(tags_to_rows(plc) + tags_to_rows(other))
+    tags = read_tags_file(str(good), plc)                     # only this device's rows of a multi-device list
+    assert [t.name for t in tags] == ["Flow", "Level"] and tags[0].address["addr"] == 10
+    bad = tmp_path / "bad.csv"
+    bad.write_text("name,address,access\nA,addr=x,R\n,addr=1,R\nB,nope=1,W\nB,addr=2,R\n", encoding="utf-8")
+    try:
+        read_tags_file(str(bad), plc)
+        raise AssertionError("bad file accepted")
+    except DeviceFileError as e:
+        text = "\n".join(e.problems)
+        assert "line 2: address addr" in text and "line 3: no name" in text
+        assert "unknown address key 'nope'" in text and "access must be R or RW" in text
+    js = tmp_path / "dev.json"
+    js.write_text(json.dumps(devices_to_json([plc])), encoding="utf-8")
+    assert [t.name for t in read_tags_file(str(js), DeviceCfg("PLC", "modbus_tcp"))] == ["Flow", "Level"]
+    try:
+        read_tags_file(str(js), DeviceCfg("PLC", "opcua"))
+        raise AssertionError("wrong connector accepted")
+    except DeviceFileError as e:
+        assert "addresses do not fit" in e.problems[0]

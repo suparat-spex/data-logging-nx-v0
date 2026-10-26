@@ -42,6 +42,7 @@ import csv
 import json
 import os
 import queue
+import shutil
 import time
 import uuid
 from contextlib import contextmanager
@@ -56,7 +57,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 import pyqtgraph as pg
 
-from nxlogger import APP_NAME, config, paths
+from nxlogger import APP_NAME, __version__, config, paths
 from nxlogger.comms.manager import DriverManager
 from nxlogger.core import alarm_rules as ar
 from nxlogger.core import analysis as an
@@ -64,6 +65,7 @@ from nxlogger.core import channel_math as cm
 from nxlogger.core import ml_log as mlg
 from nxlogger.core import recording as dl
 from nxlogger.core import stat_buffer as sb
+from nxlogger.core import system_tags as ss
 from nxlogger.core import variables as vr
 from nxlogger.core import view_model as vmod
 from nxlogger.core import wavepacket as wp
@@ -72,7 +74,7 @@ from nxlogger.core.ring import MAX_PLOT_S, TopicStream
 from nxlogger.core.tags import (COLORS, DRIVERS, PLANNED, DeviceCfg, ScanBlock, TagCfg, describe_address,
                                 DEVICE_COLS, devices_to_json,
                                 devices_to_rows, driver_label, new_device, new_tag, secret_keys,
-                                tag_from_row, tags_to_rows)
+                                tags_to_rows)
 from nxlogger.ui.dialogs.about_dialog import show_about
 from nxlogger.ui.dialogs.add_tags_dialog import AddTagsDialog
 from nxlogger.ui.dialogs.alarm_dialog import AlarmDialog
@@ -80,8 +82,10 @@ from nxlogger.ui.dialogs.alarm_profile_dialog import AlarmProfileDialog
 from nxlogger.ui.dialogs.device_dialog import DeviceDialog
 from nxlogger.ui.dialogs.group_dialog import GroupDialog
 from nxlogger.ui.dialogs.export_devices_dialog import ExportDevicesDialog
+from nxlogger.ui.dialogs.export_tags_dialog import ExportTagsDialog
 from nxlogger.ui.dialogs.import_devices_dialog import ImportDevicesDialog
-from nxlogger.ui.dialogs.common import ask_unsaved, confirm
+from nxlogger.ui.dialogs.import_tags_dialog import ImportTagsDialog
+from nxlogger.ui.dialogs.common import ask_unsaved, confirm, popup_form
 from nxlogger.ui.dialogs.log_profile_dialog import LogProfileDialog
 from nxlogger.ui.dialogs.marker_dialog import MarkerDialog
 from nxlogger.ui.dialogs.ml_log_dialog import MlLogDialog
@@ -104,7 +108,7 @@ from nxlogger.ui.widgets import views as dv
 from nxlogger.ui.widgets.connectivity import STATE_TOKEN, ConnectivityPage
 from nxlogger.ui.widgets.form_tab import FormTab
 from nxlogger.ui.widgets.property_grid import PropertiesPanel
-from nxlogger.ui.widgets.tags_page import TagsPage
+from nxlogger.ui.widgets.tags_page import CATEGORIES as TAG_CATEGORIES, TagsPage
 from nxlogger.ui.widgets.variables_panel import VariablesPage
 
 
@@ -128,6 +132,9 @@ CHIP_W = 132                    # status chips keep one width whatever the text
 
 
 # ======================================================================= window
+HEADER_NODES = ("project", "doc", "tagsroot", "alarms", "vars", "views")   # Project tree sections: no right-click menu
+
+
 class _NoFlash(QObject):
     """
     Dialogs open fully painted: a new top-level dialog starts transparent and becomes
@@ -172,6 +179,11 @@ class DaqWindow(AppWindow):
         self.stats = sb.StatHub()
         self._scan_seq: dict[str, int] = {}           # per device: continuous across driver restarts
         self.t_ref: float | None = None
+        self._t_started = time.time()
+        self.sys_values: dict[str, object] = {}        # System Tags: tag id -> value (text tags too)
+        self._sys_n = 0                                # sample counter of the System Tag blocks
+        self._sys_t = time.time()                      # time of the last System Tag values
+        self._sys_tags: dict[str, ss.SysTag] = {}
         self._loading = False
         self.plots: list[pg.PlotItem] = []
         self.curves: dict[tuple[str, int], pg.PlotDataItem] = {}
@@ -759,6 +771,8 @@ class DaqWindow(AppWindow):
                 t = props.tag_target(self, ref[1], ref[2])
             elif kind == "tags":
                 t = props.tags_target(self, ref[1], ref[2])
+            elif kind == "sys":
+                t = props.system_target(self, ref[1])
             elif kind == "project":
                 t = props.project_target(self)
         self.show_properties(t)
@@ -1141,99 +1155,86 @@ class DaqWindow(AppWindow):
             self.device_changed(dev.id, structure=was_wave != dev.wave)
         self.set_status(f"Device '{dev.name}' " + ("added" if new else "saved"), "ok")
 
-    # ---- tags
-    def _spec_tag(self, ident, did: str | None = None, group: str = ""):
-        new = ident is None
+    # ---- tags and groups: pop-ups like the device settings (the Tags page works like Connectivity)
+    def _tag_popup(self, did: str, idx: int | None = None, group: str = ""):
+        """Add tag / Edit tag pop-up: the tag joins the project or changes only on Add tag / Save."""
+        dev = self.project.device(did)
+        if dev is None:
+            return
+        new = idx is None
         if new:
-            dev = self.project.device(did)
-            if dev is None:
-                return None
+            if not self._recording_guard():
+                return
             if dev.wave and len(dev.tags) >= wp.MAX_CH:
                 self.toast.popup("A waveform packet has at most 8 channels")
-                return None
+                return
             t = new_tag(dev, "", group)
             t.name = self._unique_name(t.name, {x.name for x in dev.tags})
-            key = f"edit:tag:new:{uuid.uuid4().hex[:6]}"
         else:
-            dev = self.project.device(ident[0])
-            t = dev.tag(ident[1]) if dev else None
+            t = dev.tag(idx)
             if t is None:
-                return None
-            key = f"edit:tag:{dev.id}:{t.index}"
-        path = lambda: f"Project / Tags / {dev.name}" + (f" / {t.group}" if t.group else "") + f" / {t.name}"  # noqa: E731
-        spec = {"key": key, "title": t.name, "icon": "tag", "path": path(),
-                "kind": "array tag" if t.kind == "array" else "tag", "is_new": new, "locked": self._locked_reason}
+                return
+        st = self.streams.get(dev.id)
+        k = sum(len(d.tags) for d in self.project.devices[:self.project.devices.index(dev)]) + \
+            (dev.tags.index(t) if t in dev.tags else len(dev.tags))
+        dlg = TagDialog(self, dev, t, COLORS[k % len(COLORS)], lambda: st.raw_mean.get(t.index) if st else None)
+        dlg.setWindowTitle("Add tag" if new else f"Tag - {t.name}")
+        where = " · ".join(x for x in (dev.name, driver_label(dev.driver), t.group) if x)
+        dlg.ok_btn, title = popup_form(dlg, "tag", "New tag" if new else t.name,
+                                       f"{where} · {'array (waveform channel)' if t.kind == 'array' else 'tag'}",
+                                       "Add tag" if new else "Save")
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or ("New tag" if new else t.name)))
+        dlg._preview()
+        if self.recording:                           # recording: look, don't change
+            dlg.ok_btn.setEnabled(False)
+            dlg._timer.stop()
+            set_prop(dlg.err, "level", "bad"); dlg.err.setText("Stop recording to change tags.")
+        if not dlg.exec() or self.recording:
+            return
+        if new:
+            if dev.tag(t.index) is not None:         # the index was taken meanwhile
+                free = [i for i in range(wp.MAX_CH) if dev.tag(i) is None] if dev.wave else [dev.next_index()]
+                if not free:
+                    self.toast.popup("A waveform packet has at most 8 channels")
+                    return
+                t.index = free[0]
+            dlg.apply(t)
+            dev.tags.append(t)
+            if dev.wave:
+                dev.tags.sort(key=lambda x: x.index)
+        else:
+            dlg.apply(t)
+        self.tags_changed(dev.id, restart=True)
+        if new:
+            QTimer.singleShot(0, lambda: self.tags_page.select_tag(dev.id, t.index))
+        self.set_status(f"Tag '{t.name}' " + ("added" if new else "saved"), "ok")
 
-        def build():
-            st = self.streams.get(dev.id)
-            k = sum(len(d.tags) for d in self.project.devices[:self.project.devices.index(dev)]) + \
-                (dev.tags.index(t) if t in dev.tags else len(dev.tags))
-            return TagDialog(self, dev, t, COLORS[k % len(COLORS)],
-                             lambda: st.raw_mean.get(t.index) if st else None)
-        spec["build"] = build
-
-        def apply(dlg):
-            if spec["is_new"]:
-                if dev.tag(t.index) is not None:       # the index was taken meanwhile
-                    free = [i for i in range(wp.MAX_CH) if dev.tag(i) is None] if dev.wave else [dev.next_index()]
-                    if not free:
-                        spec["tab"]._message("A waveform packet has at most 8 channels.")
-                        return False
-                    t.index = free[0]
-                dlg.apply(t)
-                dev.tags.append(t)
-                if dev.wave:
-                    dev.tags.sort(key=lambda x: x.index)
-            else:
-                dlg.apply(t)
-            self.tags_changed(dev.id, restart=True)
-            spec["tab"].set_identity(f"edit:tag:{dev.id}:{t.index}", t.name, path())
-            return True
-        spec["apply"] = apply
-        spec["new"] = lambda: self.open_editor("tag", None, did=dev.id, group=t.group)
-        exists = lambda: dev.tag(t.index) is t                                     # noqa: E731
-        spec["actions"] = [("Write value...", "pencil-line",
-                            lambda: self.write_tag(dev.id, t.index) if exists() else None),
-                           ("Add alarm", "bell", lambda: self.add_alarm_for((dev.id, t.index)) if exists() else None),
-                           self._delete_action(spec, lambda: self.delete_tags(dev.id, [t.index]), exists)]
-        return spec
-
-    # ---- groups
-    def _spec_group(self, ident, did: str | None = None, parent: str = ""):
-        new = ident is None
-        dev = self.project.device(did if new else ident[0])
-        if dev is None:
-            return None
-        cur = {"path": "" if new else ident[1]}
-        title = lambda: cur["path"].rsplit("/", 1)[-1] if cur["path"] else "New group"        # noqa: E731
-        path = lambda: f"Project / Tags / {dev.name} / {cur['path'] or '(new)'}"            # noqa: E731
-        spec = {"key": f"edit:group:{dev.id}:{cur['path'] or uuid.uuid4().hex[:6]}", "title": title(),
-                "icon": "folder", "path": path(), "kind": "group", "is_new": new, "locked": self._locked_reason}
-        spec["build"] = lambda: GroupDialog(self, dev, cur["path"], parent)
-
-        def apply(dlg):
-            newp, old = dlg.result_path(), cur["path"]
-            if not old:
-                dev.groups.append(newp)
-            elif newp != old:
-                fix = lambda g: newp + g[len(old):] if g == old or g.startswith(old + "/") else g   # noqa: E731
-                dev.groups = sorted({fix(g) for g in dev.groups} | {newp})
-                for x in dev.tags:
-                    x.group = fix(x.group)
-            cur["path"] = newp
-            self._mark_dirty()
-            self.tags_page.refresh(("group", dev.id, newp))
-            self._rebuild_project_tree()
-            spec["tab"].set_identity(f"edit:group:{dev.id}:{newp}", title(), path())
-            return True
-        spec["apply"] = apply
-        spec["new"] = lambda: self.open_editor("group", None, did=dev.id, parent=cur["path"].rsplit("/", 1)[0]
-                                               if "/" in cur["path"] else "")
-        exists = lambda: bool(cur["path"]) and cur["path"] in dev.all_groups()      # noqa: E731
-        spec["actions"] = [("Add tag", "tag", lambda: self.open_editor("tag", None, did=dev.id, group=cur["path"])),
-                           ("Add tags...", "list", lambda: self.add_tags(dev.id, cur["path"], True)),
-                           self._delete_action(spec, lambda: self.delete_group(dev.id, cur["path"]), exists)]
-        return spec
+    def _group_popup(self, did: str, path: str = "", parent: str = ""):
+        """Add group / Edit group pop-up (renaming moves its tags and sub-groups along)."""
+        dev = self.project.device(did)
+        if dev is None or not self._recording_guard():
+            return
+        new = not path
+        dlg = GroupDialog(self, dev, path, parent)
+        dlg.setWindowTitle("Add group" if new else f"Group - {path}")
+        _ok, title = popup_form(dlg, "folder", "New group" if new else path.rsplit("/", 1)[-1],
+                                f"{dev.name} · folder of tags (use sub-groups for areas, machines ...)",
+                                "Add group" if new else "Save", width=480)
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or "New group"))
+        if not dlg.exec() or self.recording:
+            return
+        newp = dlg.result_path()
+        if new:
+            dev.groups.append(newp)
+        elif newp != path:
+            fix = lambda g: newp + g[len(path):] if g == path or g.startswith(path + "/") else g   # noqa: E731
+            dev.groups = sorted({fix(g) for g in dev.groups} | {newp})
+            for x in dev.tags:
+                x.group = fix(x.group)
+        self._mark_dirty()
+        self.tags_page.refresh(("group", dev.id, newp))
+        self._rebuild_project_tree()
+        self.set_status(f"Group '{newp}' " + ("added" if new else "saved"), "ok")
 
     # ---- alarms and notification profiles
     def _spec_alarm(self, aid, channel=None):
@@ -1508,6 +1509,9 @@ class DaqWindow(AppWindow):
                 k += 1
 
     def color_of(self, did: str, idx: int) -> str:
+        if ss.is_sys(did):
+            t = self.sys_tag(did)
+            return self.sys_color(t) if t else COLORS[0]
         return getattr(self, "_colors", {}).get((did, idx)) or COLORS[idx % len(COLORS)]
 
     def device_state(self, did: str) -> tuple[str, str]:
@@ -1515,6 +1519,14 @@ class DaqWindow(AppWindow):
 
     def tag_live(self, did: str, idx: int):
         """(value text, quality text, good True / False / None, time text) for tables."""
+        if ss.is_sys(did):
+            t = self.sys_tag(did)
+            val = self.sys_values.get(t.id) if t else None
+            if val is None:
+                return "", "", None, ""
+            na = not isinstance(val, str) and val != val     # NaN: not available (no data yet)
+            return (ss.format_value(t, val), "N/A" if na else "Good", None if na else True,
+                    time.strftime("%H:%M:%S", time.localtime(self._sys_t)))
         st = self.streams.get(did)
         t = self.project.tag(did, idx)
         if st is None or idx not in st.last_vals or t is None:
@@ -1690,21 +1702,21 @@ class DaqWindow(AppWindow):
 
     def _add_tag_current(self):
         """Ctrl+T: add a tag to the device selected in Connectivity (or the first one)."""
-        sel = self.tags_page._sel
-        did = sel[1] if len(sel) > 1 else (self.project.devices[0].id if self.project.devices else None)
+        page = self.tags_page
+        did = page.current_device_id() or (self.project.devices[0].id if self.project.devices else None)
         if did is None:
             self._show_doc("connectivity")
             self.toast.popup("Add a device first")
             return
-        self.add_tags(did, sel[2] if sel and sel[0] == "group" else "", False)
+        self.add_tags(did, page.current_group() if page.current_device_id() == did else "", False)
 
     def add_tags(self, did: str, group: str, bulk: bool):
-        """bulk: Add tags... pop-up (an action); one tag: a new-tag editor tab."""
+        """bulk: Add tags... pop-up; one tag: the Add tag pop-up."""
         dev = self.project.device(did)
         if dev is None or not self._recording_guard():
             return
         if not bulk:
-            self.open_editor("tag", None, did=did, group=group)
+            self._tag_popup(did, None, group)
             return
         if dev.wave and len(dev.tags) >= wp.MAX_CH:
             self.toast.popup("A waveform packet has at most 8 channels")
@@ -1726,7 +1738,7 @@ class DaqWindow(AppWindow):
                                       self.select_object(("tag", did, new[-1].index))))
 
     def edit_tag(self, did: str, idx: int):
-        self.open_editor("tag", (did, idx))
+        self._tag_popup(did, idx)
 
     def delete_tags(self, did: str, idxs: list[int]):
         dev = self.project.device(did)
@@ -1764,8 +1776,10 @@ class DaqWindow(AppWindow):
         self.tags_changed(did)
 
     def add_group(self, did: str, parent: str):
-        if self._recording_guard():
-            self.open_editor("group", None, did=did, parent=parent)
+        self._group_popup(did, "", parent)
+
+    def edit_group(self, did: str, path: str):
+        self._group_popup(did, path)
 
     def rename_group(self, did: str, path: str, name: str):
         dev = self.project.device(did)
@@ -1844,42 +1858,81 @@ class DaqWindow(AppWindow):
             self.toast.popup(f"{len(new)} tag(s) added")
 
     def import_tags(self, did: str):
+        """Import pop-up (like Import devices): a checked CSV tag list or device JSON, ticked tags,
+        what to do with names that exist. Replaced tags keep their index (alarms, views, logging)."""
         dev = self.project.device(did)
         if dev is None or not self._recording_guard():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Import tags", self._project_dir(), "CSV (*.csv);;All files (*)")
+        dlg = ImportTagsDialog(self, dev, self._project_dir())
+        if not dlg.exec():                       # the dialog checks the file: only valid files get here
+            return
+        mode, added, replaced = dlg.mode(), 0, 0
+        for t in dlg.chosen():
+            old = next((x for x in dev.tags if x.name == t.name), None)
+            if old is not None and mode == "skip":
+                continue
+            if old is not None and mode == "replace":
+                t.index = old.index
+                dev.tags[dev.tags.index(old)] = t
+                replaced += 1
+                continue
+            free = [i for i in range(wp.MAX_CH) if dev.tag(i) is None] if dev.wave else [dev.next_index()]
+            if not free:
+                self.toast.popup("A waveform packet has at most 8 channels")
+                break
+            t.index = free[0]
+            if old is not None:
+                t.name = self._unique_name(t.name, {x.name for x in dev.tags})
+            dev.tags.append(t)
+            added += 1
+        if dev.wave:
+            dev.tags.sort(key=lambda x: x.index)
+        for g in {t.group for t in dev.tags if t.group} - set(dev.all_groups()):
+            dev.groups.append(g)
+        if not added and not replaced:
+            return
+        self.tags_changed(did, restart=True)
+        self._log(f"Imported tags into {dev.name} from {dlg.path}: {added} added, {replaced} replaced")
+        self.toast.popup(f"{added} tag(s) added" + (f", {replaced} replaced" if replaced else ""))
+
+    def export_tags(self, did: str | None = None, keys: list = ()):
+        """Export pop-up (like Export devices): tick tags of one device (did) or of all, CSV / JSON."""
+        devs = [d for d in self.project.devices if did is None or d.id == did]
+        if not any(d.tags for d in devs):
+            self.toast.popup("No tags to export")
+            return
+        dlg = ExportTagsDialog(self, devs, list(keys))
+        if not dlg.exec():
+            return
+        chosen, fmt = set(dlg.chosen()), dlg.format()
+        picked = [(d, [t for t in d.tags if (d.id, t.index) in chosen]) for d in devs]
+        picked = [(d, ts) for d, ts in picked if ts]
+        n = sum(len(ts) for _, ts in picked)
+        base = dl.safe_name(picked[0][0].name if len(picked) == 1 else self.project.name) + "_tags"
+        ext = {"json": "JSON (*.json)", "csv": "CSV (*.csv)"}[fmt]
+        path, _ = QFileDialog.getSaveFileName(self, "Export tags", os.path.join(self._project_dir(), f"{base}.{fmt}"), ext)
         if not path:
             return
         try:
-            with open(path, encoding="utf-8-sig", newline="") as f:
-                rows = list(csv.DictReader(f))
-        except (OSError, csv.Error) as e:
-            self.banners.post("proj", f"Could not read {path}: {e}", "bad")
+            if fmt == "json":
+                devs_out = [copy.copy(d) for d, _ in picked]
+                for c, (_, ts) in zip(devs_out, picked):
+                    c.tags = ts
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(devices_to_json(devs_out), f, indent=2, ensure_ascii=False)
+            else:
+                from nxlogger.core.tags import CSV_COLS
+                with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                    w = csv.DictWriter(f, CSV_COLS)
+                    w.writeheader()
+                    for d, ts in picked:
+                        names = {t.name for t in ts}
+                        w.writerows(r for r in tags_to_rows(d) if r["name"] in names)
+        except OSError as e:
+            self.banners.post("proj", f"Could not write {path}: {e}", "bad")
             return
-        added = 0
-        for r in rows:
-            if not (r.get("name") or "").strip() or (r.get("device") and r["device"] != dev.name
-                                                    and any(x.get("device") == dev.name for x in rows)):
-                continue
-            t = tag_from_row(dev, r)
-            t.name = self._unique_name(t.name, {x.name for x in dev.tags})
-            dev.tags.append(t); added += 1
-        self.tags_changed(did, restart=True)
-        self.toast.popup(f"{added} tag(s) imported")
-
-    def export_tags(self, did: str):
-        dev = self.project.device(did)
-        if dev is None:
-            return
-        start = os.path.join(self._project_dir(), dl.safe_name(dev.name) + "_tags.csv")
-        path, _ = QFileDialog.getSaveFileName(self, "Export tags", start, "CSV (*.csv)")
-        if not path:
-            return
-        from nxlogger.core.tags import CSV_COLS
-        with open(path, "w", encoding="utf-8-sig", newline="") as f:
-            w = csv.DictWriter(f, CSV_COLS)
-            w.writeheader(); w.writerows(tags_to_rows(dev))
-        self.toast.popup(f"{len(dev.tags)} tag(s) exported")
+        self._log(f"Exported {n} tag(s) to {path}")
+        self.toast.popup(f"{n} tag(s) exported")
 
     # ---- communication
     def start_device(self, did: str):
@@ -1984,22 +2037,15 @@ class DaqWindow(AppWindow):
             if not d.enabled:
                 di.setForeground(0, muted)
             self.ptree_devices[d.id] = di
-        # Tags: tag management - device > groups > tags
+        # Tags: the six tag categories, flat - the Tags document lists devices, groups and tags
         tags = node(root, "Tags", make_icon("tag", T["text"]), ("tagsroot",),
-                    "Tag management: add / edit / delete tags and groups - right-click")
-        for d in self.project.devices:
-            dn = node(tags, f"{d.name}  ({len(d.tags)})", make_icon(DRIVERS[d.driver]["icon"], T["muted"]),
-                      ("tagdev", d.id), f"Tags of {d.name}")
-            folders = {"": dn}
-            for g in d.all_groups():
-                parent = folders.get(g.rsplit("/", 1)[0] if "/" in g else "", dn)
-                folders[g] = node(parent, g.rsplit("/", 1)[-1], make_icon("folder", T["muted"]), ("group", d.id, g),
-                                  f"Group {g}")
-            for t in d.tags[:2000]:
-                ti = node(folders.get(t.group, dn), t.name + (f"  ({t.unit})" if t.unit else ""),
-                          swatch(self.color_of(d.id, t.index)), ("tag", d.id, t.index), t.description)
-                if not (t.enabled and d.enabled):
-                    ti.setForeground(0, muted)
+                    "Tag management: Device, Virtual, Action, Aggregation, Memory, System")
+        counts = {"device": sum(len(d.tags) for d in self.project.devices), "system": len(self.sys_tags())}
+        for key, name, icon, tip, ready in TAG_CATEGORIES:
+            ci = node(tags, name + (f"  ({counts.get(key, 0)})" if ready else ""),
+                      make_icon(icon, T["text" if ready else "muted"]), ("tagcat", key), tip)
+            if not ready:
+                ci.setForeground(0, muted)
         logn = node(root, "Logging", make_icon("file-text", T["text"]), ("doc", "logging"),
                     "Test properties, log folder and logging profiles")
         for pr in self.project.logging_profiles:
@@ -2045,7 +2091,7 @@ class DaqWindow(AppWindow):
         def expand(it):
             d = tuple(it.data(0, Qt.ItemDataRole.UserRole) or ())
             if d in expanded or (first and d and d[0] in ("project", "doc", "tagsroot", "alarms", "vars",
-                                                          "views", "tagdev")):
+                                                          "views")):
                 it.setExpanded(True)
             for i in range(it.childCount()):
                 expand(it.child(i))
@@ -2118,12 +2164,16 @@ class DaqWindow(AppWindow):
             page = self.view_pages.get(d[1])
             if page is not None:
                 self.show_properties(props.view_target(self, page))
-        elif d[0] in ("device", "tagdev"):
+        elif d[0] == "device":
             self.tags_page.refresh(("device", d[1]))
             self.conn_page.select(d[1])
             self.select_object(("device", d[1]))
         elif d[0] == "tagsroot":
             self._show_doc("tags")
+        elif d[0] == "tagcat":
+            self._show_doc("tags")
+            self.tags_page.refresh(("cat", d[1]))
+            self.select_object(None)
         elif d[0] == "group":
             self.tags_page.refresh(("group", d[1], d[2]))
             self.select_object(("group", d[1], d[2]))
@@ -2160,9 +2210,8 @@ class DaqWindow(AppWindow):
         if not d:
             return
         go = {"device": lambda: self.edit_device(d[1]),
-              "tagdev": lambda: self.edit_device(d[1]),
-              "tag": lambda: self.open_editor("tag", (d[1], d[2])),
-              "group": lambda: self.open_editor("group", (d[1], d[2])),
+              "tag": lambda: self.edit_tag(d[1], d[2]),
+              "group": lambda: self.edit_group(d[1], d[2]),
               "lprof": lambda: self.open_editor("lprofile", d[1]),
               "alarm": lambda: self.open_editor("alarm", d[1]),
               "aprof": lambda: self.open_editor("aprofile", d[1]),
@@ -2173,6 +2222,8 @@ class DaqWindow(AppWindow):
     def _nav_menu(self, pos):
         it = self.ptree.itemAt(pos)
         d = self._nav_data(it) or ("none",)
+        if d[0] in HEADER_NODES:                     # section headers (and the project root): no menu
+            return
         m = QMenu(self)
         later = lambda fn: (lambda: QTimer.singleShot(0, fn))                    # noqa: E731
         if d[0] == "device":
@@ -2189,13 +2240,16 @@ class DaqWindow(AppWindow):
             add = m.addMenu("Add device")
             for k, dd in DRIVERS.items():
                 add.addAction(dd["label"] + "...", lambda kk=k: self.add_device(kk))
-        elif d[0] in ("tagsroot", "tagdev", "group", "tag"):
-            did = d[1] if len(d) > 1 else (self.project.devices[0].id if self.project.devices else None)
+        elif tuple(d[:2]) == ("tagcat", "system"):
+            m.addAction("Open system tags", lambda: (self._show_doc("tags"), self.tags_page.refresh(("cat", "system"))))
+        elif d[0] in ("tagsroot", "group", "tag") or tuple(d[:2]) == ("tagcat", "device"):
+            first = self.project.devices[0].id if self.project.devices else None
+            did = d[1] if d[0] in ("group", "tag") else (self.tags_page.current_device_id() or first)
             group = d[2] if d[0] == "group" else (self.project.tag(d[1], d[2]).group
                                                    if d[0] == "tag" and self.project.tag(d[1], d[2]) else "")
             if d[0] == "tag":
                 t = self.project.tag(d[1], d[2])
-                m.addAction("Edit tag...", later(lambda: self.open_editor("tag", (d[1], d[2]))))
+                m.addAction("Edit tag...", later(lambda: self.edit_tag(d[1], d[2])))
                 if t is not None:
                     m.addAction("Disable" if t.enabled else "Enable",
                                 lambda: self.set_tags_enabled(d[1], [d[2]], not t.enabled))
@@ -2210,19 +2264,18 @@ class DaqWindow(AppWindow):
                 m.addAction("Delete tag", lambda: self.delete_tags(d[1], [d[2]]))
                 m.addSeparator()
             elif d[0] == "group":
-                m.addAction("Edit group...", later(lambda: self.open_editor("group", (d[1], d[2]))))
+                m.addAction("Edit group...", later(lambda: self.edit_group(d[1], d[2])))
                 m.addAction("Delete group", lambda: self.delete_group(d[1], d[2]))
                 m.addSeparator()
             if did is not None:
                 where = f" ({group})" if group else ""
-                m.addAction(f"New tag{where}...", later(lambda: self.open_editor("tag", None, did=did, group=group)))
+                m.addAction(f"New tag{where}...", later(lambda: self.add_tags(did, group, False)))
                 m.addAction(f"Add tags{where}...", lambda: self.add_tags(did, group, True))
-                m.addAction(f"New group{where}...", later(lambda: self.open_editor("group", None, did=did,
-                                                                                  parent=group)))
-                if d[0] in ("tagdev", "tagsroot"):
+                m.addAction(f"New group{where}...", later(lambda: self.add_group(did, group)))
+                if d[0] in ("tagcat", "tagsroot"):
                     m.addSeparator()
-                    m.addAction("Import tags (CSV)...", lambda: self.import_tags(did))
-                    m.addAction("Export tags (CSV)...", lambda: self.export_tags(did))
+                    m.addAction("Import tags...", lambda: self.import_tags(did))
+                    m.addAction("Export tags...", lambda: self.export_tags(did))
             else:
                 m.addAction("Add a device first (Connectivity)", lambda: self._show_doc("connectivity"))
         elif d[0] in ("views", "view"):
@@ -2950,9 +3003,12 @@ class DaqWindow(AppWindow):
         self._stat_t = now
         if self._stat_dirty:
             self._stat_require()
+        self._update_system_tags()
         rate = errs = lost = 0
-        for st in self.streams.values():
+        for tid, st in self.streams.items():
             st.pps, st.win_pkts = st.win_pkts / dt, 0
+            if ss.is_sys(tid):
+                continue
             rate += st.pps * max(1, len(st.rings))
             lost += st.lost; errs += st.crc + st.bad
         for d in self.project.devices:
@@ -3057,6 +3113,9 @@ class DaqWindow(AppWindow):
 
     # ================================================================ alarms (alarm_rules.py)
     def _alarm_describe(self, tid: str, idx: int):
+        if ss.is_sys(tid):
+            t = self.sys_tag(tid)
+            return (f"System · {t.name}" if t else "(removed system tag)"), (t.unit if t else "")
         if vr.is_var(tid):
             v = self._var(tid)
             return (f"Variables · {v['name']}" if v else "(deleted variable)"), (v.get("unit", "") if v else "")
@@ -3228,6 +3287,10 @@ class DaqWindow(AppWindow):
                 u = v.get("unit", "")
                 out.append((*vr.var_key(v["id"]), f"Variables · {v['name']}" + (f" [{u}]" if u else ""),
                             self.var_color(v), u))
+        for t in self.sys_tags():                    # System Tags with a number (text is not a stream)
+            if t.streamed:
+                out.append((*t.key, f"System · {t.name}" + (f" [{t.unit}]" if t.unit else ""),
+                            self.sys_color(t), t.unit))
         return out
 
     def series(self, tid: str, idx: int):
@@ -3244,6 +3307,9 @@ class DaqWindow(AppWindow):
         if vr.is_var(tid):
             v = self._var(tid)
             return val, (v.get("unit", "") if v else "")
+        if ss.is_sys(tid):
+            t = self.sys_tag(tid)
+            return val, (t.unit if t else "")
         t = self.project.tag(tid, idx)
         return val, (t.unit if t else "")
 
@@ -3306,11 +3372,13 @@ class DaqWindow(AppWindow):
             tid, idx = key
             lbl = names.get((tid, idx), "(deleted)")
             dev, _, name = lbl.partition(" · ")
-            if vr.is_var(tid):
+            if vr.is_var(tid) or ss.is_sys(tid):
                 val, unit = self.last_value(tid, idx)
+                st = self.sys_tag(tid) if ss.is_sys(tid) else None
                 out.append({"Tag": name.split(" [")[0], "Value": "-" if val is None else f"{val:.{decimals}f}",
                             "Unit": unit, "Quality": "Good" if val is not None else "No data", "Time": "",
-                            "Device": "Variables", "Description": "", "_good": val is not None})
+                            "Device": "System" if st else "Variables", "Description": st.description if st else "",
+                            "_good": val is not None})
                 continue
             t = self.project.tag(tid, idx)
             text, qual, good, stamp = self.tag_live(tid, idx)
@@ -3368,8 +3436,10 @@ class DaqWindow(AppWindow):
 
     def _channel_ids(self) -> dict:
         """Formula names of the tags: <device>_<tag>."""
-        return {cm.identifier(f"{d.name}_{t.name}"): (d.id, t.index)
-                for d in self.project.devices for t in d.tags}
+        ids = {cm.identifier(f"{d.name}_{t.name}"): (d.id, t.index)
+               for d in self.project.devices for t in d.tags}
+        ids.update({cm.identifier(f"System_{t.name}"): t.key for t in self.sys_tags() if t.streamed})
+        return ids
 
     def _variables_reload(self):
         """Definitions or tag names changed: recompile, regroup for logging."""
@@ -3421,6 +3491,66 @@ class DaqWindow(AppWindow):
                            for x in vids])
             self.recorder.put(gid, rx, b"", vr.VarBlock(first.seq, first.sample_idx, first.t0, first.dt, y,
                                                         channels=list(range(len(vids)))))
+
+    # ================================================================ System Tags (core/system_tags.py)
+    def sys_tags(self) -> list[ss.SysTag]:
+        """All System Tags: the fixed ones plus one set per device (rebuilt when devices change)."""
+        devs = [(d.id, d.name) for d in self.project.devices]
+        if getattr(self, "_sys_sig", None) != devs:
+            self._sys_sig = devs
+            self._sys_tags = {t.id: t for t in ss.catalog(devs)}
+        return list(self._sys_tags.values())
+
+    def sys_tag(self, tid: str) -> ss.SysTag | None:
+        """By key topic ("sys:<id>") or id."""
+        self.sys_tags()
+        return self._sys_tags.get(tid[len(ss.SYS_PREFIX):] if ss.is_sys(tid) else tid)
+
+    def sys_color(self, t: ss.SysTag) -> str:
+        i = next((k for k, x in enumerate(self._sys_tags) if x == t.id), 0)
+        return COLORS[(i + 8) % len(COLORS)]
+
+    def _disk_free(self) -> int | None:
+        folder = self.project.logging.folder
+        for p in (folder, os.path.splitdrive(os.path.abspath(folder))[0] + os.sep):
+            try:
+                return shutil.disk_usage(p).free
+            except OSError:
+                continue
+        return None
+
+    def _update_system_tags(self):
+        """Stats timer (500 ms): compute the System Tags; numbers / booleans go through the data
+        path like a one-sample device block (streams, alarms, statistics, formulas)."""
+        now = self._sys_t = time.time()
+        rec = self.recorder
+        devs = {}
+        for d in self.project.devices:
+            st, drv = self.streams.get(d.id), self.drivers.driver(d.id)
+            devs[d.id] = {"state": self.drivers.state(d.id)[0],
+                          "last": max(st.stamp.values(), default=None) if st else None,
+                          "stale_s": max(5.0, 3 * d.scan_ms / 1000), "errors": drv.errors if drv else 0}
+        self.sys_values = vals = ss.compute({
+            "now": now, "started": self._t_started, "project": self.project.name, "version": __version__,
+            "disk_free": self._disk_free(), "recording": rec is not None,
+            "rec_dir": rec.dir if rec else "", "rec_bytes": rec.disk_bytes() if rec else 0,
+            "rec_elapsed": rec.elapsed if rec else 0, "alarms_active": self.alarm_engine.count(),
+            "devices": devs})
+        if self.t_ref is None:
+            self.t_ref = now
+        self._sys_n += 1
+        n = self._sys_n
+        for t in self.sys_tags():
+            v = vals.get(t.id)
+            if not t.streamed or v is None:
+                continue
+            tid = ss.SYS_PREFIX + t.id
+            vb = vr.VarBlock(n & 0xFFFF, n, now, 0.5, np.array([[v]], dtype=float))
+            self.streams.setdefault(tid, TopicStream()).feed(vb, self.t_ref)
+            self.alarm_engine.feed(tid, 0, now, vb.y[0])
+            if self.stats.wants(t.key):
+                self.stats.feed(t.key, np.array([now]), vb.y[0])
+            self._compute_variables(tid, now, vb)
 
     def _new_variable_key(self):
         """Add a variable from another form (pop-up action) -> (its key, new choices) or None."""

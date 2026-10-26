@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from nxlogger.core import analysis as an
 from nxlogger.core import channel_math as cm
+from nxlogger.core import system_tags as ss
 from nxlogger.core import view_model as vm
 from nxlogger.core.tags import DRIVERS, F, describe_address, driver_label
 from nxlogger.ui.widgets.property_grid import PropTarget
@@ -78,107 +79,72 @@ def device_target(w, did: str) -> PropTarget | None:
 
 
 def group_target(w, did: str, path: str) -> PropTarget | None:
+    """Information only - a group is changed in its pop-up (Edit...)."""
     d = w.project.device(did)
     if d is None:
         return None
     n = sum(1 for t in d.tags if t.group == path or t.group.startswith(path + "/"))
-
-    def apply(k, v):
-        if k == "name":
-            w.rename_group(did, path, v)
     return PropTarget(path.rsplit("/", 1)[-1], "folder", f"Group in {d.name} · {n} tag(s)",
-                      [("Group", [F("name", "Name", "str", ""), F("path", "Path", "info", ""),
-                                  F("tags", "Tags", "info", "")])],
-                      {"name": path.rsplit("/", 1)[-1], "path": path, "tags": n}, apply,
-                      [("Add tag", "tag", lambda: w.add_tags(did, path, False)),
-                       ("Add tags", "list", lambda: w.add_tags(did, path, True)),
-                       ("", "trash", lambda: w.delete_group(did, path))], key=("group", did, path))
+                      [("Group", [F("name", "Name", "info", ""), F("path", "Path", "info", ""),
+                                  F("device", "Device", "info", ""), F("tags", "Tags", "info", "")])],
+                      {"name": path.rsplit("/", 1)[-1], "path": path, "device": d.name, "tags": str(n)}, None,
+                      [("Edit...", "pencil", lambda: w.edit_group(did, path))], key=("group", did, path),
+                      readonly=True)
 
 
 # ====================================================================== tags
 def tag_target(w, did: str, idx: int) -> PropTarget | None:
+    """Information only, like a device - a tag is changed in its pop-up (Edit...)."""
     d = w.project.device(did)
     t = d.tag(idx) if d else None
     if t is None:
         return None
-    general = [F("name", "Name", "str", ""), F("enabled", "Enabled", "bool", True),
-               F("group", "Group", "combo", "", [""] + d.all_groups()),
-               F("unit", "Unit", "combo", "", list(cm.UNITS)), F("description", "Description", "text", ""),
-               F("color", "Colour", "color", "")]
+    general = [F("name", "Name", "info", ""), F("enabled", "Enabled", "bool", True),
+               F("group", "Group", "info", ""), F("unit", "Unit", "info", ""),
+               F("description", "Description", "info", ""), F("color", "Colour", "info", "")]
     if t.kind == "number":
-        general.append(F("access", "Access", "choice", "R", {"R": "Read only", "RW": "Read / write"}))
-    addr = [] if t.kind == "array" else [dict(f, key="addr." + f["key"]) for f in DRIVERS[d.driver]["address"]]
-    if t.kind == "array":
-        addr = [F("ch", "Channel", "info", "")]
-    display = [F("decimals", "Decimals", "int", 3, (0, 8)),
-               F("scaling", "Scaling", "button", None, lambda: w.edit_tag(did, idx), button=cm.describe_scale(t.scale)
-                 or "None - edit...", tip="Linear, two-point or formula scaling")]
+        general.append(F("access", "Access", "info", ""))
+    addr = [F("ch", "Channel", "info", "")] if t.kind == "array" else         [dict(f, key="addr." + f["key"]) for f in DRIVERS[d.driver]["address"]]
+    display = [F("decimals", "Decimals", "info", ""), F("scaling", "Scaling", "info", "")]
     live = [F("value", "Value", "info", "", level_of=lambda v: None),
             F("quality", "Quality", "info", "", level_of=lambda q: "ok" if q == "Good" else
               ("bad" if q in ("Bad", "No data") else "")),
             F("time", "Updated", "info", ""), F("key", "Formula name", "info", "",
                                                   tip="Use this name in variables (formulas)")]
-    vals = {"name": t.name, "enabled": t.enabled, "group": t.group, "unit": t.unit,
-            "description": t.description, "color": t.color, "access": t.access, "decimals": t.decimals,
-            "ch": f"CH{t.index + 1} of the waveform packets",
+    vals = {"name": t.name, "enabled": t.enabled, "group": t.group or "-", "unit": t.unit or "-",
+            "description": t.description or "-", "color": t.color or w.color_of(did, idx),
+            "access": "Read / write" if t.access == "RW" else "Read only", "decimals": str(t.decimals),
+            "scaling": cm.describe_scale(t.scale) or "None", "ch": f"CH{t.index + 1} of the waveform packets",
             "key": cm.identifier(f"{d.name}_{t.name}"),
             **{"addr." + k: v for k, v in (t.address or {}).items()}}
-
-    def apply(k, v):
-        if w.recording and k not in ("description", "color", "decimals"):
-            w.toast.popup("Stop recording to change tags")
-            return
-        if k.startswith("addr."):
-            _set(t.address, k[5:], v, lambda: w.tags_changed(did, restart=True))
-        elif k == "group":
-            v = "/".join(p.strip() for p in str(v).split("/") if p.strip())
-            _set(t, k, v, lambda: w.tags_changed(did))
-        elif k == "name":
-            v = v.strip()
-            if v:
-                _set(t, k, v, lambda: w.tags_changed(did))
-        else:
-            _set(t, k, v, lambda: w.tags_changed(did, restart=k in ("enabled", "access")))
 
     def lv():
         val, qual, good, stamp = w.tag_live(did, idx)
         return {"value": f"{val} {t.unit}".strip() if val else "-", "quality": qual or "-", "time": stamp or "-"}
-    actions = [("Edit...", "pencil", lambda: w.edit_tag(did, idx))]
-    if t.access == "RW" and t.kind == "number":
-        actions.append(("Write...", "pencil-line", lambda: w.write_tag(did, idx)))
-    actions += [("Alarm", "bell", lambda: w.add_alarm_for((did, idx))),
-                ("", "trash", lambda: w.delete_tags(did, [idx]))]
-    sub = f"{'Array' if t.kind == 'array' else 'Number'} tag · {d.name}" + \
-          (f" / {t.group}" if t.group else "") + f" · {describe_address(d.driver, '', t)}"
+    sub = f"{'Array' if t.kind == 'array' else 'Number'} tag · {d.name}" +           (f" / {t.group}" if t.group else "") + f" · {describe_address(d.driver, '', t)}"
     return PropTarget(t.name, "tag", sub, [("Tag", general), ("Address", addr), ("Display", display),
                                            ("Live", live)],
-                      {**vals, **lv()}, apply, actions, lv, key=("tag", did, idx))
+                      {**vals, **lv()}, None, [("Edit...", "pencil", lambda: w.edit_tag(did, idx))], lv,
+                      key=("tag", did, idx), readonly=True)
 
 
 def tags_target(w, did: str, idxs: list[int]) -> PropTarget | None:
+    """Several tags: a summary (information only - change them from the table's menu)."""
     d = w.project.device(did)
     if d is None:
         return None
     tags = [t for t in (d.tag(i) for i in idxs) if t is not None]
-
-    def apply(k, v):
-        if w.recording:
-            w.toast.popup("Stop recording to change tags")
-            return
-        for t in tags:
-            if k == "group":
-                t.group = "/".join(p.strip() for p in str(v).split("/") if p.strip())
-            else:
-                setattr(t, k, v)
-        w.tags_changed(did, restart=k in ("enabled", "access"))
-    return PropTarget(f"{len(tags)} tags", "list", f"{d.name} · edit all selected tags at once",
-                      [("Selected tags", [F("enabled", "Enabled", "bool", True),
-                                          F("group", "Group", "combo", "", [""] + d.all_groups()),
-                                          F("unit", "Unit", "combo", "", list(cm.UNITS)),
-                                          F("decimals", "Decimals", "int", 3, (0, 8))])],
-                      {"enabled": all(t.enabled for t in tags), "group": tags[0].group if tags else "",
-                       "unit": tags[0].unit if tags else "", "decimals": tags[0].decimals if tags else 3},
-                      apply, [("", "trash", lambda: w.delete_tags(did, idxs))], key=("tags", did, tuple(idxs)))
+    groups = sorted({t.group or "(no group)" for t in tags})
+    units = sorted({t.unit or "-" for t in tags})
+    return PropTarget(f"{len(tags)} tags", "list", f"{d.name} · right-click the table to enable, move or delete",
+                      [("Selected tags", [F("device", "Device", "info", ""), F("count", "Tags", "info", ""),
+                                          F("enabled", "Enabled", "info", ""), F("groups", "Groups", "info", ""),
+                                          F("units", "Units", "info", "")])],
+                      {"device": d.name, "count": str(len(tags)),
+                       "enabled": f"{sum(t.enabled for t in tags)} of {len(tags)}",
+                       "groups": ", ".join(groups[:6]) + (" ..." if len(groups) > 6 else ""),
+                       "units": ", ".join(units[:6]) + (" ..." if len(units) > 6 else "")},
+                      None, [], key=("tags", did, tuple(idxs)), readonly=True)
 
 
 # ====================================================================== views
@@ -304,3 +270,22 @@ def simple_target(title: str, icon: str, subtitle: str, rows: dict, actions=(), 
     """Read-only summary (alarms, variables, logging profiles: edited in their own dialogs)."""
     return PropTarget(title, icon, subtitle, [("Summary", [F(k, k, "info", "") for k in rows])], dict(rows),
                       None, list(actions), key=key)
+
+
+def system_target(w, tid: str) -> PropTarget | None:
+    """A System Tag: read-only (computed by the app), with its live value."""
+    t = w.sys_tag(tid)
+    if t is None:
+        return None
+    rows = {"Name": t.name, "Group": t.group, "Type": ss.KINDS[t.kind],
+            "Unit": t.unit or "-", "Formula name": f"System_{t.name}" if t.streamed else "- (text)",
+            "Description": t.description}
+    live = [F("value", "Value", "info", ""), F("time", "Updated", "info", "")]
+
+    def values():
+        val, _q, _g, stamp = w.tag_live(*t.key)
+        return {"value": f"{val} {t.unit}".strip() if val else "-", "time": stamp or "-"}
+    actions = [("Alarm", "bell", lambda: w.add_alarm_for(t.key))] if t.streamed else []
+    return PropTarget(t.name, "cpu", "System tag · read-only",
+                      [("Live", live), ("General", [F(k, k, "info", "") for k in rows])],
+                      {**rows, **values()}, None, actions, live=values, key=("sys", tid), readonly=True)

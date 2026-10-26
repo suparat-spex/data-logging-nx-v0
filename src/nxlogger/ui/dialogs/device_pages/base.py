@@ -12,10 +12,15 @@ Subclass API:
   LABELS / CHOICES        {key: label} / {key: {value: text}} - friendlier wording on this page
   editor(f, value)        -> (kind, widget) for one field (default: common.field_editor); a widget
                           with a `row_widget` attribute shows that in the form (combo + button)
-  build_extra(layout)     extra widgets under the sections
+  build_extra(layout)     extra widgets under the sections (self.section(v, title) adds one)
   on_change(values)       show / hide / enable fields after an edit
   summary(values)         one line for the dialog footer, e.g. "mqtt://broker.emqx.io:1883"
   validate(values)        "" or an error message (Save stays on the dialog)
+
+Two layouts (common.POPUP_STYLE, see the nxlogger-dev skill, references/popup-styles.md):
+  tabs=False   sections one under the other in this widget (titled blocks, one page)
+  tabs=True    every section is its own page in `self.pages` [(title, widget)] for the dialog's
+               tab widget; this widget only keeps the fields' API (values, signals)
 """
 from __future__ import annotations
 
@@ -50,8 +55,10 @@ class ConnectionPage(QWidget):
     CHOICES: dict[str, dict] = {}
     changed = Signal()
 
-    def __init__(self, values: dict, parent=None):
+    def __init__(self, values: dict, parent=None, tabs: bool = False):
         super().__init__(parent)
+        self.tabs = tabs
+        self.pages: list[tuple[str, QWidget]] = []           # tabs=True: one page per section
         info = DRIVERS[self.DRIVER]
         self.schema = {f["key"]: f for f in info["settings"]}
         self.w: dict[str, tuple[str, QWidget]] = {}          # key -> (kind, editor), like SchemaForm
@@ -75,7 +82,14 @@ class ConnectionPage(QWidget):
 
     # ---- building
     def section(self, v: QVBoxLayout, title: str) -> QFormLayout:
-        form = section(v, title)
+        if self.tabs:                                # a page of its own (the tab names it)
+            page = QWidget()
+            pv = QVBoxLayout(page); pv.setContentsMargins(12, 12, 12, 12)
+            form = QFormLayout(); form.setHorizontalSpacing(12); form.setVerticalSpacing(6)
+            pv.addLayout(form); pv.addStretch(1)
+            self.pages.append((title, page))
+        else:
+            form = section(v, title)
         self._forms.append(form)
         return form
 

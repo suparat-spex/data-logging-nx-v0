@@ -1,17 +1,22 @@
 """Small helpers shared by the dialogs: spin box, channel tree, colour button, form pages,
 schema forms (driver settings / tag addresses), and the pop-up standard: confirm(),
-ask_unsaved(), ActionDialog (see docs/ui-guidelines.md)."""
+ask_unsaved(), ActionDialog, popup_form() (see docs/ui-guidelines.md)."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
-                               QMessageBox, QSpinBox, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-                               QWidget)
+                               QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QToolButton,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from nxlogger.ui.icons import swatch
 from nxlogger.ui.theme.ui_kit import T, label, make_icon
+
+# Settings pop-ups (device, tag): "tabs" = a tab per section under the header (long forms);
+# "sections" = one scrolling page of titled sections. Both kept - see the nxlogger-dev skill,
+# references/popup-styles.md. A dialog can override it with style=.
+POPUP_STYLE = "tabs"
 
 
 def spin(val=0.0, lo=-1e9, hi=1e9, dec=4) -> QDoubleSpinBox:
@@ -307,3 +312,82 @@ class ActionDialog(QDialog):
         self.show_error(msg)
         if not msg:
             self.accept()
+
+
+def popup_form(dlg: QDialog, icon: str, title: str, subtitle: str, verb: str, width: int = 600,
+               style: str | None = None):
+    """Give a tabbed form (tag, group ...) the look of the device settings pop-up: header band,
+    body, footer with the message and [Cancel] [verb]. The form keeps its own fields and
+    validation (_ok -> accept()). Body by style (default POPUP_STYLE):
+      "tabs"      its tabs under the header (a form with one page shows it as "sections")
+      "sections"  one scrolling page with a titled section per tab
+    -> (verb button, header title label)."""
+    lay = dlg.layout()
+    tabs = next((tw for tw in dlg.findChildren(QTabWidget) if tw.parent() is dlg), None)
+    old = [lay.takeAt(0) for _ in range(lay.count())]
+    msgs = [it.widget() for it in old if it.widget() is not None and it.widget() is not tabs
+            and not isinstance(it.widget(), QDialogButtonBox)]
+    for bb in [it.widget() for it in old if isinstance(it.widget(), QDialogButtonBox)]:
+        bb.hide(); bb.setParent(None); bb.deleteLater()  # replaced by [Cancel] [verb]
+    body = QWidget(); body.setObjectName("dlgBody")
+    bv = QVBoxLayout(body); bv.setSpacing(4)
+    tabbed = (style or POPUP_STYLE) == "tabs" and tabs is not None and tabs.count() > 1
+    if tabbed:                                       # keep the tabs, under the header
+        bv.setContentsMargins(20, 14, 20, 16)
+        for i in range(tabs.count()):
+            page = tabs.widget(i)
+            page.setContentsMargins(4, 4, 4, 4)
+            if page.layout() is not None:            # a short tab: rows at the top, not spread out
+                page.layout().setAlignment(Qt.AlignmentFlag.AlignTop)
+        tabs.setCurrentIndex(0)
+        bv.addWidget(tabs); tabs.show()
+    else:
+        bv.setContentsMargins(20, 6, 20, 16)
+        pages = [(tabs.tabText(i), tabs.widget(i)) for i in range(tabs.count())] if tabs else []
+        for i in reversed(range(tabs.count() if tabs else 0)):
+            tabs.removeTab(i)                        # the pages live on as sections
+        for text, page in pages:
+            bv.addSpacing(10)
+            head = QLabel(text.replace("&&", "&")); head.setObjectName("pageSection")
+            bv.addWidget(head)
+            page.setContentsMargins(8, 0, 0, 0)
+            bv.addWidget(page); page.show()
+        if tabs is not None:
+            tabs.hide()
+        bv.addStretch(1)
+    for form in body.findChildren(QFormLayout):     # label | field on one line; long info text wraps
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        for i in range(form.rowCount()):
+            it = form.itemAt(i, QFormLayout.ItemRole.FieldRole)
+            if it is not None and isinstance(it.widget(), QLabel):
+                it.widget().setWordWrap(True)
+                it.widget().setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)   # no tall rows
+    labels = [it.widget() for form in body.findChildren(QFormLayout) for i in range(form.rowCount())
+              if (it := form.itemAt(i, QFormLayout.ItemRole.LabelRole)) is not None and it.widget() is not None]
+    if labels:                                       # every section shares one label column
+        lw = max(lb.sizeHint().width() for lb in labels)
+        for lb in labels:
+            lb.setMinimumWidth(lw)
+    width = min(max(width, body.sizeHint().width() + 40), 720)   # no field under the scroll bar, not too wide
+    body.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)   # follow the dialog width
+    scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(body)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    head, _ic, t, _sub = dialog_header(icon, title, subtitle)
+    foot = QFrame(); foot.setObjectName("dlgFooter")
+    fh = QHBoxLayout(foot); fh.setContentsMargins(20, 10, 20, 10); fh.setSpacing(8)
+    mv = QVBoxLayout(); mv.setSpacing(0)
+    for w in msgs:                                   # the form's message line(s)
+        w.setParent(foot); mv.addWidget(w)
+    fh.addLayout(mv, 1)
+    cancel = QPushButton("Cancel"); cancel.clicked.connect(dlg.reject)
+    ok = QPushButton(verb)                           # the verb, never a bare OK
+    ok.setProperty("primary", True); ok.setDefault(True)
+    ok.clicked.connect(dlg._ok)
+    fh.addWidget(cancel); fh.addWidget(ok)
+    lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+    lay.addWidget(head); lay.addWidget(scroll, 1); lay.addWidget(foot)
+    dlg.setMinimumWidth(width)
+    scr = (dlg.screen() or QApplication.primaryScreen()).availableGeometry()
+    dlg.resize(width, min(body.sizeHint().height() + 170, int(scr.height() * 0.85)))
+    return ok, t

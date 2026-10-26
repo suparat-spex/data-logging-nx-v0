@@ -71,7 +71,17 @@ PLC,Boiler,Setpoint,°C,,1,RW,1,area=holding;addr=10;dtype=int16
 
 `address` holds the connector's address fields as `key=value;key=value` (keys as in the
 table above: `area addr dtype order bit unit`, `topic path`, `node`, `wave amp freq offset
-noise`). Unknown keys are ignored. Export a device to get a template.
+noise`). Export a device to get a template.
+
+Tags > *Import...* (pop-up, like Import devices) imports into the selected device: a CSV tag
+list or a device JSON export (Connectivity's or Tags' JSON - the device with the same name or
+the only one; same connector). The file is checked first (`core/tags.read_tags_file`): an
+unknown column or address key, a value that does not parse, a missing name, access other than
+R / RW or a name used twice lists every problem with its line and Import stays disabled. In a
+CSV naming several devices only this device's rows count. Tick the tags; a name that exists is
+added as a copy, replaced (keeps its index: alarms, views and logging stay) or skipped.
+*Export...* (pop-up, like Export devices): tick tags (grouped by device; from *All tags* every
+device, the selected rows start ticked), CSV tag list or JSON (the devices with those tags).
 
 ## Connectivity and Tags documents
 
@@ -90,7 +100,44 @@ and the connector's sections. The connector is chosen in Add ▾ and cannot chan
 tags' addresses depend on it). **Test connection** connects once with the values as typed -
 the real driver, in the background - and shows the time and how many tags returned a value,
 or the error. Nothing is saved or started by a test.
-**Tags** (Ctrl+6) is tag management: devices with groups on the left, the tag table right.
+**Tags** (Ctrl+6) is tag management for one category at a time - the one clicked in the Project
+tree (Tags > Device, Virtual, Action, Aggregation, Memory, System; flat). Left: the category as a
+band (like a Properties section) and its list - Device: *All tags* and the Connectivity devices
+with their groups (devices are only picked here; add / edit them in Connectivity); System:
+*All tags*, Clock, App, Recording, Alarms, Devices > one group per device. Right: the tag table.
+Toolbar (like Connectivity, fixed buttons, disabled when they do not apply; Add and Edit open
+settings pop-ups, Cancel · *Add tag* / *Add group* / *Save*; tags are read-only in Properties): Add ▾ (Tag...,
+Tags..., Group..., Browse OPC UA server...), Edit, Delete | Import..., Export... | Columns ▾
+(show / hide, remembered; also right-click the header), filter. Del / Enter on the table
+delete / edit.
+
+## Tag categories
+
+| Category | What it does | State |
+|---|---|---|
+| **Device** | acquires the data: the tags of the devices | ready |
+| **Virtual** | calculates from it | planned - calculated tags are in Variables for now |
+| **Action** | responds to it: logic, outputs, triggers | planned |
+| **Aggregation** | summarizes it statistically | planned |
+| **Memory** | values set by the user: setpoints, constants | planned |
+| **System** | read-only values of the app | ready |
+
+**System Tags** (`core/system_tags.py`) are fixed: every project has them and they cannot be
+added, edited or deleted (the Properties panel shows them read-only). They are computed twice a
+second. Number / boolean ones work like any tag in views, alarms, statistics and formulas
+(`System_<name>`, e.g. `System_Hour`); text ones (date, folder) are shown only. Not recorded yet.
+
+- Clock: `DateTime`, `Date`, `Time` (text), `Year`, `Month`, `Day`, `Hour`, `Minute`, `Second`,
+  `Weekday` (1 = Monday), `UnixTime`
+- App: `Uptime` (s), `ProjectName`, `AppVersion` (text), `DiskFree` (GB, log folder drive), `DevicesOnline`
+- Recording: `Recording` (1 / 0), `RecFolder` (text), `RecSize` (MB), `RecDuration` (s)
+- Alarms: `AlarmsActive`
+- Per device, `<device>.<field>`: `Connected` (1 / 0), `State`, `Quality`, `LastUpdate` (text),
+  `Age` (s since the last value), `Errors`
+
+Keys are `("sys:<id>", 0)`; per-device ids use the device id (`dev.<id>.Connected`), so renaming
+a device keeps its alarms and views. A formula that mixes device tags and System Tags runs at
+the device rate.
 
 ## Device list (import / export)
 

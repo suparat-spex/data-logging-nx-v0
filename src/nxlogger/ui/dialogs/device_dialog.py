@@ -1,9 +1,12 @@
-"""Device settings pop-up (Connectivity: Add / double-click / Edit) - one page, no tabs:
+"""Device settings pop-up (Connectivity: Add / double-click / Edit), in one of two layouts
+(common.POPUP_STYLE or style=; both described in the nxlogger-dev skill, references/popup-styles.md):
 
   header   connector icon, device name (or "New <connector> device"), what the connector is
-  body     General (name, description, scan interval, enabled), the connector's own sections
-           (device_pages/<connector>.py), Connection test ([Test connection] + result) - one
-           label column, scrolls when tall
+  body     "tabs":     tabs General | the connector's sections (device_pages/<connector>.py),
+                       Connection test ([Test connection] + result) under the tabs, for every tab
+           "sections": one page - General, the connector's sections, Connection test, one under
+                       the other; scrolls when tall
+           one label column across all of them
   footer   "Connects to ..." / a validation error · [Cancel] [Add device | Save]
 
 The connector is chosen before the dialog opens (Add ▾) and is fixed: the tags' addresses
@@ -16,12 +19,13 @@ import copy
 import threading
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
+                               QLineEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout,
+                               QWidget)
 
 from nxlogger.comms.drivers import test_connection
 from nxlogger.core.tags import DRIVERS, PLANNED, SCAN_CHOICES, DeviceCfg, defaults
-from nxlogger.ui.dialogs.common import dialog_header
+from nxlogger.ui.dialogs import common
 from nxlogger.ui.dialogs.device_pages import ConnectionPage, connection_page
 from nxlogger.ui.dialogs.device_pages.base import form_labels, section
 from nxlogger.ui.theme.ui_kit import T, label, make_icon, set_prop
@@ -36,8 +40,11 @@ class _Tester(QObject):
 
 
 class DeviceDialog(QDialog):
-    def __init__(self, parent, dev: DeviceCfg, taken: set[str], new: bool = False, locked: str = ""):
+    def __init__(self, parent, dev: DeviceCfg, taken: set[str], new: bool = False, locked: str = "",
+                 style: str | None = None):
         super().__init__(parent)
+        self.style_ = style or common.POPUP_STYLE
+        tabbed = self.style_ == "tabs"
         self.dev, self.taken, self.new = dev, taken, new
         self.kind = dev.driver                       # fixed: chosen from Add ▾
         info = DRIVERS[self.kind]
@@ -45,12 +52,18 @@ class DeviceDialog(QDialog):
         self.setMinimumWidth(WIDTH)
 
         # ---- header
-        head, self.icon, self.title, self.subtitle = dialog_header(info["icon"], "", f"{info['label']} · {info['note']}")
+        head, self.icon, self.title, self.subtitle = common.dialog_header(info["icon"], "", f"{info['label']} · {info['note']}")
 
-        # ---- body: General + the connector page
+        # ---- body: General + the connector page (tabs, or sections one under the other)
         self.body = QWidget(); self.body.setObjectName("dlgBody")
-        self.bv = QVBoxLayout(self.body); self.bv.setContentsMargins(20, 6, 20, 16); self.bv.setSpacing(4)
-        self.general = g = section(self.bv, "General")
+        self.bv = QVBoxLayout(self.body); self.bv.setContentsMargins(20, 6 if not tabbed else 14, 20, 16)
+        self.bv.setSpacing(4)
+        if tabbed:
+            gen = QWidget(); gv = QVBoxLayout(gen); gv.setContentsMargins(12, 12, 12, 12)
+            self.general = g = QFormLayout(); g.setHorizontalSpacing(12); g.setVerticalSpacing(6)
+            gv.addLayout(g); gv.addStretch(1)
+        else:
+            self.general = g = section(self.bv, "General")
         self.name = QLineEdit(dev.name)
         self.desc = QLineEdit(dev.description); self.desc.setPlaceholderText("optional - location, purpose ...")
         self.scan = QSpinBox(minimum=20, maximum=3_600_000, singleStep=100, suffix=" ms")
@@ -62,9 +75,17 @@ class DeviceDialog(QDialog):
         for text, w in (("Name", self.name), ("Description", self.desc),
                         ("Scan interval", self.scan), ("Enabled", self.enabled)):
             g.addRow(text, w)
-        self.form: ConnectionPage = connection_page(self.kind, dev.settings)
-        self.bv.addWidget(self.form)
-        # Connection test: under the settings it checks, apart from Cancel / Save
+        self.form: ConnectionPage = connection_page(self.kind, dev.settings, tabs=tabbed)
+        if tabbed:
+            self.tabs = QTabWidget(); self.tabs.setDocumentMode(False)
+            self.tabs.addTab(gen, "General")
+            for title, page in self.form.pages:
+                self.tabs.addTab(page, title)
+            self.form.setParent(self.body); self.form.hide()     # keeps the fields' API; pages are in the tabs
+            self.bv.addWidget(self.tabs)
+        else:
+            self.bv.addWidget(self.form)
+        # Connection test: under the settings it checks (every tab), apart from Cancel / Save
         self.test_form = section(self.bv, "Connection test")
         self.btn_test = QPushButton("Test connection")
         self.btn_test.setIcon(make_icon("plug", T["text"]))
@@ -78,7 +99,9 @@ class DeviceDialog(QDialog):
         row = QWidget(); rh = QHBoxLayout(row); rh.setContentsMargins(0, 0, 0, 0); rh.setSpacing(10)
         rh.addWidget(self.btn_test); rh.addWidget(self.test_result, 1)
         self.test_form.addRow(QLabel(""), row)          # a real (empty) label: the button lines up with the fields
-        self.bv.addStretch(1)
+        if not tabbed:
+            self.bv.addStretch(1)
+        self.body.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)  # follow the dialog width
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(self.body)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

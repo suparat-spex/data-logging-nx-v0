@@ -9,7 +9,7 @@ Formerly SX Logger / MQDAQ (MQTT waveform logger; last flat-file version: git ta
 
 | Path | Owns |
 |---|---|
-| `core/` | **No Qt.** `tags` (DeviceCfg, TagCfg, connector schemas `DRIVERS`, ScanBlock, tag CSV), `project` (model + file migration .sxl/.mqdaq -> .nxl), `view_model` (views: components with x / y / w / h on a snap grid; grid-layout views from 2.0 convert), `stat_buffer` (statistics windows s / min / h / samples, moving / block), `ring` (live buffers), `recording` (CSV / WPK writers, Recorder, zstd/gzip), `ml_log` (AI/ML data log), `alarm_rules` (AlarmEngine, Notifier), `channel_math` (scaling, safe formulas), `analysis` (statistics, FFT, STFT, histogram), `variables` (calculated tags), `wavepacket` (ESP32 packet format) |
+| `core/` | **No Qt.** `tags` (DeviceCfg, TagCfg, connector schemas `DRIVERS`, ScanBlock, tag CSV), `project` (model + file migration .sxl/.mqdaq -> .nxl), `view_model` (views: components with x / y / w / h on a snap grid; grid-layout views from 2.0 convert), `stat_buffer` (statistics windows s / min / h / samples, moving / block), `ring` (live buffers), `recording` (CSV / WPK writers, Recorder, zstd/gzip), `ml_log` (AI/ML data log), `alarm_rules` (AlarmEngine, Notifier), `channel_math` (scaling, safe formulas), `analysis` (statistics, FFT, STFT, histogram), `variables` (calculated tags), `system_tags` (System Tags: clock, app, recording, device status), `wavepacket` (ESP32 packet format) |
 | `comms/drivers/` | One driver thread per device: `base` (PollDriver, message protocol), `sim`, `modbus`, `mqtt`, `opcua` (+ Browser). `comms/manager.py` starts / stops them, one queue |
 | `comms/mqtt_client.py` | paho-mqtt in Qt signals - only the waveform simulator (`sim/`) uses it |
 | `ui/main_window.py` | `DaqWindow`: docks, documents, host API for pages, data path, recording (big - grep, don't read whole) |
@@ -19,6 +19,7 @@ Formerly SX Logger / MQDAQ (MQTT waveform logger; last flat-file version: git ta
 | `ui/icons.py` | All icons. Lucide SVGs in `resources/icons/ui/` |
 | `paths.py`, `config.py` | File locations (dev vs EXE) and `config.ini` |
 | `sim/publisher.py` | ESP32 waveform generator over MQTT |
+| `sim/water_plant.py` | Water treatment plant simulator over MQTT (JSON per area: raw water, pumps, dosing, filters, treated, power meter, environment, KPI); exports the NX Logger device / tag CSV; `water_plant_gui.py` = its window |
 
 Docs: `docs/ui-guidelines.md` (editor tabs vs pop-ups), `docs/connectivity.md` (connectors, addresses, tag CSV), `docs/recording-format.md`
 (session files - the contract with the NX Viewer), `docs/packet-format.md`, `docs/config.md`.
@@ -28,6 +29,8 @@ Docs: `docs/ui-guidelines.md` (editor tabs vs pop-ups), `docs/connectivity.md` (
 ```
 pip install -e ".[dev]"                 # once
 python -m nxlogger                      # app        (python -m nxlogger.sim = waveform publisher)
+python -m nxlogger.sim.water_plant      # water treatment plant over MQTT (--help; --export-device wtp.json)
+python -m nxlogger.sim.water_plant_gui  # the same with a window (live values, copy topic / JSON path)
 python -m pytest -q                     # fast tests (Modbus / OPC UA tests start local servers)
 python -m pyflakes src tests            # lint
 .\packaging\build.ps1                   # EXE + installer
@@ -47,8 +50,9 @@ Full end-to-end check (local Modbus + OPC UA servers, alarms, recording, screens
 - Formulas go through `channel_math.compile_expr` / `compile_formula` (AST whitelist) - never `eval` user text.
 - Threads: drivers and paho callbacks only queue; decode / scale / alarms / statistics on the GUI timer; disk + REST in workers.
 - The grid-layout view version is kept on branch `nx-views-grid` (not merged).
-- Tabs vs pop-ups: **docs/ui-guidelines.md**. Saved items open in editor tabs (`DaqWindow.open_editor(what, ident, **ctx)`, a `_spec_<what>`: tag, group, alarm, aprofile, variable, lprofile, view, tile, mllog); new items are drafts until Apply. Pop-ups only for actions: subclass `common.ActionDialog`, confirm with `common.confirm` / `ask_unsaved` - never `QMessageBox.question` / `QInputDialog` directly. Background events never open a pop-up.
+- Tabs vs pop-ups: **docs/ui-guidelines.md**. Saved items open in editor tabs (`DaqWindow.open_editor(what, ident, **ctx)`, a `_spec_<what>`: alarm, aprofile, variable, lprofile, view, tile, mllog); new items are drafts until Apply. Pop-ups only for actions: subclass `common.ActionDialog`, confirm with `common.confirm` / `ask_unsaved` - never `QMessageBox.question` / `QInputDialog` directly. Background events never open a pop-up. Devices, tags and groups are the exception: settings pop-ups (`_device_popup`, `_tag_popup`, `_group_popup`; `common.popup_form`) and read-only in Properties.
 - Connectivity document = device table only (no tags); device settings are a pop-up (`DaqWindow._device_popup`), not a tab, and read-only in Properties (`PropTarget.readonly`). Right side: Properties dock + Runtime dock (`runtime_dock`). Tags document = tag management.
 - Toolbars never move: changing text -> `ui_kit.fixed_width(w, *texts)`; disable buttons, don't hide them.
-- Project tree: Connectivity = devices only; Tags = device > groups > tags (tag management); Quick View is in the Project menu.
+- Project tree: Connectivity = devices only; Tags = six flat categories (Device, Virtual, Action, Aggregation, Memory, System - `tags_page.CATEGORIES`; the Tags document lists devices > groups > tags); Quick View is in the Project menu.
+- System Tags (`core/system_tags.py`): fixed, read-only, key `("sys:<id>", 0)`, computed on the 500 ms stats timer and fed like a device block (streams, alarms, statistics, formulas `System_<name>`).
 - Put scratch files in the session scratchpad, not the repo.

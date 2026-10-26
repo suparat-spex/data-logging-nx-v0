@@ -13,5 +13,5 @@ PAGES: dict[str, type[ConnectionPage]] = {p.DRIVER: p for p in (SimPage, ModbusT
                                                                  OpcUaPage, OpcDaPage)}
 
 
-def connection_page(driver: str, values: dict) -> ConnectionPage:
-    return PAGES[driver](values)
+def connection_page(driver: str, values: dict, tabs: bool = False) -> ConnectionPage:
+    return PAGES[driver](values, tabs=tabs)

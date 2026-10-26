@@ -484,6 +484,88 @@ def read_devices_file(path: str) -> list[DeviceCfg]:
     return devs
 
 
+def _tag_row_problems(dev: DeviceCfg, row: dict) -> list[str]:
+    out = []
+    if not (row.get("name") or "").strip():
+        out.append("no name")
+    schema = {f["key"]: f for f in DRIVERS[dev.driver]["address"] or []}
+    for part in (row.get("address") or "").split(";"):
+        if not part.strip():
+            continue
+        k, eq, v = (x.strip() for x in part.partition("="))
+        if not eq:
+            out.append(f"address part '{part.strip()}' is not key=value")
+        elif k not in schema:
+            out.append(f"unknown address key '{k}' for {driver_label(dev.driver)}"
+                       + (f" (use {', '.join(schema)})" if schema else " (this connector has no tag address)"))
+        else:
+            try:
+                _typed(schema[k], v)
+            except ValueError:
+                out.append(f"address {k}: '{v}' is not a{'n' if schema[k]['type'] == 'int' else ''} {schema[k]['type']}")
+    if str(row.get("access") or "R").strip().upper() not in ("R", "RW"):
+        out.append(f"access must be R or RW, not '{row.get('access')}'")
+    try:
+        int(row.get("decimals") or 3)
+    except ValueError:
+        out.append(f"decimals: '{row.get('decimals')}' is not a whole number")
+    return out
+
+
+def read_tags_file(path: str, dev: DeviceCfg) -> list[TagCfg]:
+    """Strict check of a tag file for device `dev` (nothing is imported from a file that fails):
+    a tag list CSV (CSV_COLS; rows of other devices are left out when the device column names
+    this one) or a device JSON export (the tags of the device with this name, or of the only
+    device - same connector, addresses must fit). New tags, indices not assigned yet."""
+    import csv
+    low = path.lower()
+    if not low.endswith((".csv", ".json", ".nxl")):
+        raise DeviceFileError(["not a tag file: use .csv (tag list) or .json (device export)"])
+    problems, tags = [], []
+    try:
+        if low.endswith(".csv"):
+            with open(path, encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                cols = [c.strip() for c in reader.fieldnames or []]
+                unknown = [c for c in cols if c not in CSV_COLS]
+                if "name" not in cols or unknown:
+                    raise DeviceFileError((["missing column: name"] if "name" not in cols else [])
+                                          + ([f"unknown column(s): {', '.join(unknown)}"] if unknown else [])
+                                          + [f"expected header: {','.join(CSV_COLS)}"])
+                rows = [(n, {(k or "").strip(): v for k, v in r.items()}) for n, r in enumerate(reader, start=2)]
+            rows = [(n, r) for n, r in rows if any(isinstance(v, str) and v.strip() for v in r.values())]
+            if any((r.get("device") or "").strip() == dev.name for _, r in rows):     # a multi-device list
+                rows = [(n, r) for n, r in rows if (r.get("device") or "").strip() == dev.name]
+            for n, r in rows:
+                p = _tag_row_problems(dev, r)
+                problems += [f"line {n}: {q}" for q in p]
+                if not p:
+                    tags.append(tag_from_row(dev, r))
+        else:
+            devs = read_devices_file(path)
+            src = next((d for d in devs if d.name == dev.name), devs[0] if len(devs) == 1 else None)
+            if src is None:
+                raise DeviceFileError([f"no device named '{dev.name}' in the file "
+                                       f"({', '.join(d.name for d in devs[:6])})"])
+            if src.driver != dev.driver:
+                raise DeviceFileError([f"the tags are for a {driver_label(src.driver)} device; "
+                                       f"{dev.name} is {driver_label(dev.driver)} - the addresses do not fit"])
+            tags = list(src.tags)
+    except DeviceFileError:
+        raise
+    except UnicodeDecodeError:
+        raise DeviceFileError(["not a text file (UTF-8)"])
+    except (OSError, csv.Error) as e:
+        raise DeviceFileError([str(e)])
+    names = [t.name for t in tags]
+    problems += [f"tag name used twice: {x}" for x in sorted({x for x in names if names.count(x) > 1})]
+    if not problems and not tags:
+        problems.append(f"no tags for {dev.name} in the file")
+    if problems:
+        raise DeviceFileError(problems)
+    return tags
+
+
 def _row_problems(row: dict) -> list[str]:
     out = []
     drv = (row.get("driver") or "").strip()

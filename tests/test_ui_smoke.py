@@ -133,8 +133,46 @@ def test_tree_layout(win):
     conn = kids["Connectivity"]
     assert conn.childCount() == len(win.project.devices)
     assert all(conn.child(i).childCount() == 0 for i in range(conn.childCount()))      # devices only
-    dev_node = kids["Tags"].child(0)
-    assert dev_node.data(0, Qt.ItemDataRole.UserRole)[0] == "tagdev" and dev_node.childCount() >= 4
+    tags = kids["Tags"]                                     # six categories, flat
+    cats = [tags.child(i).data(0, Qt.ItemDataRole.UserRole) for i in range(tags.childCount())]
+    assert [c[1] for c in cats] == ["device", "virtual", "action", "aggregation", "memory", "system"]
+    assert all(c[0] == "tagcat" for c in cats) and all(tags.child(i).childCount() == 0 for i in range(6))
+
+
+def test_system_tags(win):
+    from nxlogger.core import system_tags as ss
+    win._update_stats()                                     # computes the System Tags
+    keys = {k for k in ((c[0], c[1]) for c in win.channel_choices()) if ss.is_sys(k[0])}
+    assert ss.sys_key("Hour") in keys and ss.sys_key("DateTime") not in keys   # text is not a stream
+    val, unit = win.last_value(*ss.sys_key("Uptime"))
+    assert val is not None and unit == "s"
+    text, qual, good, _ = win.tag_live(*ss.sys_key("DateTime"))
+    assert len(text) == 19 and qual == "Good" and good
+    did = win.project.devices[0].id
+    assert win.tag_live(f"sys:dev.{did}.Connected", 0)[0] in ("0", "1")
+    from PySide6.QtCore import Qt
+    page = win.tags_page
+    top = lambda: [page.dtree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)       # noqa: E731
+                   for i in range(page.dtree.topLevelItemCount())]
+    page.refresh(("cat", "system"))                         # only this category: All tags + its groups
+    assert top()[:5] == [("all",), ("sysgroup", "Clock"), ("sysgroup", "App"), ("sysgroup", "Recording"),
+                         ("sysgroup", "Alarms")] and page.band.text.text() == "System"
+    assert len(page._rows) == len(win.sys_tags())
+    assert not page.btn_add.isEnabled() and not page.btn_edit.isEnabled() and not page.btn_del.isEnabled()
+    page.refresh(("sysgroup", "Clock"))
+    assert {r for r in page._rows} == {t.key for t in win.sys_tags() if t.group == "Clock"}
+    page.refresh(("sysdev", did))
+    assert len(page._rows) == len(ss.DEVICE_FIELDS)
+    page.select_tag(*ss.sys_key("Hour"))
+    assert page.selected_system() == [ss.sys_key("Hour")] and page.selected_tags() == []
+    assert win._prop_key == ("sys", "sys:Hour")
+    page.refresh(("cat", "device"))                         # All tags + the Connectivity devices, nothing else
+    assert top() == [("all",)] + [("device", d.id) for d in win.project.devices]
+    assert len(page._rows) == sum(len(d.tags) for d in win.project.devices) and not page.btn_add.isEnabled()
+    page.refresh(("device", did))
+    assert page.current_device_id() == did and page.btn_add.isEnabled() and page.btn_imp.isEnabled()
+    page.refresh(("cat", "memory"))
+    assert not page._rows and not top() and page.band.text.text().startswith("Memory")
 
 
 def test_editor_tabs(win, monkeypatch):
@@ -162,23 +200,43 @@ def test_editor_tabs(win, monkeypatch):
     assert len(win.project.devices) == n_dev + 1
     plc = win.project.devices[-1]
     assert plc.driver == "modbus_tcp" and plc.settings["host"] == "10.0.0.5" and win.conn_page.selected() == [plc.id]
-    # new group + new tag in it
-    g = win.open_editor("group", None, did=dev.id)
-    g.dlg.name.setText("Boiler")
-    assert g.apply() and "Boiler" in dev.all_groups()
-    t = win.open_editor("tag", None, did=dev.id, group="Boiler")
-    t.dlg.name.setText("Steam")
-    assert t.apply() and len(dev.tags) == n_tags + 1 and dev.tags[-1].group == "Boiler"
+    # tags and groups: pop-ups like the device (Add group / Add tag / Save; Cancel changes nothing)
+    from nxlogger.ui.dialogs.group_dialog import GroupDialog
+    from nxlogger.ui.dialogs.tag_dialog import TagDialog
+    seen = []
+
+    def popup_exec(dlg):
+        seen.append(next(b.text() for b in dlg.findChildren(QtWidgets.QPushButton) if b.property("primary")))
+        answer["edit"](dlg)
+        return answer["ok"]
+    monkeypatch.setattr(GroupDialog, "exec", popup_exec)
+    monkeypatch.setattr(TagDialog, "exec", popup_exec)
+    answer["edit"] = lambda d: d.name.setText("Boiler")
+    win.add_group(dev.id, "")
+    assert "Boiler" in dev.all_groups() and seen[-1] == "Add group" and win.doc_tabs.count() == tabs
+    answer["edit"] = lambda d: d.name.setText("Steam")
+    win.add_tags(dev.id, "Boiler", False)
+    assert len(dev.tags) == n_tags + 1 and dev.tags[-1].group == "Boiler" and seen[-1] == "Add tag"
+    answer["edit"] = lambda d: d.name.setText("Steam 2")
+    answer["ok"] = False
+    win.edit_tag(dev.id, dev.tags[-1].index)
+    assert dev.tags[-1].name == "Steam" and seen[-1] == "Save"           # cancelled
+    answer["ok"] = True
+    win.edit_tag(dev.id, dev.tags[-1].index)
+    assert dev.tags[-1].name == "Steam 2" and win.doc_tabs.count() == tabs
+    # a selected tag's properties are information only (like a device), Edit... opens the pop-up
+    win.select_object(("tag", dev.id, 0))
+    assert win.props.target.readonly and win.props.target.apply is None
+    assert [a[0] for a in win.props.target.actions] == ["Edit..."]
     # every other kind opens as a tab (new and existing)
     for kind, ident, ctx in (("alarm", None, {}), ("aprofile", None, {"kind": "rest"}), ("variable", None, {}),
                              ("lprofile", None, {"kind": "statistic"}),
-                             ("lprofile", win.project.logging_profiles[0]["id"], {}),
-                             ("tag", (dev.id, 0), {})):
+                             ("lprofile", win.project.logging_profiles[0]["id"], {})):
         e = win.open_editor(kind, ident, **ctx)
         assert isinstance(e, FormTab) and e.dlg is not None, kind
     # closing a modified editor asks (Apply / Don't apply / Cancel)
     import nxlogger.ui.widgets.form_tab as ft
-    e = win.open_editor("tag", (dev.id, 0))
+    e = win.open_editor("lprofile", win.project.logging_profiles[0]["id"])
     assert not e.btn_apply.isEnabled() and not e.btn_refresh.isEnabled()      # nothing to apply yet
     e._set_modified(True)
     assert e.btn_apply.isEnabled() and e.btn_refresh.isEnabled()
@@ -403,12 +461,17 @@ def test_device_connection_pages(win):
     assert rtu.values()["port"] == "COM7" and rtu.values()["parity"] == "E" and "9600 8E1" in rtu.summary(rtu.values())
 
 
-def test_device_dialog_one_page(win):
+def test_device_dialog_styles(win):
     from PySide6.QtWidgets import QTabWidget
     from nxlogger.core.tags import DeviceCfg
     from nxlogger.ui.dialogs.device_dialog import DeviceDialog
+    s = DeviceDialog(win, DeviceCfg("PLC", "modbus_tcp"), {"Other"}, style="sections")
+    assert s.findChild(QTabWidget) is None                     # the one-page style (kept, see the skill)
+    t = DeviceDialog(win, DeviceCfg("Broker", "mqtt"), set())   # default: tabs, one per section
+    assert [t.tabs.tabText(i) for i in range(t.tabs.count())] == ["General", "Broker", "Authentication",
+                                                                   "Session", "Payload"]
+    assert t.btn_test.isVisibleTo(t) and t.tabs.isAncestorOf(t.form.w["host"][1])   # test row under the tabs
     d = DeviceDialog(win, DeviceCfg("PLC", "modbus_tcp"), {"Other"})
-    assert d.findChild(QTabWidget) is None                     # no tabs: one page
     assert d.title.text() == "PLC" and "Modbus TCP" in d.subtitle.text()
     assert d.summary.text().startswith("Connects to") and "127.0.0.1:502" in d.summary.text()
     widths = {lb.minimumWidth() for lb in d.form.labels()}
@@ -473,3 +536,46 @@ def test_menus_text_only_same_indent(win):
     row = page.build_menu([win.project.devices[0]])
     assert all(a.icon().isNull() for a in row.actions())
     assert "QMenu { icon-size: 0px; }" in QtWidgets.QApplication.instance().styleSheet()   # shared actions too
+
+
+def test_tag_import_export_popups(win, monkeypatch, tmp_path):
+    from nxlogger.ui.dialogs import export_tags_dialog as etd
+    from nxlogger.ui.dialogs import import_tags_dialog as itd
+    from nxlogger.ui.widgets.tags_page import COLS
+    dev = win.project.devices[0]
+    page = win.tags_page
+    page.refresh(("device", dev.id))
+    assert COLS[1] == "Device" and all(it.text(1) == dev.name for it in page._rows.values())
+    assert page.btn_exp.isEnabled() and page.btn_imp.isEnabled()
+    page.refresh(("cat", "device"))
+    assert page.btn_exp.isEnabled() and not page.btn_imp.isEnabled()      # import needs one device
+    out = tmp_path / "tags.csv"
+    monkeypatch.setattr("nxlogger.ui.main_window.QFileDialog.getSaveFileName", lambda *a, **k: (str(out), ""))
+
+    def export_exec(dlg):                        # untick all but the first tag, CSV
+        dlg._tick_all(False)
+        assert not dlg.ok.isEnabled()
+        next(dlg._items()).setCheckState(0, Qt.CheckState.Checked)
+        return dlg.ok.text() == "Export 1 tag..." and dlg.format() == "csv"
+    from PySide6.QtCore import Qt
+    monkeypatch.setattr(etd.ExportTagsDialog, "exec", export_exec)
+    win.export_tags(dev.id)
+    assert out.exists() and dev.tags[0].name in out.read_text(encoding="utf-8-sig")
+    n = len(dev.tags)
+
+    def import_exec(dlg):                        # the same tag back: replace keeps its index
+        dlg.load(str(out))
+        assert dlg.ok.isEnabled() and dlg.ok.text() == "Import 1 tag" and dlg.conflict.isEnabled()
+        dlg.conflict.setCurrentIndex(dlg.conflict.findData("replace"))
+        return True
+    monkeypatch.setattr(itd.ImportTagsDialog, "exec", import_exec)
+    idx0 = dev.tags[0].index
+    win.import_tags(dev.id)
+    assert len(dev.tags) == n and dev.tags[0].index == idx0
+
+    def import_copy(dlg):
+        dlg.load(str(out))
+        return True                              # default: add as a copy (new name)
+    monkeypatch.setattr(itd.ImportTagsDialog, "exec", import_copy)
+    win.import_tags(dev.id)
+    assert len(dev.tags) == n + 1 and dev.tags[-1].name != dev.tags[0].name
