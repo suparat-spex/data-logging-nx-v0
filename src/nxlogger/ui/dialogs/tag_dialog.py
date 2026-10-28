@@ -256,16 +256,16 @@ class ChannelDialog(QDialog):
 
 # ====================================================================== tag
 class TagDialog(ChannelDialog):
-    def __init__(self, parent, dev: DeviceCfg, tag: TagCfg, default_color: str, raw_value):
+    def __init__(self, parent, dev: DeviceCfg, tag: TagCfg, default_color: str, raw_value, groups=None):
         super().__init__(parent, dev.name, tag, default_color, raw_value, dev.topic, alarms=False)
         self.dev, self.tag = dev, tag
         self.setWindowTitle(f"Tag - {dev.name} · {tag.name}")
         tabs = self.tabs
         w, f = form_page()
         self.group = QComboBox(); self.group.setEditable(True)
-        self.group.addItems([""] + dev.all_groups())
+        self.group.addItems([""] + (dev.all_groups() if groups is None else list(groups)))   # the project's groups
         self.group.setCurrentText(tag.group)
-        self.group.setToolTip("Folder inside the device; use / for sub-groups (Boiler/Pumps)")
+        self.group.setToolTip("Group (Tags > Groups, one tree for all tags); use / for sub-groups (Boiler/Pumps)")
         f.addRow("Group", self.group)
         self.access = QCheckBox("Writable (RW) - values can be written from the tag table",
                                 checked=tag.access == "RW")

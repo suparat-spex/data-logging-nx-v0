@@ -1,19 +1,22 @@
-"""Add / edit a tag group (folder) of a device: name and parent group."""
+"""Add / edit a tag group (folder): name and parent group - of a device (Tags > Device) or of the
+project (Tags > Groups: one tree for all tags)."""
 from __future__ import annotations
 
 from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QLineEdit, QTabWidget, QVBoxLayout
 
-from nxlogger.core.tags import DeviceCfg
 from nxlogger.ui.dialogs.common import form_page
 from nxlogger.ui.theme.ui_kit import label, set_prop
 
 
 class GroupDialog(QDialog):
-    """path = the group's current path ("" for a new group). result_path() -> the new path."""
+    """owner: where it lives ("PLC-01", "Project"); groups: the existing paths; n_tags: tags in it
+    (shown when editing). path = the group's current path ("" for a new group).
+    result_path() -> the new path."""
 
-    def __init__(self, parent, dev: DeviceCfg, path: str = "", parent_path: str = ""):
+    def __init__(self, parent, owner: str, groups: list[str], path: str = "", parent_path: str = "",
+                 n_tags: int = 0, root: str = "(device root)"):
         super().__init__(parent)
-        self.dev, self.path = dev, path
+        self.groups, self.path = list(groups), path
         self.setWindowTitle("Group" if path else "Add group")
         self.setMinimumWidth(440)
         w, f = form_page()
@@ -21,17 +24,16 @@ class GroupDialog(QDialog):
         self.name.setPlaceholderText("e.g. Boiler")
         cur_parent = path.rsplit("/", 1)[0] if "/" in path else ("" if path else parent_path)
         self.parent_group = QComboBox()
-        self.parent_group.addItem("(device root)", "")
-        for g in dev.all_groups():
+        self.parent_group.addItem(root, "")
+        for g in self.groups:
             if not path or not (g == path or g.startswith(path + "/")):    # not into itself
                 self.parent_group.addItem(g, g)
         self.parent_group.setCurrentIndex(max(0, self.parent_group.findData(cur_parent)))
-        n = sum(1 for t in dev.tags if path and (t.group == path or t.group.startswith(path + "/")))
-        f.addRow("Device", label(dev.name, muted=True))
+        f.addRow("Device" if root == "(device root)" else "In", label(owner, muted=True))
         f.addRow("Name", self.name)
         f.addRow("Parent group", self.parent_group)
         if path:
-            f.addRow("Tags", label(f"{n} tag(s) in this group and its sub-groups", muted=True))
+            f.addRow("Tags", label(f"{n_tags} tag(s) in this group and its sub-groups", muted=True))
         tabs = QTabWidget(); tabs.addTab(w, "Group")
         self.err = label("", small=True); self.err.setObjectName("statusMsg"); set_prop(self.err, "level", "bad")
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -48,7 +50,7 @@ class GroupDialog(QDialog):
         if not self.name.text().strip():
             self.err.setText("Enter a name."); return
         new = self.result_path()
-        if new != self.path and new in self.dev.all_groups():
+        if new != self.path and new in self.groups:
             self.err.setText("This group already exists."); return
         self.err.setText("")
         self.accept()

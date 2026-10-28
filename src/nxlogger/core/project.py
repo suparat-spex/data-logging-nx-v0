@@ -13,6 +13,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 
 from nxlogger import paths
+from nxlogger.core import aggregation as agg
 from nxlogger.core import alarm_rules as ar
 from nxlogger.core import ml_log as mlg
 from nxlogger.core import variables as vr
@@ -84,6 +85,8 @@ class Project:
     alarm_settings: dict = field(default_factory=lambda: {"sound": True, "front": False})
     variables: list[dict] = field(default_factory=list)         # calculated channels (variables.py)
     virtual_tags: list[dict] = field(default_factory=list)      # Tags > Virtual (virtual_tags.py)
+    aggregations: list[dict] = field(default_factory=list)      # Tags > Aggregation (aggregation.py)
+    groups: list[str] = field(default_factory=list)             # Tags > Groups: project-wide paths (empty ones too)
     quick_hidden: list = field(default_factory=list)            # [[device_id, index]] not in Quick View
     ml_log: dict = field(default_factory=mlg.new_settings)   # AI/ML data log (core/ml_log.py)
     migrated_from: str = ""                                  # "" or the old format (not saved)
@@ -99,6 +102,19 @@ class Project:
     def tag(self, did: str, idx: int) -> TagCfg | None:
         d = self.device(did)
         return d.tag(idx) if d else None
+
+    def all_groups(self) -> list[str]:
+        """Tags > Groups: every group path of the project, parents included, sorted. One tree for
+        all tags - the same path on two devices (or a virtual / aggregation tag) is one group."""
+        paths = list(self.groups) + [x.get("group", "") for x in self.virtual_tags + self.aggregations]
+        for d in self.devices:
+            paths += list(d.groups) + [t.group for t in d.tags]
+        out = set()
+        for g in paths:
+            parts = [p for p in (g or "").split("/") if p]
+            for i in range(1, len(parts) + 1):
+                out.add("/".join(parts[:i]))
+        return sorted(out, key=str.lower)
 
     @classmethod
     def from_dict(cls, d: dict, broker: dict | None = None) -> "Project":
@@ -121,7 +137,8 @@ class Project:
                 logging_profiles=d.get("logging_profiles", []), alarms=d.get("alarms", []),
                 alarm_profiles=d.get("alarm_profiles", []),
                 alarm_settings={**cls().alarm_settings, **d.get("alarm_settings", {})},
-                variables=d.get("variables", []), virtual_tags=d.get("virtual_tags", []), quick_hidden=d.get("quick_hidden", []),
+                variables=d.get("variables", []), virtual_tags=d.get("virtual_tags", []),
+                aggregations=d.get("aggregations", []), groups=list(d.get("groups", [])), quick_hidden=d.get("quick_hidden", []),
                 ml_log={**mlg.new_settings(), **d.get("ml_log", {})}, migrated_from=migrated)
         if "logging_profiles" not in d:          # v5 file: its one format becomes a profile
             p.logging_profiles = [{**new_log_profile("signal", "Waveform"), "format": p.logging.format,
@@ -144,6 +161,8 @@ class Project:
             vr.normalize_variable(x)
         for x in p.virtual_tags:                 # files before Virtual tags: none, new fields: defaults
             vt.normalize_virtual(x)
+        for x in p.aggregations:                 # files before Aggregation tags: none
+            agg.normalize_aggregation(x)
         p.views = [y for x in p.views for y in split_tabs(x)]   # early v7 tabs -> separate views
         for x in p.views:                        # free-form views -> grid, new tile properties
             normalize_view(x)

@@ -2,23 +2,27 @@
 tags_page.py - the Tags document (tag management, like Genesis64 / FUXA tag lists). The
 devices themselves are in the Connectivity document (connectivity.py).
 
-Tags come in six categories (CATEGORIES, also the Project tree's Tags nodes). The page shows
-one category at a time - the one chosen in the Project tree:
+Tags come in six categories plus Groups (CATEGORIES, also the Project tree's Tags nodes). The
+page shows one at a time - the one chosen in the Project tree:
   Device       acquires the data: the tags of the devices. The devices come from Connectivity
                (picked here, never added or edited here)
   Virtual      derives from it: constants, formulas, conversions, logic, selectors, text maps
                (core/virtual_tags.py; added / edited in a pop-up like device tags)
   Action       responds to it: logic, outputs, triggers                       (planned)
-  Aggregation  summarizes it statistically                                    (planned)
+  Aggregation  remembers it over time: statistic, totalizer, counter, runtime, min / max hold,
+               change - reset by a period (core/aggregation.py; pop-up like virtual tags)
   Memory       values set by the user: setpoints, constants                   (planned)
   System       read-only values of the app (core/system_tags.py; fixed, not edited)
+  Groups       one group tree for the whole project (areas, machines): the tags of every
+               category in a group; add / rename / delete groups, move tags into them
 
   bar    Add ▾ (tag, tags..., group..., browse OPC UA...), Edit, Delete | Import..., Export...
          | Columns ▾ (show / hide, remembered), filter - fixed buttons, disabled when they do
          not apply (like Connectivity)
   left   the category as a band (like a Properties section), below it its list:
          Device: All tags, devices (connector icon in the state colour) > groups
-         Virtual: All tags, one row per type, then the groups
+         Virtual / Aggregation: All tags, one row per type, then the groups
+         Groups: All tags, the group tree (counts include sub-groups), (no group)
          System: All tags, Clock, App, Recording, Alarms, Devices > one group per device
   right  tag table: name, group, address, type, access, unit, live value, quality, time of
          the last value, description
@@ -42,6 +46,11 @@ Host API (duck-typed, DaqWindow):
   host.project.virtual_tags / host.vt_engine / host.vt_describe(v) / host.virtual_tag(vid)
   host.add_virtual(kind, group) / host.edit_virtual(vid) / host.duplicate_virtual(vid)
   host.delete_virtuals([vid]) / host.set_virtuals_enabled([vid], on)      (pop-ups; key ("vt:<id>", 0))
+  host.project.aggregations / host.agg_engine / host.agg_describe(a) / host.aggregation(aid)
+  host.add_aggregation(kind, group) / host.edit_aggregation(aid) / host.duplicate_aggregation(aid)
+  host.delete_aggregations([aid]) / host.set_aggregations_enabled([aid], on) / host.reset_aggregation(aid)
+  host.project.all_groups() / host.group_count(path) / host.add_project_group(parent)
+  host.edit_project_group(path) / host.delete_project_group(path) / host.move_to_group([key], group)
 """
 from __future__ import annotations
 
@@ -50,6 +59,7 @@ from PySide6.QtGui import QBrush, QColor, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLineEdit, QMenu,
                                QSplitter, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
+from nxlogger.core import aggregation as ag
 from nxlogger.core import system_tags as ss
 from nxlogger.core import virtual_tags as vt
 from nxlogger.core.tags import DRIVERS, describe_address, driver_label
@@ -66,9 +76,11 @@ CATEGORIES = [   # (key, name, icon, what it is, ready)
     ("virtual", "Virtual", "function-square",
      "Derives from it: constants, formulas, conversions, logic, selectors, text maps", True),
     ("action", "Action", "power", "Responds to it: logic, outputs, triggers - planned", False),
-    ("aggregation", "Aggregation", "sigma", "Summarizes it statistically - planned", False),
+    ("aggregation", "Aggregation", "sigma",
+     "Remembers it over time: statistics, totals, counters, run hours, min / max, change", True),
     ("memory", "Memory", "database", "Values set by the user: setpoints, constants - planned", False),
     ("system", "System", "cpu", "Read-only values of the app: clock, recording, alarms, device status", True),
+    ("groups", "Groups", "folder", "One group tree for all tags: areas, machines ... (every category)", True),
 ]
 CAT = {c[0]: c for c in CATEGORIES}
 SYS_GROUPS = ["Clock", "App", "Recording", "Alarms"]     # then "Devices" > one group per device
@@ -97,6 +109,11 @@ class TagsPage(QWidget):
         self.vt_menu = QMenu(self.btn_add)             # Virtual: one item per type
         for k, (text, _ic, _what) in vt.TYPES.items():
             self.vt_menu.addAction(text + "...", lambda kk=k: self.host.add_virtual(kk, self._vt_group()))
+        self.agg_menu = QMenu(self.btn_add)            # Aggregation: one item per type
+        for k, (text, _ic, _what) in ag.TYPES.items():
+            self.agg_menu.addAction(text + "...", lambda kk=k: self.host.add_aggregation(kk, self._agg_group()))
+        self.grp_menu = QMenu(self.btn_add)            # Groups
+        self.grp_menu.addAction("Group...", lambda: self.host.add_project_group(self._pgroup() or ""))
         self.btn_add.setMenu(m); self.btn_add.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.btn_edit = self._button("Edit", "pencil", self._edit, "Edit the selected tag or group (double-click a row)")
         self.btn_del = self._button("", "trash", self._delete, "Delete the selected tags or group (Del)")
@@ -188,7 +205,9 @@ class TagsPage(QWidget):
                 self._cat, self._sel = select[1], ("all",)
             else:
                 self._cat = ("system" if select[0] in ("sysgroup", "sysdev") else
-                             "virtual" if select[0] in ("vtype", "vgroup") else "device")
+                             "virtual" if select[0] in ("vtype", "vgroup") else
+                             "aggregation" if select[0] in ("atype", "agroup") else
+                             "groups" if select[0] in ("pgroup", "pnone") else "device")
                 self._sel = tuple(select)
         key, name, icon, tip, ready = CAT[self._cat]
         self.band.set(name + ("" if ready else "  (planned)"), icon, tip)
@@ -249,6 +268,33 @@ class TagsPage(QWidget):
             for g in sorted({v.get("group", "") for v in vts} - {""}):
                 add(None, f"{g}  ({sum(1 for v in vts if v.get('group') == g)})", ("vgroup", g),
                     make_icon("folder", T["muted"]), f"Group {g}")
+        elif self._cat == "aggregation":
+            xs = self.host.project.aggregations
+            add(None, f"All tags  ({len(xs)})", ("all",), make_icon("list", T["text"]), "Every aggregation tag")
+            for k, (text, ic, what) in ag.TYPES.items():
+                n = sum(1 for a in xs if a["kind"] == k)
+                it = add(None, f"{text}  ({n})", ("atype", k), make_icon(ic, T["text" if n else "muted"]), what)
+                if not n:
+                    it.setForeground(0, muted)
+                if any(a["kind"] == k and a["id"] in self.host.agg_engine.errors for a in xs):
+                    it.setForeground(0, QBrush(QColor(T["bad"])))
+            for g in sorted({a.get("group", "") for a in xs} - {""}):
+                add(None, f"{g}  ({sum(1 for a in xs if a.get('group') == g)})", ("agroup", g),
+                    make_icon("folder", T["muted"]), f"Group {g}")
+        elif self._cat == "groups":
+            groups = self.host.project.all_groups()
+            add(None, f"All tags  ({len(self._group_rows(None))})", ("all",), make_icon("list", T["text"]),
+                "Every device, virtual and aggregation tag")
+            folders: dict[str, QTreeWidgetItem] = {}
+            for g in groups:
+                parent = folders.get(g.rsplit("/", 1)[0]) if "/" in g else None
+                folders[g] = add(parent, f"{g.rsplit('/', 1)[-1]}  ({self.host.group_count(g)})", ("pgroup", g),
+                                 make_icon("folder", T["muted"]), g)
+            for it in folders.values():
+                it.setExpanded(True)
+            n = len(self._group_rows(""))
+            none = add(None, f"(no group)  ({n})", ("pnone",), make_icon("folder", T["muted"]), "Tags without a group")
+            none.setForeground(0, muted)
         cur = items.get(self._sel) or items.get(("all",))
         if cur is None and self._sel[:1] == ("group",):    # group gone: its device
             cur = items.get(("device", self._sel[1]))
@@ -348,6 +394,10 @@ class TagsPage(QWidget):
             self._fill_device()
         elif self._cat == "virtual":
             self._fill_virtual()
+        elif self._cat == "aggregation":
+            self._fill_aggregation()
+        elif self._cat == "groups":
+            self._fill_groups()
         else:
             self.hint.setText(f"{CAT[self._cat][1]} tags: {CAT[self._cat][3]}.")
         self.table.setSortingEnabled(True)
@@ -419,6 +469,64 @@ class TagsPage(QWidget):
                               " · numbers work in views, alarms and formulas (Virtual_<name>) · "
                               "double-click to edit, right-click for more")
 
+    def _fill_aggregation(self):
+        sel = self._sel
+        muted = QBrush(QColor(T["muted"]))
+        for a in self.host.project.aggregations:
+            if (sel[0] == "atype" and a["kind"] != sel[1]) or (sel[0] == "agroup" and a.get("group") != sel[1]):
+                continue
+            key = ag.agg_key(a["id"])
+            period = ag.describe_period(a)
+            self._add_row(key, [a["name"], "Aggregation", a.get("group", ""),
+                                self.host.agg_describe(a) + (f" · {period}" if period != "-" else ""),
+                                ag.TYPES[a["kind"]][0], "R", a.get("unit", ""), "", "", "", a.get("description", "")],
+                          self.host.color_of(*key), None if a["enabled"] else muted)
+            err = self.host.agg_engine.errors.get(a["id"])
+            if err:
+                self._rows[key].setToolTip(0, err)
+        xs = self.host.project.aggregations
+        errs = sum(1 for a in xs if a["id"] in self.host.agg_engine.errors)
+        if not xs:
+            self.hint.setText("No aggregation tags - Add > Statistic, Totalizer, Counter, Runtime, Min / Max hold or "
+                              "Change")
+        else:
+            self.hint.setText(f"{len(self._rows)} aggregation tag(s)" + (f" · {errs} with an error" if errs else "") +
+                              " · in formulas Aggregation_<name> (and _Previous) · double-click to edit, "
+                              "right-click for more")
+
+    def _group_rows(self, group):
+        """[(key, cols, colour, enabled)] of every device / virtual / aggregation tag in a group and
+        its sub-groups; group None = all, "" = without a group."""
+        inside = (lambda g: True) if group is None else (lambda g: not g) if group == "" else             (lambda g: bool(g) and (g == group or g.startswith(group + "/")))
+        out = []
+        for d in self.host.project.devices:
+            for t in d.tags:
+                if inside(t.group):
+                    out.append(((d.id, t.index), [t.name, d.name, t.group, describe_address(d.driver, "", t),
+                                                  "Device · " + ("Array" if t.kind == "array" else "Number"), t.access,
+                                                  t.unit, "", "", "", t.description], t.enabled and d.enabled))
+        for v in self.host.project.virtual_tags:
+            if inside(v.get("group", "")):
+                out.append((vt.vt_key(v["id"]), [v["name"], "Virtual", v.get("group", ""), self.host.vt_describe(v),
+                                                  "Virtual · " + vt.TYPES[v["kind"]][0], "R", v.get("unit", ""),
+                                                  "", "", "", v.get("description", "")], v["enabled"]))
+        for a in self.host.project.aggregations:
+            if inside(a.get("group", "")):
+                out.append((ag.agg_key(a["id"]), [a["name"], "Aggregation", a.get("group", ""),
+                                                   self.host.agg_describe(a), "Aggregation · " + ag.TYPES[a["kind"]][0],
+                                                   "R", a.get("unit", ""), "", "", "", a.get("description", "")],
+                            a["enabled"]))
+        return out
+
+    def _fill_groups(self):
+        muted = QBrush(QColor(T["muted"]))
+        group = self._pgroup() if self._sel[0] == "pgroup" else ("" if self._sel[0] == "pnone" else None)
+        for key, cols, on in self._group_rows(group):
+            self._add_row(key, cols, self.host.color_of(*key), None if on else muted)
+        where = {None: "all groups", "": "no group"}.get(group, f"group {group}")
+        self.hint.setText(f"{len(self._rows)} tag(s) in {where} · one tree for all tags · right-click a tag to move "
+                          "it, double-click to edit it")
+
     def update_live(self):
         """Value / quality / time columns (called twice a second while the page is visible)."""
         bad, ok, muted = QBrush(QColor(T["bad"])), QBrush(QColor(T["ok"])), QBrush(QColor(T["muted"]))
@@ -445,11 +553,22 @@ class TagsPage(QWidget):
 
     def selected_tags(self) -> list[tuple[str, int]]:
         """Selected device tags (System Tags are not edited: see selected_system)."""
-        return [k for k in self._selected_keys() if not ss.is_sys(k[0]) and not vt.is_vt(k[0])]
+        return [k for k in self._selected_keys() if not ss.is_sys(k[0]) and not vt.is_vt(k[0]) and not ag.is_agg(k[0])]
 
     def selected_virtual(self) -> list[str]:
         """Ids of the selected virtual tags."""
         return [k[0][len(vt.VT_PREFIX):] for k in self._selected_keys() if vt.is_vt(k[0])]
+
+    def selected_agg(self) -> list[str]:
+        """Ids of the selected aggregation tags."""
+        return [k[0][len(ag.AGG_PREFIX):] for k in self._selected_keys() if ag.is_agg(k[0])]
+
+    def _agg_group(self) -> str:
+        return self._sel[1] if self._cat == "aggregation" and self._sel[0] == "agroup" else ""
+
+    def _pgroup(self) -> str | None:
+        """The group selected in Tags > Groups, else None."""
+        return self._sel[1] if self._cat == "groups" and self._sel[0] == "pgroup" else None
 
     def _vt_group(self) -> str:
         return self._sel[1] if self._cat == "virtual" and self._sel[0] == "vgroup" else ""
@@ -462,13 +581,18 @@ class TagsPage(QWidget):
 
     def _tag_double(self, it, _c):
         key = tuple(it.data(0, Qt.ItemDataRole.UserRole))
-        if vt.is_vt(key[0]):
+        if ag.is_agg(key[0]):
+            self.host.edit_aggregation(key[0][len(ag.AGG_PREFIX):])
+        elif vt.is_vt(key[0]):
             self.host.edit_virtual(key[0][len(vt.VT_PREFIX):])
         elif not ss.is_sys(key[0]):                      # System Tags are read-only: Properties only
             QTimer.singleShot(0, lambda: self.host.edit_tag(*key))
 
     def select_tag(self, did: str, idx: int):
-        if vt.is_vt(did):
+        if ag.is_agg(did):
+            if self._cat != "aggregation" or (did, idx) not in self._rows:
+                self.refresh(("cat", "aggregation"))
+        elif vt.is_vt(did):
             if self._cat != "virtual" or (did, idx) not in self._rows:
                 self.refresh(("cat", "virtual"))
         elif ss.is_sys(did):
@@ -479,7 +603,7 @@ class TagsPage(QWidget):
         it = self._rows.get((did, idx))
         if it is None:                                   # filtered by a group: show the whole device / all
             self.refresh(("cat", "system") if ss.is_sys(did) else ("cat", "virtual") if vt.is_vt(did)
-                         else ("device", did))
+                         else ("cat", "aggregation") if ag.is_agg(did) else ("device", did))
             it = self._rows.get((did, idx))
         if it is not None:
             self.table.clearSelection()
@@ -489,7 +613,13 @@ class TagsPage(QWidget):
     def _tags_selected(self):
         sel = self.selected_tags()
         vsel = self.selected_virtual()
-        if vsel:
+        asel = self.selected_agg()
+        keys = self._selected_keys()
+        if self._cat == "groups" and len(keys) > 1:      # mixed categories: no single Properties target
+            self.host.select_object(None)
+        elif asel:
+            self.host.select_object(("agg", asel[0]) if len(asel) == 1 else None)
+        elif vsel:
             self.host.select_object(("vt", vsel[0]) if len(vsel) == 1 else None)
         elif not sel and self.selected_system():
             self.host.select_object(("sys", self.selected_system()[0][0]))
@@ -513,6 +643,42 @@ class TagsPage(QWidget):
         sel = self.selected_tags()
         dev = self.host.project.device(sel[0][0]) if sel else None
         m = QMenu(self)
+        if self._cat == "groups":                        # Groups: edit it in its own pop-up, or move it
+            keys = self._selected_keys()
+            if it is None or not keys:
+                return
+            m.addAction("Edit...", self._edit).setEnabled(len(keys) == 1)
+            mv = m.addMenu(f"Move to group{'' if len(keys) == 1 else f' ({len(keys)})'}")
+            mv.addAction("(no group)", lambda: self.host.move_to_group(keys, ""))
+            for g in self.host.project.all_groups():
+                mv.addAction(g, lambda gg=g: self.host.move_to_group(keys, gg))
+            self._lock_menu(m)
+            m.exec(self.table.viewport().mapToGlobal(pos))
+            return
+        asel = self.selected_agg()
+        if asel:                                         # aggregation rows: like virtual, plus Reset now
+            if it is None:
+                return
+            xs = [a for a in (self.host.aggregation(i) for i in asel) if a is not None]
+            one, n = len(xs) == 1, len(xs)
+            on = all(a["enabled"] for a in xs)
+            items = [("Edit...", lambda: self.host.edit_aggregation(xs[0]["id"]), one),
+                     ("Duplicate", lambda: self.host.duplicate_aggregation(xs[0]["id"]), one),
+                     (("Disable" if on else "Enable") + ("" if one else f" ({n})"),
+                      lambda: self.host.set_aggregations_enabled([a["id"] for a in xs], not on), True),
+                     ("Reset now...", lambda: self.host.reset_aggregation(xs[0]["id"]), one and ag.has_period(xs[0])),
+                     None,
+                     ("Add alarm...", lambda: self.host.add_alarm_for(ag.agg_key(xs[0]["id"])), one),
+                     None,
+                     (f"Delete {'tag' if one else f'{n} tags'}...", lambda: self.host.delete_aggregations(asel), True)]
+            for item in items:
+                if item is None:
+                    m.addSeparator(); continue
+                text, slot, ok = item
+                m.addAction(text, slot).setEnabled(ok)
+            self._lock_menu(m, keep=("Add alarm...", "Reset now..."))
+            m.exec(self.table.viewport().mapToGlobal(pos))
+            return
         vsel = self.selected_virtual()
         if vsel:                                         # virtual rows: the same short menu as Connectivity
             if it is None:
@@ -616,7 +782,16 @@ class TagsPage(QWidget):
 
     def _edit(self):
         sel = self.selected_tags()
-        if self.selected_virtual():
+        if self._cat == "groups" and not self._selected_keys():
+            if self._pgroup():
+                self.host.edit_project_group(self._pgroup())
+        elif self._cat == "groups" and len(self._selected_keys()) == 1 and not (self.selected_agg() or
+                                                                                 self.selected_virtual()):
+            key = self._selected_keys()[0]
+            QTimer.singleShot(0, lambda: self.host.edit_tag(*key))
+        elif self.selected_agg():
+            self.host.edit_aggregation(self.selected_agg()[0])
+        elif self.selected_virtual():
             self.host.edit_virtual(self.selected_virtual()[0])
         elif sel:
             QTimer.singleShot(0, lambda: self.host.edit_tag(*sel[0]))
@@ -639,7 +814,12 @@ class TagsPage(QWidget):
         if self.host.recording:
             return
         sel = self.selected_tags()            # tags selected: delete them, else the selected group
-        if self.selected_virtual():
+        if self._cat == "groups":             # Groups: deletes the group (its tags move up), never tags
+            if self._pgroup() and not self._selected_keys():
+                self.host.delete_project_group(self._pgroup())
+        elif self.selected_agg():
+            self.host.delete_aggregations(self.selected_agg())
+        elif self.selected_virtual():
             self.host.delete_virtuals(self.selected_virtual())
         elif sel:
             self.host.delete_tags(sel[0][0], [i for d, i in sel if d == sel[0][0]])
@@ -654,9 +834,24 @@ class TagsPage(QWidget):
         tags = bool(self.selected_tags())
         group = self._cat == "device" and self._sel[0] == "group"
         virt = self._cat == "virtual"
-        want = self.vt_menu if virt else self.dev_menu
+        want = {"virtual": self.vt_menu, "aggregation": self.agg_menu, "groups": self.grp_menu}.get(self._cat,
+                                                                                                    self.dev_menu)
         if self.btn_add.menu() is not want:
             self.btn_add.setMenu(want)
+        if self._cat == "aggregation":
+            asel = self.selected_agg()
+            self.btn_add.setEnabled(not rec)
+            self.btn_edit.setEnabled(len(asel) == 1)
+            self.btn_del.setEnabled(bool(asel) and not rec)
+            self.btn_imp.setEnabled(False); self.btn_exp.setEnabled(False)
+            return
+        if self._cat == "groups":
+            keys, g = self._selected_keys(), self._pgroup()
+            self.btn_add.setEnabled(not rec)
+            self.btn_edit.setEnabled(len(keys) == 1 or (not keys and g is not None))
+            self.btn_del.setEnabled(not keys and g is not None and not rec)
+            self.btn_imp.setEnabled(False); self.btn_exp.setEnabled(False)
+            return
         if virt:
             vsel = self.selected_virtual()
             self.btn_add.setEnabled(not rec)

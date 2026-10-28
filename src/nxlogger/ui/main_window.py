@@ -40,6 +40,7 @@ from __future__ import annotations
 import copy
 import csv
 import json
+import threading
 import os
 import queue
 import shutil
@@ -59,6 +60,7 @@ import pyqtgraph as pg
 
 from nxlogger import APP_NAME, __version__, config, paths
 from nxlogger.comms.manager import DriverManager
+from nxlogger.core import aggregation as ag
 from nxlogger.core import alarm_rules as ar
 from nxlogger.core import analysis as an
 from nxlogger.core import channel_math as cm
@@ -78,6 +80,7 @@ from nxlogger.core.tags import (COLORS, CONN_CATEGORIES, DRIVERS, PLANNED, Devic
                                 tags_to_rows)
 from nxlogger.ui.dialogs.about_dialog import show_about
 from nxlogger.ui.dialogs.add_tags_dialog import AddTagsDialog
+from nxlogger.ui.dialogs.aggregation_dialog import AggregationDialog
 from nxlogger.ui.dialogs.alarm_dialog import AlarmDialog
 from nxlogger.ui.dialogs.alarm_profile_dialog import AlarmProfileDialog
 from nxlogger.ui.dialogs.device_dialog import DeviceDialog
@@ -213,6 +216,10 @@ class DaqWindow(AppWindow):
         self.vt_engine.names = self._vt_names
         self.vt_engine.latest = self._vt_latest
         self._vt_seq: dict[str, int] = {}
+        self.agg_engine = ag.AggregationEngine()     # Tags > Aggregation (core/aggregation.py)
+        self.agg_engine.names = self._vt_names
+        self.agg_engine.latest = self._agg_latest
+        self._agg_seq: dict[str, int] = {}
         self._var_groups: dict[str, list[str]] = {}   # recorder group id -> variable ids (rows)
         self._noflash = _NoFlash()                    # no parent: created before the Qt base
         self._alarm_level = None               # last indicator state (repaint only on change)
@@ -272,6 +279,8 @@ class DaqWindow(AppWindow):
         self.draw_timer = QTimer(self, interval=33, timeout=self._drain_and_draw)
         self.draw_timer.start()
         self.stat_timer = QTimer(self, interval=500, timeout=self._update_stats)
+        self._agg_saver = QTimer(self, interval=30_000, timeout=self._agg_save)   # running values (retain)
+        self._agg_saver.start()
         self.stat_timer.start()
 
     def apply_theme(self):
@@ -781,6 +790,8 @@ class DaqWindow(AppWindow):
                 t = props.system_target(self, ref[1])
             elif kind == "vt":
                 t = props.virtual_target(self, ref[1])
+            elif kind == "agg":
+                t = props.aggregation_target(self, ref[1])
             elif kind == "project":
                 t = props.project_target(self)
         self.show_properties(t)
@@ -805,7 +816,7 @@ class DaqWindow(AppWindow):
         k = self._prop_key
         if not k:
             return
-        if k[0] in ("device", "group", "tag", "tags", "project", "vt"):
+        if k[0] in ("device", "group", "tag", "tags", "project", "vt", "agg"):
             ref = k if k[0] != "tags" else ("tags", k[1], list(k[2]))
             self.select_object(ref)
         elif k[0] in ("view", "tile"):
@@ -846,11 +857,13 @@ class DaqWindow(AppWindow):
         self.streams.clear(); self.t_ref = None; self._scan_seq.clear()
         self.variable_engine.reset()
         self.vt_engine.reset(); self._vt_seq.clear()
+        self.agg_engine.reset(); self._agg_seq.clear()
         self.dirty = False
         self.alarm_engine.states.clear()
         self.alarm_engine.reset_data_loss()
         self.alarm_engine.clear_log()
         self._structure_changed()
+        self.agg_engine.restore(self._agg_load())    # running totals / counters kept from last time
         self._update_title()
         self._refresh_sessions()
         self._load_views()
@@ -1182,7 +1195,8 @@ class DaqWindow(AppWindow):
         st = self.streams.get(dev.id)
         k = sum(len(d.tags) for d in self.project.devices[:self.project.devices.index(dev)]) + \
             (dev.tags.index(t) if t in dev.tags else len(dev.tags))
-        dlg = TagDialog(self, dev, t, COLORS[k % len(COLORS)], lambda: st.raw_mean.get(t.index) if st else None)
+        dlg = TagDialog(self, dev, t, COLORS[k % len(COLORS)], lambda: st.raw_mean.get(t.index) if st else None,
+                        self.project.all_groups())
         dlg.setWindowTitle("Add tag" if new else f"Tag - {t.name}")
         where = " · ".join(x for x in (dev.name, driver_label(dev.driver), t.group) if x)
         dlg.ok_btn, title = popup_form(dlg, "tag", "New tag" if new else t.name,
@@ -1220,7 +1234,8 @@ class DaqWindow(AppWindow):
         if dev is None or not self._recording_guard():
             return
         new = not path
-        dlg = GroupDialog(self, dev, path, parent)
+        n = sum(1 for t in dev.tags if path and (t.group == path or t.group.startswith(path + "/")))
+        dlg = GroupDialog(self, dev.name, dev.all_groups(), path, parent, n)
         dlg.setWindowTitle("Add group" if new else f"Group - {path}")
         _ok, title = popup_form(dlg, "folder", "New group" if new else path.rsplit("/", 1)[-1],
                                 f"{dev.name} · folder of tags (use sub-groups for areas, machines ...)",
@@ -1471,6 +1486,7 @@ class DaqWindow(AppWindow):
         self._rebuild_colors()
         self._rebuild_scalers()
         self._virtual_reload()                   # tag names are formula names (inputs may be gone)
+        self._agg_reload()
         self._variables_reload()
         self._rebuild_plots()
         self._alarms_reload()
@@ -1515,6 +1531,9 @@ class DaqWindow(AppWindow):
                 k += 1
 
     def color_of(self, did: str, idx: int) -> str:
+        if ag.is_agg(did):
+            a = self.aggregation(did)
+            return self.agg_color(a) if a else COLORS[0]
         if vt.is_vt(did):
             v = self.virtual_tag(did)
             return self.vt_color(v) if v else COLORS[0]
@@ -1528,6 +1547,22 @@ class DaqWindow(AppWindow):
 
     def tag_live(self, did: str, idx: int):
         """(value text, quality text, good True / False / None, time text) for tables."""
+        if ag.is_agg(did):
+            a = self.aggregation(did)
+            if a is None:
+                return "", "", None, ""
+            if not a["enabled"]:
+                return "", "Disabled", None, ""
+            if a["id"] in self.agg_engine.errors:
+                return "", "Error", False, ""
+            st = self.agg_engine.states.get(a["id"])
+            if st is None:
+                return "", "Waiting", None, ""
+            val = st.previous if idx == 1 else (st.value if st.has else None)
+            text = "" if val is None else f"{val:.{int(a.get('decimals', 2))}f}"
+            good = True if st.quality in ("Good", "Restored") else (False if st.quality == "Error" else None)
+            return (text, st.quality, good,
+                    time.strftime("%H:%M:%S", time.localtime(st.sent)) if st.sent else "")
         if vt.is_vt(did):
             v = self.virtual_tag(did)
             if v is None:
@@ -1744,7 +1779,7 @@ class DaqWindow(AppWindow):
             self.toast.popup("A waveform packet has at most 8 channels")
             return
         if bulk:
-            dlg = AddTagsDialog(self, dev, group)
+            dlg = AddTagsDialog(self, dev, group, self.project.all_groups())
             if not dlg.exec():
                 return
             new = dlg.tags()
@@ -2060,7 +2095,8 @@ class DaqWindow(AppWindow):
         tags = node(root, "Tags", make_icon("tag", T["text"]), ("tagsroot",),
                     "Tag management: Device, Virtual, Action, Aggregation, Memory, System")
         counts = {"device": sum(len(d.tags) for d in self.project.devices), "system": len(self.sys_tags()),
-                  "virtual": len(self.project.virtual_tags)}
+                  "virtual": len(self.project.virtual_tags), "aggregation": len(self.project.aggregations),
+                  "groups": len(self.project.all_groups())}
         for key, name, icon, tip, ready in TAG_CATEGORIES:
             ci = node(tags, name + (f"  ({counts.get(key, 0)})" if ready else ""),
                       make_icon(icon, T["text" if ready else "muted"]), ("tagcat", key), tip)
@@ -2826,6 +2862,8 @@ class DaqWindow(AppWindow):
                 self._structure_changed(); self.tags_page.refresh()
         if self.vt_engine.order:
             self._update_virtual_tags()
+        if self.agg_engine.order:
+            self._update_aggregations()
         self._draw()
 
     def _ingest(self, dev: DeviceCfg, rx: float, payload: bytes, blk):
@@ -3148,6 +3186,10 @@ class DaqWindow(AppWindow):
         if vt.is_vt(tid):
             v = self.virtual_tag(tid)
             return (f"Virtual · {v['name']}" if v else "(deleted virtual tag)"), (v.get("unit", "") if v else "")
+        if ag.is_agg(tid):
+            a = self.aggregation(tid)
+            return ((f"Aggregation · {a['name']}" + (" (previous)" if idx == 1 else "")) if a
+                    else "(deleted aggregation tag)"), (a.get("unit", "") if a else "")
         d = self.project.device(tid)
         t = d.tag(idx) if d else None
         return (f"{d.name} · {t.name}" if t else "(deleted tag)"), (t.unit if t else "")
@@ -3321,6 +3363,14 @@ class DaqWindow(AppWindow):
                 u = v.get("unit", "")
                 out.append((*vt.vt_key(v["id"]), f"Virtual · {v['name']}" + (f" [{u}]" if u else ""),
                             self.vt_color(v), u))
+        for a in self.project.aggregations:          # Aggregation tags (+ the previous period's value)
+            if a["enabled"]:
+                u = a.get("unit", "")
+                out.append((*ag.agg_key(a["id"]), f"Aggregation · {a['name']}" + (f" [{u}]" if u else ""),
+                            self.agg_color(a), u))
+                if a.get("keep_prev") and ag.has_period(a):
+                    out.append((*ag.agg_key(a["id"], 1), f"Aggregation · {a['name']} (previous)"
+                                + (f" [{u}]" if u else ""), self.agg_color(a), u))
         for t in self.sys_tags():                    # System Tags with a number (text is not a stream)
             if t.streamed:
                 out.append((*t.key, f"System · {t.name}" + (f" [{t.unit}]" if t.unit else ""),
@@ -3344,6 +3394,9 @@ class DaqWindow(AppWindow):
         if vt.is_vt(tid):
             v = self.virtual_tag(tid)
             return val, (v.get("unit", "") if v else "")
+        if ag.is_agg(tid):
+            a = self.aggregation(tid)
+            return val, (a.get("unit", "") if a else "")
         if ss.is_sys(tid):
             t = self.sys_tag(tid)
             return val, (t.unit if t else "")
@@ -3409,14 +3462,15 @@ class DaqWindow(AppWindow):
             tid, idx = key
             lbl = names.get((tid, idx), "(deleted)")
             dev, _, name = lbl.partition(" · ")
-            if vr.is_var(tid) or ss.is_sys(tid) or vt.is_vt(tid):
+            if vr.is_var(tid) or ss.is_sys(tid) or vt.is_vt(tid) or ag.is_agg(tid):
                 val, unit = self.last_value(tid, idx)
                 st = self.sys_tag(tid) if ss.is_sys(tid) else None
-                if vt.is_vt(tid):
+                if vt.is_vt(tid) or ag.is_agg(tid):
                     text, qual, good, stamp = self.tag_live(tid, idx)
-                    v = self.virtual_tag(tid)
+                    v = self.virtual_tag(tid) if vt.is_vt(tid) else self.aggregation(tid)
                     out.append({"Tag": name.split(" [")[0], "Value": "-" if val is None else f"{val:.{decimals}f}",
-                                "Unit": unit, "Quality": qual or "No data", "Time": stamp, "Device": "Virtual",
+                                "Unit": unit, "Quality": qual or "No data", "Time": stamp,
+                                "Device": "Virtual" if vt.is_vt(tid) else "Aggregation",
                                 "Description": v.get("description", "") if v else "", "_good": good is not False})
                     continue
                 out.append({"Tag": name.split(" [")[0], "Value": "-" if val is None else f"{val:.{decimals}f}",
@@ -3485,6 +3539,10 @@ class DaqWindow(AppWindow):
         ids.update({cm.identifier(f"System_{t.name}"): t.key for t in self.sys_tags() if t.streamed})
         ids.update({vt.formula_name(v): vt.vt_key(v["id"]) for v in self.project.virtual_tags
                     if v.get("dtype") != "text"})
+        for a in self.project.aggregations:
+            ids[ag.formula_name(a)] = ag.agg_key(a["id"])
+            if a.get("keep_prev") and ag.has_period(a):
+                ids[ag.formula_name(a, True)] = ag.agg_key(a["id"], 1)
         return ids
 
     def _variables_reload(self):
@@ -3557,6 +3615,9 @@ class DaqWindow(AppWindow):
         if vt.is_vt(tid):
             v = self.virtual_tag(tid)
             return f"Virtual · {v['name']}" if v else "(deleted virtual tag)"
+        if ag.is_agg(tid):
+            a = self.aggregation(tid)
+            return (f"Aggregation · {a['name']}" + (" (previous)" if idx == 1 else "")) if a else "(deleted)"
         if ss.is_sys(tid):
             t = self.sys_tag(tid)
             return f"System · {t.name}" if t else "(removed system tag)"
@@ -3587,6 +3648,8 @@ class DaqWindow(AppWindow):
     def _vt_latest(self, key):
         """(value or None when missing / bad / stale / disabled, stamp) of an input."""
         tid, idx = key
+        if ag.is_agg(tid):
+            return self.agg_engine.value(tid[len(ag.AGG_PREFIX):], idx)
         if ss.is_sys(tid):
             t = self.sys_tag(tid)
             val = self.sys_values.get(t.id) if t else None
@@ -3678,7 +3741,7 @@ class DaqWindow(AppWindow):
         else:
             v = copy.deepcopy(cur)
         taken = {x["name"].strip().lower() for x in self.project.virtual_tags if x["id"] != v["id"]}
-        groups = {x.get("group", "") for x in self.project.virtual_tags}
+        groups = self.project.all_groups()
         dlg = VirtualTagDialog(self, v, self.vt_engine, self.vt_choices(), self._vt_names(), groups,
                                self.tag_live, self._vt_pick, taken, self.vt_color({**v, "color": ""}))
         label_, icon, what = vt.TYPES[v["kind"]]
@@ -3741,6 +3804,307 @@ class DaqWindow(AppWindow):
         for v in vs:
             v["enabled"] = on
         self.virtual_changed()
+
+    # ================================================================ Aggregation tags (core/aggregation.py)
+    def aggregation(self, aid: str) -> dict | None:
+        """By key topic ("agg:<id>") or id."""
+        aid = aid[len(ag.AGG_PREFIX):] if ag.is_agg(aid) else aid
+        return next((a for a in self.project.aggregations if a["id"] == aid), None)
+
+    def agg_color(self, a: dict) -> str:
+        if a.get("color"):
+            return a["color"]
+        i = next((k for k, x in enumerate(self.project.aggregations) if x["id"] == a["id"]),
+                 len(self.project.aggregations))
+        return COLORS[(i + 6) % len(COLORS)]
+
+    def agg_describe(self, a: dict) -> str:
+        return ag.describe(a, self.key_label)
+
+    def _agg_latest(self, key):
+        """Inputs of an aggregation: any number tag, virtual ones from their engine."""
+        tid, idx = key
+        if vt.is_vt(tid):
+            r = self.vt_engine.results.get(tid[len(vt.VT_PREFIX):])
+            if r is None:
+                return None, None
+            return (r.value if r.good and not isinstance(r.value, str) else None), r.stamp
+        return self._vt_latest(key)
+
+    def _agg_reload(self):
+        eng = self.agg_engine
+        eng.set_tags(self.project.aggregations)
+        for msg in {f"Aggregation tag '{a['name']}': {eng.errors[a['id']]}" for a in self.project.aggregations
+                    if a["enabled"] and a["id"] in eng.errors}:
+            self._log(msg)
+
+    def _agg_file(self):
+        return paths.data_dir() / "aggregation_state.json"
+
+    def _agg_project_key(self) -> str:
+        return os.path.abspath(self.project_path) if self.project_path else f"(unsaved) {self.project.name}"
+
+    def _agg_load(self) -> dict:
+        """The running values kept for this project (retain), or {}."""
+        try:
+            data = json.loads(self._agg_file().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data.get(self._agg_project_key(), {}) if isinstance(data, dict) else {}
+
+    def _agg_save(self, wait: bool = False):
+        """Every 30 s and on exit: the running values to the user data folder (a worker writes)."""
+        snap = self.agg_engine.snapshot()
+        if not snap:
+            return
+        f, key = self._agg_file(), self._agg_project_key()
+
+        def write():
+            try:
+                data = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+            except (OSError, ValueError):
+                data = {}
+            data = data if isinstance(data, dict) else {}
+            data[key] = snap
+            try:
+                f.parent.mkdir(parents=True, exist_ok=True)
+                tmp = f.with_suffix(".tmp")
+                tmp.write_text(json.dumps(data), encoding="utf-8")
+                os.replace(tmp, f)
+            except OSError:
+                pass                                 # not worth a message: it is tried again in 30 s
+        th = threading.Thread(target=write, daemon=True)
+        th.start()
+        if wait:
+            th.join(2.0)
+
+    def aggregations_changed(self):
+        """Added / edited / deleted: recompile, fresh buffers, everything that lists tags. Running
+        values of unchanged tags stay (a totalizer does not restart because another was added)."""
+        self._mark_dirty()
+        keep = {a["id"] for a in self.project.aggregations}
+        for tid in [k for k in self.streams if ag.is_agg(k) and k[len(ag.AGG_PREFIX):] not in keep]:
+            del self.streams[tid]
+        self._agg_reload()
+        self._virtual_reload()                   # Aggregation_<name> in virtual formulas
+        self._variables_reload()
+        self._rebuild_project_tree()
+        self._alarms_reload()
+        self._stat_dirty = True
+        self.tags_page.refresh()
+        self._refresh_properties()
+        for page in self.view_pages.values():
+            page.restyle()
+
+    def _update_aggregations(self):
+        """GUI timer: update every aggregation; changed values (or once a second) go through the
+        data path like a device block: channel 0 the value, 1 the previous period's."""
+        done = self.agg_engine.evaluate()
+        if not done:
+            return
+        if self.t_ref is None:
+            self.t_ref = time.time()
+        now = time.time()
+        for a, st in done:
+            tid = ag.AGG_PREFIX + a["id"]
+            n = self._agg_seq[tid] = self._agg_seq.get(tid, 0) + 1
+            prev = a.get("keep_prev") and ag.has_period(a)
+            ys = [st.value if st.has and st.quality != "Error" else np.nan]
+            if prev:
+                ys.append(np.nan if st.previous is None else st.previous)
+            vb = vr.VarBlock(n & 0xFFFF, n, now, 0.5, np.array(ys, dtype=float).reshape(-1, 1),
+                             channels=list(range(len(ys))))
+            self.streams.setdefault(tid, TopicStream()).feed(vb, self.t_ref)
+            for i in range(len(ys)):
+                self.alarm_engine.feed(tid, i, now, vb.y[i])
+                if self.stats.wants((tid, i)):
+                    self.stats.feed((tid, i), np.array([now]), vb.y[i])
+            self._compute_variables(tid, now, vb)
+
+    def add_aggregation(self, kind: str, group: str = ""):
+        if self._recording_guard():
+            QTimer.singleShot(0, lambda: self._agg_popup(None, kind, group))
+
+    def edit_aggregation(self, aid: str):
+        QTimer.singleShot(0, lambda: self._agg_popup(aid))
+
+    def _agg_popup(self, aid: str | None = None, kind: str = "totalizer", group: str = ""):
+        """Add / Edit aggregation tag pop-up (tabs): joins the project or changes only on Add tag / Save."""
+        new = aid is None
+        cur = None if new else self.aggregation(aid)
+        if not new and cur is None:
+            return
+        if new:
+            a = ag.new_aggregation(kind)
+            a["group"] = group
+            a["name"] = self._unique_name(a["name"], {x["name"] for x in self.project.aggregations})
+        else:
+            a = copy.deepcopy(cur)
+        taken = {x["name"].strip().lower() for x in self.project.aggregations if x["id"] != a["id"]}
+        choices = [c for c in self.channel_choices() if not (ag.is_agg(c[0]) and c[0] == ag.AGG_PREFIX + a["id"])]
+        dlg = AggregationDialog(self, a, self.agg_engine, choices, self._vt_names(), self.project.all_groups(),
+                                self.tag_live, taken, self.agg_color({**a, "color": ""}))
+        label_, icon, what = ag.TYPES[a["kind"]]
+        dlg.setWindowTitle("Add aggregation tag" if new else f"Aggregation tag - {a['name']}")
+        dlg.ok_btn, title = popup_form(dlg, icon, "New aggregation tag" if new else a["name"],
+                                       f"Aggregation tag · {label_} · {what}", "Add tag" if new else "Save", width=560)
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or ("New aggregation tag" if new else a["name"])))
+        dlg.tabs.setCurrentIndex(1 if new else 0)
+        dlg.resize(dlg.width(), 520)
+        dlg._check()
+        if self.recording:
+            dlg.locked = True
+            dlg.ok_btn.setEnabled(False)
+            set_prop(dlg.err, "level", "bad"); dlg.err.setText("Stop recording to change aggregation tags.")
+            dlg._timer.stop()
+        if not dlg.exec() or self.recording:
+            return
+        if new:
+            dlg.apply(a)
+            self.project.aggregations.append(a)
+        else:
+            rule = {k: cur.get(k) for k in ("kind", "source", "rate_per", "factor", "edge", "time_unit", "hold",
+                                            "change", "change_per", "stat", "win_n", "win_unit", "win_mode")}
+            dlg.apply(cur)
+            a = cur
+            if rule != {k: cur.get(k) for k in rule}:    # what it adds up changed: start again
+                self.agg_engine.states.pop(cur["id"], None)
+        self.aggregations_changed()
+        QTimer.singleShot(0, lambda: self.tags_page.select_tag(*ag.agg_key(a["id"])))
+        self.set_status(f"Aggregation tag '{a['name']}' " + ("added" if new else "saved"), "ok")
+
+    def duplicate_aggregation(self, aid: str):
+        cur = self.aggregation(aid)
+        if cur is None or not self._recording_guard():
+            return
+        a = copy.deepcopy(cur)
+        a["id"] = ag.new_aggregation()["id"]
+        a["name"] = self._unique_name(f"{cur['name']}_copy", {x["name"] for x in self.project.aggregations})
+        lst = self.project.aggregations
+        lst.insert(lst.index(cur) + 1, a)
+        self.aggregations_changed()
+        QTimer.singleShot(0, lambda: self.tags_page.select_tag(*ag.agg_key(a["id"])))
+
+    def delete_aggregations(self, aids: list[str]):
+        xs = [a for a in (self.aggregation(i) for i in aids) if a is not None]
+        if not xs or not self._recording_guard():
+            return
+        what = f"aggregation tag '{xs[0]['name']}'" if len(xs) == 1 else f"{len(xs)} aggregation tags"
+        if not confirm(self, "Delete aggregation tags" if len(xs) > 1 else "Delete aggregation tag",
+                       f"Delete {what}?", f"Delete {len(xs)} tags" if len(xs) > 1 else "Delete tag",
+                       "Their running values are lost. Alarms and views that show them keep a '(deleted)' entry."):
+            return
+        self.project.aggregations[:] = [a for a in self.project.aggregations if a not in xs]
+        for a in xs:
+            self.agg_engine.states.pop(a["id"], None)
+        self.select_object(None)
+        self.aggregations_changed()
+
+    def set_aggregations_enabled(self, aids: list[str], on: bool):
+        xs = [a for a in (self.aggregation(i) for i in aids) if a is not None]
+        if not xs or not self._recording_guard():
+            return
+        for a in xs:
+            a["enabled"] = on
+        self.aggregations_changed()
+
+    def reset_aggregation(self, aid: str):
+        a = self.aggregation(aid)
+        if a is None or not ag.has_period(a):
+            return
+        st = self.agg_engine.states.get(aid)
+        now = f"{st.value:.{a.get('decimals', 2)}f} {a.get('unit', '')}".strip() if st is not None else "-"
+        keep = " It becomes the previous period's value." if a.get("keep_prev") else ""
+        if not confirm(self, "Reset aggregation tag", f"Reset '{a['name']}' to 0 now?", "Reset",
+                       f"Now: {now}.{keep}"):
+            return
+        self.agg_engine.reset_now(aid)
+        self._log(f"Aggregation tag '{a['name']}' reset by hand (was {now})")
+        self._refresh_properties()
+
+    # ================================================================ Groups (Tags > Groups: one tree for all tags)
+    def _regroup(self, fix):
+        """Apply fix(path) -> path to every group path of the project (devices, tags, virtual,
+        aggregation, the project's own list)."""
+        self.project.groups = sorted({g for g in (fix(x) for x in self.project.groups) if g})
+        for d in self.project.devices:
+            d.groups = sorted({g for g in (fix(x) for x in d.groups) if g})
+            for t in d.tags:
+                t.group = fix(t.group)
+        for x in self.project.virtual_tags + self.project.aggregations:
+            x["group"] = fix(x.get("group", ""))
+
+    def group_count(self, path: str) -> int:
+        inside = lambda g: bool(g) and (g == path or g.startswith(path + "/"))    # noqa: E731
+        return (sum(1 for d in self.project.devices for t in d.tags if inside(t.group))
+                + sum(1 for x in self.project.virtual_tags + self.project.aggregations if inside(x.get("group", ""))))
+
+    def add_project_group(self, parent: str = ""):
+        if not self._recording_guard():
+            return
+        dlg = GroupDialog(self, "Project (all tags)", self.project.all_groups(), "", parent, root="(top level)")
+        dlg.setWindowTitle("Add group")
+        _ok, title = popup_form(dlg, "folder", "New group", "Tags > Groups · one tree for all tags (areas, machines ...)",
+                                "Add group", width=480)
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or "New group"))
+        if not dlg.exec() or self.recording:
+            return
+        newp = dlg.result_path()
+        self.project.groups = sorted(set(self.project.groups) | {newp})
+        self._groups_changed(newp)
+
+    def edit_project_group(self, path: str):
+        if not path or not self._recording_guard():
+            return
+        dlg = GroupDialog(self, "Project (all tags)", self.project.all_groups(), path, "", self.group_count(path),
+                          root="(top level)")
+        dlg.setWindowTitle(f"Group - {path}")
+        _ok, title = popup_form(dlg, "folder", path.rsplit("/", 1)[-1],
+                                "Tags > Groups · renaming moves its tags and sub-groups along", "Save", width=480)
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or path))
+        if not dlg.exec() or self.recording:
+            return
+        newp = dlg.result_path()
+        if newp != path:
+            self._regroup(lambda g: newp + g[len(path):] if g == path or g.startswith(path + "/") else g)
+        self._groups_changed(newp)
+
+    def delete_project_group(self, path: str):
+        if not path or not self._recording_guard():
+            return
+        n = self.group_count(path)
+        up = path.rsplit("/", 1)[0] if "/" in path else ""
+        if not confirm(self, "Delete group", f"Delete group '{path}'?", "Delete group",
+                       f"Its {n} tag(s) and sub-groups move up to {up or 'the top level'} - no tag is deleted."
+                       if n else "It holds no tags."):
+            return
+        self._regroup(lambda g: (up + "/" + g[len(path) + 1:]).strip("/") if g.startswith(path + "/")
+                      else (up if g == path else g))
+        self._groups_changed(up or None)
+
+    def move_to_group(self, keys, group: str):
+        """Put tags of any category (device, virtual, aggregation keys) into a project group."""
+        if not self._recording_guard():
+            return
+        for tid, idx in keys:
+            if vt.is_vt(tid):
+                x = self.virtual_tag(tid)
+            elif ag.is_agg(tid):
+                x = self.aggregation(tid)
+            else:
+                t = self.project.tag(tid, idx)
+                if t is not None:
+                    t.group = group
+                continue
+            if x is not None:
+                x["group"] = group
+        self._groups_changed(group or None)
+
+    def _groups_changed(self, select: str | None):
+        self._mark_dirty()
+        self._rebuild_project_tree()
+        self.tags_page.refresh(("pgroup", select) if select else ("cat", "groups"))
+        self._refresh_properties()
 
     # ================================================================ System Tags (core/system_tags.py)
     def sys_tags(self) -> list[ss.SysTag]:
@@ -4030,6 +4394,7 @@ class DaqWindow(AppWindow):
             e.ignore(); return
         self._ml_stop()
         self.drivers.stop_all()
+        self._agg_save(wait=True)
         super().closeEvent(e)
 
 

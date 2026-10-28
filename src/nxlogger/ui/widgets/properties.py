@@ -10,6 +10,9 @@ values. `w` is the main window (DaqWindow); the functions use its small API:
 """
 from __future__ import annotations
 
+import time
+
+from nxlogger.core import aggregation as ag
 from nxlogger.core import analysis as an
 from nxlogger.core import channel_math as cm
 from nxlogger.core import system_tags as ss
@@ -303,6 +306,55 @@ def virtual_target(w, vid: str) -> PropTarget | None:
     return PropTarget(v["name"], vt.TYPES[v["kind"]][1], f"Virtual tag · {vt.TYPES[v['kind']][0]}",
                       [("Live", live), ("General", [F(k, k, "info", "") for k in rows])],
                       {**rows, **values()}, None, actions, live=values, key=("vt", vid), readonly=True)
+
+
+def _span(s: float) -> str:
+    s = max(0, int(s))
+    return f"{s // 86400} d {s % 86400 // 3600} h" if s >= 86400 else f"{s // 3600} h {s % 3600 // 60} min" \
+        if s >= 3600 else f"{s // 60} min {s % 60} s"
+
+
+def aggregation_target(w, aid: str) -> PropTarget | None:
+    """An Aggregation tag: read-only here (changed in its pop-up, Edit...), live value, previous
+    period, period start and the time to the next reset."""
+    a = w.aggregation(aid)
+    if a is None:
+        return None
+    period = ag.has_period(a)
+    rows = {"Name": a["name"], "Type": ag.TYPES[a["kind"]][0], "Group": a.get("group") or "-",
+            "Unit": a.get("unit") or "-", "Definition": w.agg_describe(a), "Period": ag.describe_period(a),
+            "Formula name": ag.formula_name(a) + (f", {ag.formula_name(a, True)}" if period and a.get("keep_prev")
+                                                   else ""),
+            "Keep on restart": ("Yes" if a.get("retain") else "No") if period else "-",
+            "Enabled": "Yes" if a["enabled"] else "No", "Description": a.get("description") or "-"}
+    live = [F("value", "Value", "info", ""),
+            F("quality", "Quality", "info", "", level_of=lambda q: "ok" if q == "Good" else
+              ("bad" if q == "Error" else ("warn" if q == "Paused" else ""))),
+            F("previous", "Previous period", "info", ""), F("since", "Since", "info", ""),
+            F("next", "Next reset", "info", ""), F("message", "Message", "info", "")]
+    key = ag.agg_key(aid)
+
+    def values():
+        val, qual, _g, _stamp = w.tag_live(*key)
+        st = w.agg_engine.states.get(aid)
+        unit = a.get("unit", "")
+        prev = st.previous if st is not None else None
+        nxt = st.next if st is not None else None
+        held = (f"  (at {time.strftime('%H:%M:%S', time.localtime(st.hold_t))})"
+                if st is not None and a["kind"] == "minmax" and st.hold_t else "")
+        return {"value": (f"{val} {unit}".strip() + held) if val else "-", "quality": qual or "-",
+                "previous": f"{prev:.{a.get('decimals', 2)}f} {unit}".strip() if prev is not None else "-",
+                "since": time.strftime("%Y-%m-%d %H:%M", time.localtime(st.start)) if st is not None and st.start
+                else "-",
+                "next": f"{time.strftime('%a %H:%M', time.localtime(nxt))}  (in {_span(nxt - time.time())})"
+                if nxt else "-", "message": (st.msg if st is not None and st.msg else "-")}
+    actions = [("Edit...", "pencil", lambda: w.edit_aggregation(aid))]
+    if period:
+        actions.append(("Reset now...", "refresh", lambda: w.reset_aggregation(aid)))
+    actions.append(("Alarm", "bell", lambda: w.add_alarm_for(key)))
+    return PropTarget(a["name"], ag.TYPES[a["kind"]][1], f"Aggregation tag · {ag.TYPES[a['kind']][0]}",
+                      [("Live", live), ("General", [F(k, k, "info", "") for k in rows])],
+                      {**rows, **values()}, None, actions, live=values, key=("agg", aid), readonly=True)
 
 
 def system_target(w, tid: str) -> PropTarget | None:

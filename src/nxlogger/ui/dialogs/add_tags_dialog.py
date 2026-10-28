@@ -9,7 +9,7 @@ from nxlogger.ui.theme.ui_kit import label, set_prop
 
 
 class AddTagsDialog(QDialog):
-    def __init__(self, parent, dev: DeviceCfg, group: str = ""):
+    def __init__(self, parent, dev: DeviceCfg, group: str = "", groups=None):
         super().__init__(parent)
         self.dev = dev
         self.setWindowTitle(f"Add tags - {dev.name}")
@@ -21,7 +21,8 @@ class AddTagsDialog(QDialog):
         self.first = QSpinBox(minimum=1, maximum=100000, value=dev.next_index() + 1)
         self.first.setToolTip("Number used for {n} in the first tag")
         self.group = QComboBox(); self.group.setEditable(True)
-        self.group.addItems([""] + dev.all_groups()); self.group.setCurrentText(group)
+        self.group.addItems([""] + (dev.all_groups() if groups is None else list(groups)))
+        self.group.setCurrentText(group)
         f.addRow("How many", self.count)
         f.addRow("Name", self.name)
         f.addRow("First number", self.first)

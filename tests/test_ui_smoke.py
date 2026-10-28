@@ -197,6 +197,91 @@ def test_virtual_tags_popup_page_and_data_path(win, monkeypatch):
     win.doc_tabs.setCurrentIndex(front)
 
 
+def test_aggregation_tags_and_project_groups(win, monkeypatch, tmp_path):
+    from PySide6.QtCore import Qt
+    from nxlogger.core import aggregation as ag
+    from nxlogger.ui.dialogs import aggregation_dialog as ad
+    monkeypatch.setattr("nxlogger.ui.main_window.paths.data_dir", lambda: tmp_path)
+    monkeypatch.setattr("nxlogger.ui.main_window.confirm", lambda *a_, **k_: True)
+    front = win.doc_tabs.currentIndex()
+    dev = win.project.devices[0]
+    src = (dev.id, dev.tags[0].index)
+
+    def add_exec(dlg):                                   # tabs, then Add tag
+        assert [dlg.tabs.tabText(i).split("  ")[0] for i in range(dlg.tabs.count())] == \
+            ["General", "Totalizer", "Period", "Display"]
+        assert not dlg.ok_btn.isEnabled() and "source" in dlg.err.text()
+        dlg.source.setCurrentIndex(dlg.source.findData(list(src)))
+        dlg.rate_per.setCurrentIndex(dlg.rate_per.findData("s")); dlg.skip_neg.setChecked(False)
+        dlg.reset.setCurrentIndex(dlg.reset.findData("day")); dlg.reset_at.setText("6:7x")
+        assert not dlg.ok_btn.isEnabled() and "●" in dlg.tabs.tabText(2)      # bad time: Period tab
+        dlg.reset_at.setText("06:00"); dlg.name.setText("Total"); dlg.group.setCurrentText("Plant/Area1")
+        assert dlg.ok_btn.isEnabled() and "Next reset" in dlg.next_reset.text()
+        dlg._ok()
+        return True
+    monkeypatch.setattr(ad.AggregationDialog, "exec", add_exec)
+    win._agg_popup(None, "totalizer")
+    a = next(x for x in win.project.aggregations if x["name"] == "Total")
+    assert a["source"] == list(src) and a["reset"] == "day" and not win.agg_engine.errors
+
+    dev.scan_ms = 50
+    win._start_all(); _pump(1.0)
+    st = win.agg_engine.states[a["id"]]
+    assert st.value != 0 and win.tag_live(*ag.agg_key(a["id"]))[1] == "Good"
+    keys = {(c[0], c[1]) for c in win.channel_choices()}
+    assert ag.agg_key(a["id"]) in keys and ag.agg_key(a["id"], 1) in keys       # value and previous
+    assert "Aggregation_Total" in win._channel_ids() and "Aggregation_Total_Previous" in win._channel_ids()
+    was = st.value
+    win.reset_aggregation(a["id"])                       # Reset now: the value becomes Previous
+    assert st.previous == was and abs(st.value) < abs(was) + 1e-9
+    win.select_object(("agg", a["id"]))
+    assert win._prop_key == ("agg", a["id"])
+    win._stop_all()
+    win._agg_save(wait=True)                             # retain: written to the data folder ...
+    assert (tmp_path / "aggregation_state.json").exists()
+    kept = st.value
+    win.agg_engine.reset()
+    win.agg_engine.restore(win._agg_load())              # ... and back after a restart
+    assert win.agg_engine.states[a["id"]].value == pytest.approx(kept)
+
+    page = win.tags_page                                 # Tags > Aggregation
+    win._show_doc("tags"); page.refresh(("cat", "aggregation"))
+    assert ag.agg_key(a["id"]) in page._rows and page.btn_add.menu() is page.agg_menu
+    page.select_tag(*ag.agg_key(a["id"]))
+    assert page.selected_agg() == [a["id"]] and page.btn_edit.isEnabled() and not page.btn_imp.isEnabled()
+    menu_texts = []
+
+    def grab():                                          # read the open row menu, then close it
+        m = QtWidgets.QApplication.activePopupWidget()
+        if m is not None:
+            menu_texts.extend(x.text() for x in m.actions())
+            m.close()
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(150, grab)
+    page._tag_menu(page.table.visualItemRect(page._rows[ag.agg_key(a["id"])]).center())
+    assert "Reset now..." in menu_texts and menu_texts[-1] == "Delete tag..."
+
+    # Groups: one tree for all tags - a device tag and the aggregation tag in the same group
+    win.move_to_group([src], "Plant/Area1")
+    page.refresh(("cat", "groups"))
+    data = [page.dtree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole) for i in range(page.dtree.topLevelItemCount())]
+    assert data[0] == ("all",) and ("pgroup", "Plant") in data and data[-1] == ("pnone",)
+    page.refresh(("pgroup", "Plant"))                    # a parent shows its sub-groups' tags too
+    assert set(page._rows) == {src, ag.agg_key(a["id"])} and win.group_count("Plant") == 2
+    assert page.btn_add.menu() is page.grp_menu and page.btn_del.isEnabled()
+    monkeypatch.setattr(win, "_recording_guard", lambda: True)
+    win._regroup(lambda g: "Site" + g[len("Plant"):] if g == "Plant" or g.startswith("Plant/") else g)  # rename
+    assert dev.tags[0].group == "Site/Area1" and a["group"] == "Site/Area1"
+    win.delete_project_group("Site/Area1")               # its tags move up, none is deleted
+    assert dev.tags[0].group == "Site" and a["group"] == "Site" and dev.tags[0] in dev.tags
+    win.move_to_group([src, ag.agg_key(a["id"])], "")
+    assert "Site" not in win.project.all_groups()        # a group nobody uses (and not kept empty) is gone
+    win.delete_aggregations([a["id"]])
+    assert win.project.aggregations == [] and a["id"] not in win.agg_engine.states
+    page.refresh(("cat", "device"))
+    win.doc_tabs.setCurrentIndex(front)
+
+
 def test_properties_panel_targets(win):
     dev = win.project.devices[0]
     for ref in (("device", dev.id), ("tag", dev.id, 0), ("project",)):
@@ -230,10 +315,10 @@ def test_tree_layout(win):
     assert cc == [("conncat", "protocols"), ("conncat", "database"), ("conncat", "web")]
     assert all(conn.child(i).childCount() == 0 for i in range(3))
     assert conn.child(0).text(0) == f"Protocols  ({len(win.project.devices)})"
-    tags = kids["Tags"]                                     # six categories, flat
+    tags = kids["Tags"]                                     # six categories + Groups, flat
     cats = [tags.child(i).data(0, Qt.ItemDataRole.UserRole) for i in range(tags.childCount())]
-    assert [c[1] for c in cats] == ["device", "virtual", "action", "aggregation", "memory", "system"]
-    assert all(c[0] == "tagcat" for c in cats) and all(tags.child(i).childCount() == 0 for i in range(6))
+    assert [c[1] for c in cats] == ["device", "virtual", "action", "aggregation", "memory", "system", "groups"]
+    assert all(c[0] == "tagcat" for c in cats) and all(tags.child(i).childCount() == 0 for i in range(7))
 
 
 def test_system_tags(win):
