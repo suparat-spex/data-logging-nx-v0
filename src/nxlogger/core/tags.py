@@ -115,6 +115,30 @@ MODBUS_ADDRESS = [F("area", "Area", "choice", "holding", list(MODBUS_AREAS)),
 for _k in ("modbus_tcp", "modbus_rtu"):
     DRIVERS[_k]["address"] = MODBUS_ADDRESS
 PLANNED = {"opcda"}                          # listed, cannot be started yet
+for _d in DRIVERS.values():                  # every driver so far is a field / IoT protocol
+    _d.setdefault("category", "protocols")
+
+# Connectivity categories: the Project tree's Connectivity nodes and the left list of the
+# Connectivity document. A device's category comes from its driver - nothing is stored.
+CONN_CATEGORIES = [   # (key, name, icon, what it is)
+    ("protocols", "Protocols", "factory", "Industrial and IoT protocols: Modbus TCP / RTU, OPC UA, MQTT, Simulation"),
+    ("database", "Database", "database", "SQL and time-series databases: read tags from a query or log to them"),
+    ("web", "Web Services", "globe", "HTTP APIs, webhooks, WebSocket, Firebase and the MCP server for AI clients"),
+]
+CONNECTORS_PLANNED = {   # connectors listed (muted) before they have a driver: category -> [(label, icon)]
+    "database": [("MySQL", "database"), ("PostgreSQL", "database"), ("InfluxDB", "database")],
+    "web": [("REST / HTTP", "globe"), ("Webhook (in)", "globe"), ("WebSocket", "globe"),
+            ("Firebase", "globe"), ("MCP Server", "brain-circuit")],
+}
+
+
+def driver_category(d: str) -> str:
+    return DRIVERS.get(d, {}).get("category", "protocols")
+
+
+def category_drivers(cat: str) -> list[str]:
+    """The drivers of a category in list order: ready ones, Simulation, then planned ones."""
+    return sorted((k for k in DRIVERS if driver_category(k) == cat), key=lambda k: (k in PLANNED, k == "sim"))
 SCAN_CHOICES = [100, 200, 250, 500, 1000, 2000, 5000, 10000, 60000]     # ms
 
 

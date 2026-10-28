@@ -16,6 +16,7 @@ from nxlogger import paths
 from nxlogger.core import alarm_rules as ar
 from nxlogger.core import ml_log as mlg
 from nxlogger.core import variables as vr
+from nxlogger.core import virtual_tags as vt
 from nxlogger.core.tags import (ChannelCfg, DeviceCfg, TagCfg, device_from_dict,
                                 device_from_topic, new_device, tag_color)
 from nxlogger.core.view_model import default_view, normalize_view, split_tabs
@@ -82,6 +83,7 @@ class Project:
     alarm_profiles: list[dict] = field(default_factory=list)    # notification targets
     alarm_settings: dict = field(default_factory=lambda: {"sound": True, "front": False})
     variables: list[dict] = field(default_factory=list)         # calculated channels (variables.py)
+    virtual_tags: list[dict] = field(default_factory=list)      # Tags > Virtual (virtual_tags.py)
     quick_hidden: list = field(default_factory=list)            # [[device_id, index]] not in Quick View
     ml_log: dict = field(default_factory=mlg.new_settings)   # AI/ML data log (core/ml_log.py)
     migrated_from: str = ""                                  # "" or the old format (not saved)
@@ -119,7 +121,7 @@ class Project:
                 logging_profiles=d.get("logging_profiles", []), alarms=d.get("alarms", []),
                 alarm_profiles=d.get("alarm_profiles", []),
                 alarm_settings={**cls().alarm_settings, **d.get("alarm_settings", {})},
-                variables=d.get("variables", []), quick_hidden=d.get("quick_hidden", []),
+                variables=d.get("variables", []), virtual_tags=d.get("virtual_tags", []), quick_hidden=d.get("quick_hidden", []),
                 ml_log={**mlg.new_settings(), **d.get("ml_log", {})}, migrated_from=migrated)
         if "logging_profiles" not in d:          # v5 file: its one format becomes a profile
             p.logging_profiles = [{**new_log_profile("signal", "Waveform"), "format": p.logging.format,
@@ -140,6 +142,8 @@ class Project:
         p.logging.format = "CSV" if p.logging.format == "TDMS" else p.logging.format
         for x in p.variables:
             vr.normalize_variable(x)
+        for x in p.virtual_tags:                 # files before Virtual tags: none, new fields: defaults
+            vt.normalize_virtual(x)
         p.views = [y for x in p.views for y in split_tabs(x)]   # early v7 tabs -> separate views
         for x in p.views:                        # free-form views -> grid, new tile properties
             normalize_view(x)

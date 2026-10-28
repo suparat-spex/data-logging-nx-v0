@@ -14,6 +14,7 @@ from nxlogger.core import analysis as an
 from nxlogger.core import channel_math as cm
 from nxlogger.core import system_tags as ss
 from nxlogger.core import view_model as vm
+from nxlogger.core import virtual_tags as vt
 from nxlogger.core.tags import DRIVERS, F, describe_address, driver_label
 from nxlogger.ui.widgets.property_grid import PropTarget
 
@@ -270,6 +271,38 @@ def simple_target(title: str, icon: str, subtitle: str, rows: dict, actions=(), 
     """Read-only summary (alarms, variables, logging profiles: edited in their own dialogs)."""
     return PropTarget(title, icon, subtitle, [("Summary", [F(k, k, "info", "") for k in rows])], dict(rows),
                       None, list(actions), key=key)
+
+
+def virtual_target(w, vid: str) -> PropTarget | None:
+    """A Virtual tag: read-only here (changed in its pop-up, Edit...), with its live value."""
+    v = w.virtual_tag(vid)
+    if v is None:
+        return None
+    text = v.get("dtype") == "text"
+    rows = {"Name": v["name"], "Type": vt.TYPES[v["kind"]][0], "Data type": vt.DTYPES[v.get("dtype", "number")],
+            "Group": v.get("group") or "-", "Unit": v.get("unit") or "-",
+            "Definition": w.vt_describe(v) or "-",
+            "Inputs": ", ".join(f"{i['alias']} = {w.key_label(tuple(i['key']))}" for i in v.get("inputs", [])) or "-",
+            "Update": "-" if v["kind"] in vt.NO_INPUT else vt.UPDATES.get(v.get("update"), "-"),
+            "Formula name": "- (text)" if text else vt.formula_name(v), "Enabled": "Yes" if v["enabled"] else "No",
+            "Description": v.get("description") or "-"}
+    live = [F("value", "Value", "info", ""),
+            F("quality", "Quality", "info", "", level_of=lambda q: "ok" if q.startswith("Good") else
+              ("bad" if q in ("Bad", "Error") else ("warn" if q == "Held" else ""))),
+            F("message", "Message", "info", ""), F("time", "Updated", "info", "")]
+    key = vt.vt_key(vid)
+
+    def values():
+        val, qual, _g, stamp = w.tag_live(*key)
+        r = w.vt_engine.results.get(vid)
+        return {"value": f"{val} {v.get('unit', '')}".strip() if val else "-", "quality": qual or "-",
+                "message": (r.msg if r is not None and r.msg else "-"), "time": stamp or "-"}
+    actions = [("Edit...", "pencil", lambda: w.edit_virtual(vid))]
+    if not text:
+        actions.append(("Alarm", "bell", lambda: w.add_alarm_for(key)))
+    return PropTarget(v["name"], vt.TYPES[v["kind"]][1], f"Virtual tag · {vt.TYPES[v['kind']][0]}",
+                      [("Live", live), ("General", [F(k, k, "info", "") for k in rows])],
+                      {**rows, **values()}, None, actions, live=values, key=("vt", vid), readonly=True)
 
 
 def system_target(w, tid: str) -> PropTarget | None:

@@ -102,6 +102,101 @@ def test_simulator_feeds_tags_views_and_stats(win):
     assert not win.drivers.any_running
 
 
+def test_virtual_tags_popup_page_and_data_path(win, monkeypatch):
+    from PySide6.QtCore import Qt
+    from nxlogger.core import virtual_tags as vt
+    from nxlogger.ui.dialogs import virtual_tag_dialog as vd
+    dev = win.project.devices[0]
+    a, b = (dev.id, dev.tags[0].index), (dev.id, dev.tags[1].index)
+    monkeypatch.setattr(win, "_vt_pick", lambda *_a, **_k: [list(a), list(b)])
+    front = win.doc_tabs.currentIndex()                 # put back for the next tests
+
+    def add_exec(dlg):                                   # the pop-up: tabs, live check, then Add tag
+        assert [dlg.tabs.tabText(i).split("  ")[0] for i in range(dlg.tabs.count())] == \
+            ["General", "Expression", "Calculation", "Display"]
+        assert not dlg.ok_btn.isEnabled() and "●" in dlg.tabs.tabText(1)      # no formula yet
+        dlg._add_inputs()
+        assert [dlg.in_tree.topLevelItem(i).text(0) for i in range(2)] == ["A", "B"]
+        dlg.expr.setText("A +")
+        assert not dlg.ok_btn.isEnabled() and "Syntax" in dlg.err.text()
+        dlg.expr.setText("(A + B) * 2")
+        dlg.name.setText("Sum2")
+        assert dlg.ok_btn.isEnabled() and dlg.err.text() == "✓ Ready"
+        dlg._ok()
+        return True
+    monkeypatch.setattr(vd.VirtualTagDialog, "exec", add_exec)
+    win._vt_popup(None, "formula")
+    v = next(x for x in win.project.virtual_tags if x["name"] == "Sum2")
+    assert v["inputs"][1] == {"alias": "B", "key": list(b)} and not win.vt_engine.errors
+
+    def edit_exec(dlg):                                  # editing: its own Virtual_<name> is not "taken"
+        assert dlg.ok_btn.isEnabled() and dlg.ok_btn.text() == "Save", dlg.err.text()
+        assert dlg.color_btn.text() == win.vt_color(v)      # General shows the real colour, like device tags
+        dlg._set_color("#123456")
+        assert dlg.collect()["color"] == "#123456"
+        dlg._set_color(dlg.default_color)                    # Default: saved as "" (palette colour)
+        assert dlg.collect()["color"] == ""
+        return False
+    monkeypatch.setattr(vd.VirtualTagDialog, "exec", edit_exec)
+    win._vt_popup(v["id"])
+
+    def const_exec(dlg):
+        assert dlg.tabs.count() == 3                     # a constant has no Calculation tab
+        dlg.value.setText("0.5"); dlg.name.setText("Half")
+        dlg._ok()
+        return True
+    monkeypatch.setattr(vd.VirtualTagDialog, "exec", const_exec)
+    win._vt_popup(None, "constant")
+    half = next(x for x in win.project.virtual_tags if x["name"] == "Half")
+
+    def map_exec(dlg):
+        dlg.source.setCurrentIndex(dlg.source.findData(list(a)))
+        dlg.mode_ranges.setChecked(True)
+        dlg.map.setRowCount(0)
+        dlg._map_row({"lo": None, "hi": 0, "text": "Low", "color": "warn"})
+        dlg._map_row({"lo": 0, "hi": None, "text": "High", "color": "ok"})
+        dlg.name.setText("Side")
+        dlg._ok()
+        return True
+    monkeypatch.setattr(vd.VirtualTagDialog, "exec", map_exec)
+    win._vt_popup(None, "textmap")
+    side = next(x for x in win.project.virtual_tags if x["name"] == "Side")
+    assert side["map_mode"] == "ranges" and side["map"][1]["color"] == "ok" and side["dtype"] == "text"
+
+    dev.scan_ms = 50                                     # live data: simulator -> virtual tags
+    win._start_all(); _pump(1.2)
+    val, qual, good, _t = win.tag_live(*vt.vt_key(v["id"]))
+    assert val and qual == "Good" and good is True
+    expect = (win.last_value(*a)[0] + win.last_value(*b)[0]) * 2
+    assert abs(float(val) - expect) < 1.0                # same scan, give or take a tick
+    assert win.tag_live(*vt.vt_key(side["id"]))[0] in ("Low", "High")
+    assert win.tag_live(*vt.vt_key(half["id"]))[0] == "0.50"
+    keys = {(c[0], c[1]) for c in win.channel_choices()}
+    assert vt.vt_key(v["id"]) in keys and vt.vt_key(side["id"]) not in keys    # text: not a stream
+    assert win.last_value(*vt.vt_key(v["id"]))[0] is not None                 # it has a stream
+    assert "Virtual_Sum2" in win._channel_ids()
+    win._stop_all()
+
+    page = win.tags_page                                 # Tags > Virtual: list by type, table, menu
+    win._show_doc("tags"); page.refresh(("cat", "virtual"))
+    data = [page.dtree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole) for i in range(page.dtree.topLevelItemCount())]
+    assert data[:7] == [("all",)] + [("vtype", k) for k in vt.TYPES]
+    assert vt.vt_key(v["id"]) in page._rows and page.btn_add.menu() is page.vt_menu
+    page.select_tag(*vt.vt_key(v["id"]))
+    assert page.selected_virtual() == [v["id"]] and win._prop_key == ("vt", v["id"])
+    assert page.btn_edit.isEnabled() and not page.btn_imp.isEnabled()
+    page.refresh(("vtype", "constant"))
+    assert set(page._rows) == {vt.vt_key(half["id"])}
+    win.duplicate_virtual(half["id"])
+    assert any(x["name"] == "Half copy" for x in win.project.virtual_tags)
+    monkeypatch.setattr("nxlogger.ui.main_window.confirm", lambda *a_, **k_: True)
+    win.delete_virtuals([x["id"] for x in win.project.virtual_tags])
+    assert win.project.virtual_tags == [] and not any(vt.is_vt(k) for k in win.streams)
+    page.refresh(("cat", "device"))
+    assert page.btn_add.menu() is page.dev_menu
+    win.doc_tabs.setCurrentIndex(front)
+
+
 def test_properties_panel_targets(win):
     dev = win.project.devices[0]
     for ref in (("device", dev.id), ("tag", dev.id, 0), ("project",)):
@@ -130,9 +225,11 @@ def test_tree_layout(win):
     root = win.ptree.topLevelItem(0)
     kids = {root.child(i).text(0).split("  ")[0]: root.child(i) for i in range(root.childCount())}
     assert "Quick View" not in kids and "Tags" in kids and "Connectivity" in kids
-    conn = kids["Connectivity"]
-    assert conn.childCount() == len(win.project.devices)
-    assert all(conn.child(i).childCount() == 0 for i in range(conn.childCount()))      # devices only
+    conn = kids["Connectivity"]                             # three categories, flat (no devices)
+    cc = [conn.child(i).data(0, Qt.ItemDataRole.UserRole) for i in range(conn.childCount())]
+    assert cc == [("conncat", "protocols"), ("conncat", "database"), ("conncat", "web")]
+    assert all(conn.child(i).childCount() == 0 for i in range(3))
+    assert conn.child(0).text(0) == f"Protocols  ({len(win.project.devices)})"
     tags = kids["Tags"]                                     # six categories, flat
     cats = [tags.child(i).data(0, Qt.ItemDataRole.UserRole) for i in range(tags.childCount())]
     assert [c[1] for c in cats] == ["device", "virtual", "action", "aggregation", "memory", "system"]
@@ -327,6 +424,39 @@ def test_connectivity_device_table(win, monkeypatch, tmp_path):
     assert len(win.project.devices) == n and win.project.devices[0] is dev
 
 
+def test_connectivity_categories(win):
+    from PySide6.QtCore import Qt
+    page = win.conn_page
+    win._show_doc("connectivity")
+    data = lambda: [page.clist.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)     # noqa: E731
+                    for i in range(page.clist.topLevelItemCount())]
+    page.show_category("protocols")
+    assert data()[0] == ("all",) and ("driver", "opcua") in data() and data()[-1] == ("driver", "opcda")
+    assert page.band.text.text() == "Protocols"
+    dev = win.project.devices[0]
+    page._list_selected(page.clist.topLevelItem(data().index(("driver", dev.driver))))
+    QtWidgets.QApplication.processEvents()                  # the refresh is deferred
+    assert set(page._rows) == {d.id for d in win.project.devices if d.driver == dev.driver}
+    assert page.selected() == []                            # switching clears the selection: Properties empty
+    assert page.empty_hint()[0] == "No device selected" and win._empty_hint()[0] == "No device selected"
+    page.select(dev.id); page.activate()
+    assert page.selected() == [dev.id]
+    page.show_category("database")                          # planned connectors only: empty, Add has no live item
+    assert page.table.topLevelItemCount() == 0 and ("planned", "MySQL") in data()
+    assert page.selected() == [] and win._prop_key is None
+    assert page.empty_hint()[0] == "No database selected" and "planned" in page.empty_hint()[1]
+    page.activate()                                         # coming back does not pick a row by itself
+    page.show_category("web")
+    assert page.empty_hint()[0] == "No web service selected"
+    page._fill_add_menu()
+    assert page.add_menu.actions() and not any(a.isEnabled() for a in page.add_menu.actions())
+    page.select(dev.id)                                     # a device elsewhere: its category, All connections
+    assert page.category == "protocols" and page.selected() == [dev.id]
+    texts = [a.text() for a in page.build_menu([dev]).actions() if a.text()]
+    assert texts[:3] == ["Edit device...", "Open tags", "Connect"] and texts[-1] == "Delete device..."
+    assert page.build_menu([]).actions() == []               # empty space: no menu
+
+
 def test_fixed_width_buttons(win):
     from PySide6.QtCore import Qt
     from nxlogger.ui.theme.ui_kit import refit
@@ -511,22 +641,23 @@ def test_device_row_menu(win, monkeypatch):
     page.select(dev.id)
     m = page.build_menu([dev])
     acts = [a for a in m.actions() if not a.isSeparator()]
-    assert [a.text() for a in acts] == ["Edit device...", "Disable device", "Duplicate", "Export...", "Delete device"]
+    assert [a.text() for a in acts] == ["Edit device...", "Open tags", "Connect", "Disable device", "Duplicate",
+                                        "Export...", "Delete device..."]
     from PySide6.QtCore import Qt
     assert QtWidgets.QApplication.testAttribute(Qt.ApplicationAttribute.AA_DontShowIconsInMenus)   # text-only menus
-    acts[1].trigger()                                          # Disable device
+    acts[3].trigger()                                          # Disable device
     assert not dev.enabled
-    assert [a.text() for a in page.build_menu([dev]).actions() if not a.isSeparator()][1] == "Enable device"
+    assert [a.text() for a in page.build_menu([dev]).actions() if not a.isSeparator()][3] == "Enable device"
     page._toggle_enabled()
     assert dev.enabled
     opened = []
     monkeypatch.setattr(win, "edit_device", lambda did: opened.append(did))
     acts[0].trigger(); _pump(0.05)
     assert opened == [dev.id]
-    two = [dev, dev]                                           # several rows: no Edit / Duplicate
+    two = [dev, dev]                                           # several rows: no Edit / Open tags / Duplicate
     multi = {a.text(): a.isEnabled() for a in page.build_menu(two).actions() if not a.isSeparator()}
-    assert multi == {"Edit device...": False, "Disable 2 devices": True, "Duplicate": False,
-                     "Export...": True, "Delete 2 devices": True}
+    assert multi == {"Edit device...": False, "Open tags": False, "Connect (2)": True, "Disable 2 devices": True,
+                     "Duplicate": False, "Export...": True, "Delete 2 devices...": True}
 
 
 def test_menus_text_only_same_indent(win):

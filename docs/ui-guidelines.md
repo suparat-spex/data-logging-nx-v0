@@ -49,7 +49,7 @@ brings its tab to the front.
 
 ## Pop-ups
 
-The Connectivity and Tags pages work alike: their items (devices, tags, groups) are added and
+The Connectivity and Tags pages work alike: their items (devices, tags, groups, virtual tags) are added and
 edited in a settings pop-up (header band, body, footer *Cancel* · *verb*) and are
 read-only in the Properties panel. A tabbed form gets that look with `common.popup_form()`.
 The body is tabs (default - long forms) or one page of titled sections (`common.POPUP_STYLE`);

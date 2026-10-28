@@ -6,7 +6,8 @@ Tags come in six categories (CATEGORIES, also the Project tree's Tags nodes). Th
 one category at a time - the one chosen in the Project tree:
   Device       acquires the data: the tags of the devices. The devices come from Connectivity
                (picked here, never added or edited here)
-  Virtual      calculates from it            (planned - calculated tags are Variables for now)
+  Virtual      derives from it: constants, formulas, conversions, logic, selectors, text maps
+               (core/virtual_tags.py; added / edited in a pop-up like device tags)
   Action       responds to it: logic, outputs, triggers                       (planned)
   Aggregation  summarizes it statistically                                    (planned)
   Memory       values set by the user: setpoints, constants                   (planned)
@@ -17,6 +18,7 @@ one category at a time - the one chosen in the Project tree:
          not apply (like Connectivity)
   left   the category as a band (like a Properties section), below it its list:
          Device: All tags, devices (connector icon in the state colour) > groups
+         Virtual: All tags, one row per type, then the groups
          System: All tags, Clock, App, Recording, Alarms, Devices > one group per device
   right  tag table: name, group, address, type, access, unit, live value, quality, time of
          the last value, description
@@ -37,20 +39,23 @@ Host API (duck-typed, DaqWindow):
   host.move_tags(did, [idx], group) / host.set_tags_enabled(did, [idx], on) / host.write_tag(did, idx)
   host.browse_opcua(did, group) / host.add_alarm_for(key)
   host.import_tags(did) / host.export_tags(did | None, [(did, idx)])    (pop-ups like Connectivity's)
+  host.project.virtual_tags / host.vt_engine / host.vt_describe(v) / host.virtual_tag(vid)
+  host.add_virtual(kind, group) / host.edit_virtual(vid) / host.duplicate_virtual(vid)
+  host.delete_virtuals([vid]) / host.set_virtuals_enabled([vid], on)      (pop-ups; key ("vt:<id>", 0))
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings, QSize, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QIcon, QKeySequence, QPainter, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
+from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtGui import QBrush, QColor, QIcon, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLineEdit, QMenu,
                                QSplitter, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from nxlogger.core import system_tags as ss
+from nxlogger.core import virtual_tags as vt
 from nxlogger.core.tags import DRIVERS, describe_address, driver_label
 from nxlogger.ui.icons import swatch
-from nxlogger.ui.theme.app_style import blend
 from nxlogger.ui.theme.ui_kit import T, label, make_icon, vsep
-from nxlogger.ui.widgets.connectivity import STATE_TOKEN
+from nxlogger.ui.widgets.connectivity import STATE_TOKEN, Band
 
 COLS = ["Name", "Device", "Group", "Address", "Type", "Access", "Unit", "Value", "Quality", "Updated", "Description"]
 C_VALUE, C_QUAL, C_TIME = COLS.index("Value"), COLS.index("Quality"), COLS.index("Updated")
@@ -58,7 +63,8 @@ C_FILTER = [COLS.index(c) for c in ("Name", "Device", "Group", "Address", "Descr
 HIDDEN_KEY = "tags/hidden_columns"                # QSettings: column names the user hid
 CATEGORIES = [   # (key, name, icon, what it is, ready)
     ("device", "Device", "plug", "Acquires the data: the tags of the devices", True),
-    ("virtual", "Virtual", "function-square", "Calculates from it - planned (calculated tags are in Variables)", False),
+    ("virtual", "Virtual", "function-square",
+     "Derives from it: constants, formulas, conversions, logic, selectors, text maps", True),
     ("action", "Action", "power", "Responds to it: logic, outputs, triggers - planned", False),
     ("aggregation", "Aggregation", "sigma", "Summarizes it statistically - planned", False),
     ("memory", "Memory", "database", "Values set by the user: setpoints, constants - planned", False),
@@ -66,34 +72,6 @@ CATEGORIES = [   # (key, name, icon, what it is, ready)
 ]
 CAT = {c[0]: c for c in CATEGORIES}
 SYS_GROUPS = ["Clock", "App", "Recording", "Alarms"]     # then "Devices" > one group per device
-
-
-class _Band(QFrame):
-    """The category heading: the same full-width band as a Properties section (neutral theme
-    colours read from T at paint time, so a theme switch needs no restyle)."""
-
-    def __init__(self):
-        super().__init__()
-        self.setFixedHeight(26)
-        h = QHBoxLayout(self); h.setContentsMargins(8, 0, 8, 0); h.setSpacing(6)
-        self.icon, self.text = QLabel(), QLabel()
-        f = self.text.font(); f.setWeight(f.Weight.DemiBold); self.text.setFont(f)
-        self.text.setStyleSheet("background: transparent;"); self.icon.setStyleSheet("background: transparent;")
-        h.addWidget(self.icon); h.addWidget(self.text, 1)
-
-    def set(self, name: str, icon: str, tip: str):
-        self.text.setText(name)
-        self.icon.setPixmap(make_icon(icon, T["text"]).pixmap(QSize(16, 16)))
-        self.setToolTip(tip)
-
-    def paintEvent(self, e):
-        p = QPainter(self)
-        r = self.rect()
-        p.fillRect(r, QColor(blend(T["hover"], T["panel"], 0.7)))
-        p.setPen(QColor(T["border"]))
-        p.drawLine(r.left(), r.top(), r.right(), r.top())
-        p.drawLine(r.left(), r.bottom(), r.right(), r.bottom())
-        p.end()
 
 
 class TagsPage(QWidget):
@@ -115,6 +93,10 @@ class TagsPage(QWidget):
         self.act_group = m.addAction("Group...", self._add_group)
         m.addSeparator()
         self.act_browse = m.addAction("Browse OPC UA server...", self._browse)
+        self.dev_menu = m
+        self.vt_menu = QMenu(self.btn_add)             # Virtual: one item per type
+        for k, (text, _ic, _what) in vt.TYPES.items():
+            self.vt_menu.addAction(text + "...", lambda kk=k: self.host.add_virtual(kk, self._vt_group()))
         self.btn_add.setMenu(m); self.btn_add.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.btn_edit = self._button("Edit", "pencil", self._edit, "Edit the selected tag or group (double-click a row)")
         self.btn_del = self._button("", "trash", self._delete, "Delete the selected tags or group (Del)")
@@ -139,7 +121,7 @@ class TagsPage(QWidget):
         self.filter.textChanged.connect(lambda _: self._apply_filter())
         bl.addWidget(self.filter)
 
-        self.band = _Band()
+        self.band = Band()
         self.dtree = QTreeWidget(); self.dtree.setObjectName("navTree")
         self.dtree.setHeaderHidden(True); self.dtree.setIndentation(14)
         self.dtree.setProperty("plainSel", True)        # neutral selection, like the Properties bands
@@ -205,7 +187,8 @@ class TagsPage(QWidget):
             if select[0] == "cat":
                 self._cat, self._sel = select[1], ("all",)
             else:
-                self._cat = "system" if select[0] in ("sysgroup", "sysdev") else "device"
+                self._cat = ("system" if select[0] in ("sysgroup", "sysdev") else
+                             "virtual" if select[0] in ("vtype", "vgroup") else "device")
                 self._sel = tuple(select)
         key, name, icon, tip, ready = CAT[self._cat]
         self.band.set(name + ("" if ready else "  (planned)"), icon, tip)
@@ -253,6 +236,19 @@ class TagsPage(QWidget):
                     add(devs, d.name, ("sysdev", d.id), make_icon(DRIVERS.get(d.driver, {}).get("icon", "server"),
                                                                   T["muted"]))
                 devs.setExpanded(True)
+        elif self._cat == "virtual":
+            vts = self.host.project.virtual_tags
+            add(None, f"All tags  ({len(vts)})", ("all",), make_icon("list", T["text"]), "Every virtual tag")
+            for k, (text, ic, what) in vt.TYPES.items():
+                n = sum(1 for v in vts if v["kind"] == k)
+                it = add(None, f"{text}  ({n})", ("vtype", k), make_icon(ic, T["text" if n else "muted"]), what)
+                if not n:
+                    it.setForeground(0, muted)
+                if any(v["kind"] == k and v["id"] in self.host.vt_engine.errors for v in vts):
+                    it.setForeground(0, QBrush(QColor(T["bad"])))      # one of them has an error
+            for g in sorted({v.get("group", "") for v in vts} - {""}):
+                add(None, f"{g}  ({sum(1 for v in vts if v.get('group') == g)})", ("vgroup", g),
+                    make_icon("folder", T["muted"]), f"Group {g}")
         cur = items.get(self._sel) or items.get(("all",))
         if cur is None and self._sel[:1] == ("group",):    # group gone: its device
             cur = items.get(("device", self._sel[1]))
@@ -350,6 +346,8 @@ class TagsPage(QWidget):
             self._fill_system()
         elif self._cat == "device":
             self._fill_device()
+        elif self._cat == "virtual":
+            self._fill_virtual()
         else:
             self.hint.setText(f"{CAT[self._cat][1]} tags: {CAT[self._cat][3]}.")
         self.table.setSortingEnabled(True)
@@ -399,6 +397,28 @@ class TagsPage(QWidget):
         self.hint.setText(f"{len(self._rows)} system tag(s) in {where} · read-only, updated twice a second · "
                           "numbers work in views, alarms and formulas (System_<name>)")
 
+    def _fill_virtual(self):
+        sel = self._sel
+        muted = QBrush(QColor(T["muted"]))
+        for v in self.host.project.virtual_tags:
+            if (sel[0] == "vtype" and v["kind"] != sel[1]) or (sel[0] == "vgroup" and v.get("group") != sel[1]):
+                continue
+            typ = vt.TYPES[v["kind"]][0] + ("" if v.get("dtype") == "number" else f" · {vt.DTYPES[v['dtype']]}")
+            key = vt.vt_key(v["id"])
+            self._add_row(key, [v["name"], "Virtual", v.get("group", ""), self.host.vt_describe(v), typ, "R",
+                                v.get("unit", ""), "", "", "", v.get("description", "")],
+                          self.host.color_of(*key), None if v["enabled"] else muted)
+            err = self.host.vt_engine.errors.get(v["id"])
+            if err:
+                self._rows[key].setToolTip(0, err)
+        n, errs = len(self._rows), sum(1 for v in self.host.project.virtual_tags if v["id"] in self.host.vt_engine.errors)
+        if not self.host.project.virtual_tags:
+            self.hint.setText("No virtual tags - Add > Constant, Formula, Conversion, Logic, Selector or Text map")
+        else:
+            self.hint.setText(f"{n} virtual tag(s)" + (f" · {errs} with an error" if errs else "") +
+                              " · numbers work in views, alarms and formulas (Virtual_<name>) · "
+                              "double-click to edit, right-click for more")
+
     def update_live(self):
         """Value / quality / time columns (called twice a second while the page is visible)."""
         bad, ok, muted = QBrush(QColor(T["bad"])), QBrush(QColor(T["ok"])), QBrush(QColor(T["muted"]))
@@ -412,6 +432,11 @@ class TagsPage(QWidget):
                 it.setForeground(C_VALUE, bad if good is False else QBrush())
             if it.text(C_TIME) != stamp:
                 it.setText(C_TIME, stamp)
+            if vt.is_vt(did):                            # a text map's row colour (theme token)
+                r = self.host.vt_engine.results.get(did[len(vt.VT_PREFIX):])
+                tok = r.color if r is not None and r.color in T else ""
+                it.setForeground(C_VALUE, QBrush(QColor(T[tok])) if tok else
+                                 (QBrush(QColor(T["bad"])) if good is False else QBrush()))
 
     def _apply_filter(self):
         text = self.filter.text().strip().lower()
@@ -420,7 +445,14 @@ class TagsPage(QWidget):
 
     def selected_tags(self) -> list[tuple[str, int]]:
         """Selected device tags (System Tags are not edited: see selected_system)."""
-        return [k for k in self._selected_keys() if not ss.is_sys(k[0])]
+        return [k for k in self._selected_keys() if not ss.is_sys(k[0]) and not vt.is_vt(k[0])]
+
+    def selected_virtual(self) -> list[str]:
+        """Ids of the selected virtual tags."""
+        return [k[0][len(vt.VT_PREFIX):] for k in self._selected_keys() if vt.is_vt(k[0])]
+
+    def _vt_group(self) -> str:
+        return self._sel[1] if self._cat == "virtual" and self._sel[0] == "vgroup" else ""
 
     def selected_system(self) -> list[tuple[str, int]]:
         return [k for k in self._selected_keys() if ss.is_sys(k[0])]
@@ -430,18 +462,24 @@ class TagsPage(QWidget):
 
     def _tag_double(self, it, _c):
         key = tuple(it.data(0, Qt.ItemDataRole.UserRole))
-        if not ss.is_sys(key[0]):                        # System Tags are read-only: Properties only
+        if vt.is_vt(key[0]):
+            self.host.edit_virtual(key[0][len(vt.VT_PREFIX):])
+        elif not ss.is_sys(key[0]):                      # System Tags are read-only: Properties only
             QTimer.singleShot(0, lambda: self.host.edit_tag(*key))
 
     def select_tag(self, did: str, idx: int):
-        if ss.is_sys(did):
+        if vt.is_vt(did):
+            if self._cat != "virtual" or (did, idx) not in self._rows:
+                self.refresh(("cat", "virtual"))
+        elif ss.is_sys(did):
             if self._cat != "system":
                 self.refresh(("cat", "system"))
         elif self._cat != "device" or self._sel[1:2] != (did,):
             self.refresh(("device", did))
         it = self._rows.get((did, idx))
         if it is None:                                   # filtered by a group: show the whole device / all
-            self.refresh(("cat", "system") if ss.is_sys(did) else ("device", did))
+            self.refresh(("cat", "system") if ss.is_sys(did) else ("cat", "virtual") if vt.is_vt(did)
+                         else ("device", did))
             it = self._rows.get((did, idx))
         if it is not None:
             self.table.clearSelection()
@@ -450,7 +488,10 @@ class TagsPage(QWidget):
 
     def _tags_selected(self):
         sel = self.selected_tags()
-        if not sel and self.selected_system():
+        vsel = self.selected_virtual()
+        if vsel:
+            self.host.select_object(("vt", vsel[0]) if len(vsel) == 1 else None)
+        elif not sel and self.selected_system():
             self.host.select_object(("sys", self.selected_system()[0][0]))
         elif len(sel) == 1:
             self.host.select_object(("tag", *sel[0]))
@@ -472,6 +513,30 @@ class TagsPage(QWidget):
         sel = self.selected_tags()
         dev = self.host.project.device(sel[0][0]) if sel else None
         m = QMenu(self)
+        vsel = self.selected_virtual()
+        if vsel:                                         # virtual rows: the same short menu as Connectivity
+            if it is None:
+                return
+            vs = [v for v in (self.host.virtual_tag(i) for i in vsel) if v is not None]
+            one, n = len(vs) == 1, len(vs)
+            on = all(v["enabled"] for v in vs)
+            items = [("Edit...", lambda: self.host.edit_virtual(vs[0]["id"]), one),
+                     ("Duplicate", lambda: self.host.duplicate_virtual(vs[0]["id"]), one),
+                     (("Disable" if on else "Enable") + ("" if one else f" ({n})"),
+                      lambda: self.host.set_virtuals_enabled([v["id"] for v in vs], not on), True),
+                     None,
+                     ("Add alarm...", lambda: self.host.add_alarm_for(vt.vt_key(vs[0]["id"])),
+                      one and vs[0].get("dtype") != "text"),
+                     None,
+                     (f"Delete {'tag' if one else f'{n} tags'}...", lambda: self.host.delete_virtuals(vsel), True)]
+            for item in items:
+                if item is None:
+                    m.addSeparator(); continue
+                text, slot, ok = item
+                m.addAction(text, slot).setEnabled(ok)
+            self._lock_menu(m, keep=("Add alarm...",))
+            m.exec(self.table.viewport().mapToGlobal(pos))
+            return
         if self.selected_system():
             key = self.selected_system()[0]
             t = self.host.sys_tag(key[0])
@@ -551,7 +616,9 @@ class TagsPage(QWidget):
 
     def _edit(self):
         sel = self.selected_tags()
-        if sel:
+        if self.selected_virtual():
+            self.host.edit_virtual(self.selected_virtual()[0])
+        elif sel:
             QTimer.singleShot(0, lambda: self.host.edit_tag(*sel[0]))
         elif not self.selected_system() and self._sel[0] == "group":
             g = self._sel[1:]
@@ -572,7 +639,9 @@ class TagsPage(QWidget):
         if self.host.recording:
             return
         sel = self.selected_tags()            # tags selected: delete them, else the selected group
-        if sel:
+        if self.selected_virtual():
+            self.host.delete_virtuals(self.selected_virtual())
+        elif sel:
             self.host.delete_tags(sel[0][0], [i for d, i in sel if d == sel[0][0]])
         elif not self.selected_system() and self._sel[0] == "group":
             self.host.delete_group(self._sel[1], self._sel[2])
@@ -584,6 +653,17 @@ class TagsPage(QWidget):
         has = dev is not None
         tags = bool(self.selected_tags())
         group = self._cat == "device" and self._sel[0] == "group"
+        virt = self._cat == "virtual"
+        want = self.vt_menu if virt else self.dev_menu
+        if self.btn_add.menu() is not want:
+            self.btn_add.setMenu(want)
+        if virt:
+            vsel = self.selected_virtual()
+            self.btn_add.setEnabled(not rec)
+            self.btn_edit.setEnabled(len(vsel) == 1)
+            self.btn_del.setEnabled(bool(vsel) and not rec)
+            self.btn_imp.setEnabled(False); self.btn_exp.setEnabled(False)
+            return
         self.btn_add.setEnabled(has and not rec)
         self.act_browse.setEnabled(has and dev.driver == "opcua")
         self.btn_edit.setEnabled(tags or group)

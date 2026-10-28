@@ -67,13 +67,14 @@ from nxlogger.core import recording as dl
 from nxlogger.core import stat_buffer as sb
 from nxlogger.core import system_tags as ss
 from nxlogger.core import variables as vr
+from nxlogger.core import virtual_tags as vt
 from nxlogger.core import view_model as vmod
 from nxlogger.core import wavepacket as wp
 from nxlogger.core.project import (OLD_PROJECT_EXTS, PROJECT_EXT, Project, fmt_interval, new_log_profile)
 from nxlogger.core.ring import MAX_PLOT_S, TopicStream
-from nxlogger.core.tags import (COLORS, DRIVERS, PLANNED, DeviceCfg, ScanBlock, TagCfg, describe_address,
+from nxlogger.core.tags import (COLORS, CONN_CATEGORIES, DRIVERS, PLANNED, DeviceCfg, ScanBlock, TagCfg, describe_address,
                                 DEVICE_COLS, devices_to_json,
-                                devices_to_rows, driver_label, new_device, new_tag, secret_keys,
+                                devices_to_rows, driver_category, driver_label, new_device, new_tag, secret_keys,
                                 tags_to_rows)
 from nxlogger.ui.dialogs.about_dialog import show_about
 from nxlogger.ui.dialogs.add_tags_dialog import AddTagsDialog
@@ -95,6 +96,7 @@ from nxlogger.ui.dialogs.pick_dialog import PickDialog
 from nxlogger.ui.dialogs.tag_dialog import TagDialog
 from nxlogger.ui.dialogs.tile_dialog import TileDialog
 from nxlogger.ui.dialogs.variable_dialog import VariableDialog
+from nxlogger.ui.dialogs.virtual_tag_dialog import VirtualTagDialog
 from nxlogger.ui.dialogs.view_dialog import ViewDialog
 from nxlogger.ui.dialogs.write_value_dialog import WriteValueDialog
 from nxlogger.ui.icons import check_icon_file, grip_icon_file, level_icon, swatch
@@ -132,7 +134,7 @@ CHIP_W = 132                    # status chips keep one width whatever the text
 
 
 # ======================================================================= window
-HEADER_NODES = ("project", "doc", "tagsroot", "alarms", "vars", "views")   # Project tree sections: no right-click menu
+HEADER_NODES = ("project", "doc", "conncat", "tagsroot", "alarms", "vars", "views")   # Project tree sections: no right-click menu
 
 
 class _NoFlash(QObject):
@@ -207,6 +209,10 @@ class DaqWindow(AppWindow):
         self.variable_engine.history = self._history
         self.variable_engine.latest = lambda key: self.last_value(*key)[0]
         self.variable_engine.window_stat = self._window_stat
+        self.vt_engine = vt.VirtualEngine()          # Tags > Virtual (core/virtual_tags.py)
+        self.vt_engine.names = self._vt_names
+        self.vt_engine.latest = self._vt_latest
+        self._vt_seq: dict[str, int] = {}
         self._var_groups: dict[str, list[str]] = {}   # recorder group id -> variable ids (rows)
         self._noflash = _NoFlash()                    # no parent: created before the Qt base
         self._alarm_level = None               # last indicator state (repaint only on change)
@@ -773,6 +779,8 @@ class DaqWindow(AppWindow):
                 t = props.tags_target(self, ref[1], ref[2])
             elif kind == "sys":
                 t = props.system_target(self, ref[1])
+            elif kind == "vt":
+                t = props.virtual_target(self, ref[1])
             elif kind == "project":
                 t = props.project_target(self)
         self.show_properties(t)
@@ -781,11 +789,7 @@ class DaqWindow(AppWindow):
         """Properties with nothing selected: say what to select on the tab in front."""
         page = self.doc_tabs.currentWidget() if hasattr(self, "doc_tabs") else None
         if page is getattr(self, "conn_page", None):
-            if not self.project.devices:
-                return "No devices", "Add or import a device to view its settings"
-            if len(self.conn_page.selected()) > 1:
-                return f"{len(self.conn_page.selected())} devices selected", "Select one device to view its settings"
-            return "No device selected", "Select a device to view its settings"
+            return self.conn_page.empty_hint()          # in the category's words (device / database / web service)
         if page is getattr(self, "tags_page", None):
             return "No tag selected", "Select a device, group or tag to view its settings"
         if isinstance(page, dv.ViewPage):
@@ -801,7 +805,7 @@ class DaqWindow(AppWindow):
         k = self._prop_key
         if not k:
             return
-        if k[0] in ("device", "group", "tag", "tags", "project"):
+        if k[0] in ("device", "group", "tag", "tags", "project", "vt"):
             ref = k if k[0] != "tags" else ("tags", k[1], list(k[2]))
             self.select_object(ref)
         elif k[0] in ("view", "tile"):
@@ -841,6 +845,7 @@ class DaqWindow(AppWindow):
         self._loading = False
         self.streams.clear(); self.t_ref = None; self._scan_seq.clear()
         self.variable_engine.reset()
+        self.vt_engine.reset(); self._vt_seq.clear()
         self.dirty = False
         self.alarm_engine.states.clear()
         self.alarm_engine.reset_data_loss()
@@ -1465,7 +1470,8 @@ class DaqWindow(AppWindow):
         """Devices / tags changed: scaling, formula names, alarms, plots, logging, statistics."""
         self._rebuild_colors()
         self._rebuild_scalers()
-        self._variables_reload()                 # tag names are formula names
+        self._virtual_reload()                   # tag names are formula names (inputs may be gone)
+        self._variables_reload()
         self._rebuild_plots()
         self._alarms_reload()
         self._update_logging_help()
@@ -1509,6 +1515,9 @@ class DaqWindow(AppWindow):
                 k += 1
 
     def color_of(self, did: str, idx: int) -> str:
+        if vt.is_vt(did):
+            v = self.virtual_tag(did)
+            return self.vt_color(v) if v else COLORS[0]
         if ss.is_sys(did):
             t = self.sys_tag(did)
             return self.sys_color(t) if t else COLORS[0]
@@ -1519,6 +1528,19 @@ class DaqWindow(AppWindow):
 
     def tag_live(self, did: str, idx: int):
         """(value text, quality text, good True / False / None, time text) for tables."""
+        if vt.is_vt(did):
+            v = self.virtual_tag(did)
+            if v is None:
+                return "", "", None, ""
+            if not v["enabled"]:
+                return "", "Disabled", None, ""
+            r = self.vt_engine.results.get(v["id"])
+            if r is None:
+                return "", "Waiting", None, ""
+            good = True if r.good and r.quality.startswith("Good") else (None if r.quality in ("Held", "Waiting")
+                                                                          else False)
+            return (vt.format_value(v, r.value), r.quality, good,
+                    time.strftime("%H:%M:%S", time.localtime(r.stamp)) if r.stamp else "")
         if ss.is_sys(did):
             t = self.sys_tag(did)
             val = self.sys_values.get(t.id) if t else None
@@ -2025,22 +2047,20 @@ class DaqWindow(AppWindow):
             parent.addChild(it)
             return it
 
-        # Connectivity: the devices (connections) only - their tags are under Tags
+        # Connectivity: the three connector categories, flat - the Connectivity document lists
+        # their connectors and devices (like Tags)
         self.nav_conn = node(root, "Connectivity", make_icon("network", T["text"]), ("doc", "connectivity"),
-                             "Devices: Simulation, Modbus TCP / RTU, MQTT, OPC UA - double-click to edit")
-        for d in self.project.devices:
-            tok = self._device_token(d)
-            di = node(self.nav_conn, d.name, self._dot(tok), ("device", d.id),
-                      f"{driver_label(d.driver)} · {d.topic} · {len(d.tags)} tag(s)"
-                      + ("" if d.enabled else "  ·  disabled"))
-            self._dot_cache[d.id] = tok
-            if not d.enabled:
-                di.setForeground(0, muted)
-            self.ptree_devices[d.id] = di
+                             "Devices: Protocols, Database, Web Services")
+        for key, name, icon, tip in CONN_CATEGORIES:
+            n = sum(1 for d in self.project.devices if driver_category(d.driver) == key)
+            ci = node(self.nav_conn, f"{name}  ({n})", make_icon(icon, T["text" if n else "muted"]), ("conncat", key), tip)
+            if not n:
+                ci.setForeground(0, muted)
         # Tags: the six tag categories, flat - the Tags document lists devices, groups and tags
         tags = node(root, "Tags", make_icon("tag", T["text"]), ("tagsroot",),
                     "Tag management: Device, Virtual, Action, Aggregation, Memory, System")
-        counts = {"device": sum(len(d.tags) for d in self.project.devices), "system": len(self.sys_tags())}
+        counts = {"device": sum(len(d.tags) for d in self.project.devices), "system": len(self.sys_tags()),
+                  "virtual": len(self.project.virtual_tags)}
         for key, name, icon, tip, ready in TAG_CATEGORIES:
             ci = node(tags, name + (f"  ({counts.get(key, 0)})" if ready else ""),
                       make_icon(icon, T["text" if ready else "muted"]), ("tagcat", key), tip)
@@ -2168,6 +2188,10 @@ class DaqWindow(AppWindow):
             self.tags_page.refresh(("device", d[1]))
             self.conn_page.select(d[1])
             self.select_object(("device", d[1]))
+        elif d[0] == "conncat":
+            self._show_doc("connectivity")
+            self.conn_page.show_category(d[1])
+            self.conn_page.activate()
         elif d[0] == "tagsroot":
             self._show_doc("tags")
         elif d[0] == "tagcat":
@@ -2800,6 +2824,8 @@ class DaqWindow(AppWindow):
             self._mark_dirty()
             if self.recorder is None:
                 self._structure_changed(); self.tags_page.refresh()
+        if self.vt_engine.order:
+            self._update_virtual_tags()
         self._draw()
 
     def _ingest(self, dev: DeviceCfg, rx: float, payload: bytes, blk):
@@ -3119,6 +3145,9 @@ class DaqWindow(AppWindow):
         if vr.is_var(tid):
             v = self._var(tid)
             return (f"Variables · {v['name']}" if v else "(deleted variable)"), (v.get("unit", "") if v else "")
+        if vt.is_vt(tid):
+            v = self.virtual_tag(tid)
+            return (f"Virtual · {v['name']}" if v else "(deleted virtual tag)"), (v.get("unit", "") if v else "")
         d = self.project.device(tid)
         t = d.tag(idx) if d else None
         return (f"{d.name} · {t.name}" if t else "(deleted tag)"), (t.unit if t else "")
@@ -3287,6 +3316,11 @@ class DaqWindow(AppWindow):
                 u = v.get("unit", "")
                 out.append((*vr.var_key(v["id"]), f"Variables · {v['name']}" + (f" [{u}]" if u else ""),
                             self.var_color(v), u))
+        for v in self.project.virtual_tags:          # Virtual tags with a number / boolean
+            if v["enabled"] and v.get("dtype") != "text":
+                u = v.get("unit", "")
+                out.append((*vt.vt_key(v["id"]), f"Virtual · {v['name']}" + (f" [{u}]" if u else ""),
+                            self.vt_color(v), u))
         for t in self.sys_tags():                    # System Tags with a number (text is not a stream)
             if t.streamed:
                 out.append((*t.key, f"System · {t.name}" + (f" [{t.unit}]" if t.unit else ""),
@@ -3306,6 +3340,9 @@ class DaqWindow(AppWindow):
             val = None
         if vr.is_var(tid):
             v = self._var(tid)
+            return val, (v.get("unit", "") if v else "")
+        if vt.is_vt(tid):
+            v = self.virtual_tag(tid)
             return val, (v.get("unit", "") if v else "")
         if ss.is_sys(tid):
             t = self.sys_tag(tid)
@@ -3372,9 +3409,16 @@ class DaqWindow(AppWindow):
             tid, idx = key
             lbl = names.get((tid, idx), "(deleted)")
             dev, _, name = lbl.partition(" · ")
-            if vr.is_var(tid) or ss.is_sys(tid):
+            if vr.is_var(tid) or ss.is_sys(tid) or vt.is_vt(tid):
                 val, unit = self.last_value(tid, idx)
                 st = self.sys_tag(tid) if ss.is_sys(tid) else None
+                if vt.is_vt(tid):
+                    text, qual, good, stamp = self.tag_live(tid, idx)
+                    v = self.virtual_tag(tid)
+                    out.append({"Tag": name.split(" [")[0], "Value": "-" if val is None else f"{val:.{decimals}f}",
+                                "Unit": unit, "Quality": qual or "No data", "Time": stamp, "Device": "Virtual",
+                                "Description": v.get("description", "") if v else "", "_good": good is not False})
+                    continue
                 out.append({"Tag": name.split(" [")[0], "Value": "-" if val is None else f"{val:.{decimals}f}",
                             "Unit": unit, "Quality": "Good" if val is not None else "No data", "Time": "",
                             "Device": "System" if st else "Variables", "Description": st.description if st else "",
@@ -3439,6 +3483,8 @@ class DaqWindow(AppWindow):
         ids = {cm.identifier(f"{d.name}_{t.name}"): (d.id, t.index)
                for d in self.project.devices for t in d.tags}
         ids.update({cm.identifier(f"System_{t.name}"): t.key for t in self.sys_tags() if t.streamed})
+        ids.update({vt.formula_name(v): vt.vt_key(v["id"]) for v in self.project.virtual_tags
+                    if v.get("dtype") != "text"})
         return ids
 
     def _variables_reload(self):
@@ -3491,6 +3537,210 @@ class DaqWindow(AppWindow):
                            for x in vids])
             self.recorder.put(gid, rx, b"", vr.VarBlock(first.seq, first.sample_idx, first.t0, first.dt, y,
                                                         channels=list(range(len(vids)))))
+
+    # ================================================================ Virtual tags (core/virtual_tags.py)
+    def virtual_tag(self, vid: str) -> dict | None:
+        """By key topic ("vt:<id>") or id."""
+        vid = vid[len(vt.VT_PREFIX):] if vt.is_vt(vid) else vid
+        return next((v for v in self.project.virtual_tags if v["id"] == vid), None)
+
+    def vt_color(self, v: dict) -> str:
+        if v.get("color"):
+            return v["color"]
+        i = next((k for k, x in enumerate(self.project.virtual_tags) if x["id"] == v["id"]),
+                 len(self.project.virtual_tags))         # a new one: the next palette colour
+        return COLORS[(i + 12) % len(COLORS)]
+
+    def key_label(self, key) -> str:
+        """'<device> · <tag>' of any key (device, variable, System, Virtual) for texts."""
+        tid, idx = key
+        if vt.is_vt(tid):
+            v = self.virtual_tag(tid)
+            return f"Virtual · {v['name']}" if v else "(deleted virtual tag)"
+        if ss.is_sys(tid):
+            t = self.sys_tag(tid)
+            return f"System · {t.name}" if t else "(removed system tag)"
+        if vr.is_var(tid):
+            v = self._var(tid)
+            return f"Variables · {v['name']}" if v else "(deleted variable)"
+        d = self.project.device(tid)
+        t = d.tag(idx) if d else None
+        return f"{d.name} · {t.name}" if t else "(deleted tag)"
+
+    def vt_describe(self, v: dict) -> str:
+        return vt.describe(v, self.key_label)
+
+    def vt_choices(self) -> list:
+        """What a virtual tag can read: every tag with a value - text ones too (System, Virtual)."""
+        out = list(self.channel_choices())
+        out += [(*vt.vt_key(v["id"]), f"Virtual · {v['name']} (text)", self.vt_color(v), "")
+                for v in self.project.virtual_tags if v["enabled"] and v.get("dtype") == "text"]
+        out += [(*t.key, f"System · {t.name} (text)", self.sys_color(t), "") for t in self.sys_tags() if not t.streamed]
+        return out
+
+    def _vt_names(self) -> dict:
+        """Formula names a virtual tag can use: the tags' (numbers) plus the text System Tags."""
+        ids = self._channel_ids()
+        ids.update({cm.identifier(f"System_{t.name}"): t.key for t in self.sys_tags() if not t.streamed})
+        return ids
+
+    def _vt_latest(self, key):
+        """(value or None when missing / bad / stale / disabled, stamp) of an input."""
+        tid, idx = key
+        if ss.is_sys(tid):
+            t = self.sys_tag(tid)
+            val = self.sys_values.get(t.id) if t else None
+            stamp = getattr(self, "_sys_t", None)
+            if val is None or (not isinstance(val, str) and val != val):
+                return None, stamp
+            return (val if isinstance(val, str) else float(val)), stamp
+        st = self.streams.get(tid)
+        if st is None or idx not in st.last_vals:
+            return None, None
+        val, stamp = st.last_vals[idx], st.stamp.get(idx)
+        if not st.good.get(idx, True) or val != val:
+            return None, stamp
+        dev = self.project.device(tid)
+        if dev is not None:
+            t = dev.tag(idx)
+            if not dev.enabled or t is None or not t.enabled:
+                return None, stamp
+            if not dev.wave and time.time() - (stamp or 0) > max(5.0, 3 * dev.scan_ms / 1000):
+                return None, stamp                   # stale
+        return float(val), stamp
+
+    def _virtual_reload(self):
+        """Definitions or tag names changed: recompile (errors go to the Log)."""
+        eng = self.vt_engine
+        eng.set_tags(self.project.virtual_tags)
+        for msg in {f"Virtual tag '{v['name']}': {eng.errors[v['id']]}" for v in self.project.virtual_tags
+                    if v["enabled"] and v["id"] in eng.errors}:
+            self._log(msg)
+
+    def virtual_changed(self):
+        """A virtual tag was added / edited / deleted: fresh values and buffers, everything that lists tags."""
+        self._mark_dirty()
+        for tid in [k for k in self.streams if vt.is_vt(k)]:
+            del self.streams[tid]
+        self.vt_engine.reset(); self._vt_seq.clear()
+        self._virtual_reload()
+        self._variables_reload()                 # Virtual_<name> in variable formulas
+        self._rebuild_project_tree()
+        self._alarms_reload()
+        self._stat_dirty = True
+        self.tags_page.refresh()
+        self._refresh_properties()
+        for page in self.view_pages.values():
+            page.restyle()
+
+    def _update_virtual_tags(self):
+        """GUI timer: calculate what is due; numbers / booleans go through the data path like a
+        one-sample device block (streams, alarms, statistics, variables) - text is shown only."""
+        done = self.vt_engine.evaluate()
+        if not done:
+            return
+        if self.t_ref is None:
+            self.t_ref = time.time()
+        for v, r in done:
+            if v.get("dtype") == "text":
+                continue
+            tid = vt.VT_PREFIX + v["id"]
+            n = self._vt_seq[tid] = self._vt_seq.get(tid, 0) + 1
+            val = r.value if r.good and r.value is not None else np.nan
+            vb = vr.VarBlock(n & 0xFFFF, n, r.stamp, 0.5, np.array([[val]], dtype=float))
+            self.streams.setdefault(tid, TopicStream()).feed(vb, self.t_ref)
+            self.alarm_engine.feed(tid, 0, r.stamp, vb.y[0])
+            if self.stats.wants((tid, 0)):
+                self.stats.feed((tid, 0), np.array([r.stamp]), vb.y[0])
+            self._compute_variables(tid, r.stamp, vb)
+
+    def add_virtual(self, kind: str, group: str = ""):
+        if self._recording_guard():
+            QTimer.singleShot(0, lambda: self._vt_popup(None, kind, group))
+
+    def edit_virtual(self, vid: str):
+        QTimer.singleShot(0, lambda: self._vt_popup(vid))
+
+    def _vt_pick(self, choices, chosen, multi: bool, title: str):
+        dlg = PickDialog(self, choices, chosen, multi, title)
+        return dlg.result_keys() if dlg.exec() else None
+
+    def _vt_popup(self, vid: str | None = None, kind: str = "formula", group: str = ""):
+        """Add / Edit virtual tag pop-up (tabs): the tag joins the project or changes only on Add tag / Save."""
+        new = vid is None
+        cur = None if new else self.virtual_tag(vid)
+        if not new and cur is None:
+            return
+        if new:
+            v = vt.new_virtual(kind)
+            v["group"] = group
+            v["name"] = self._unique_name(v["name"], {x["name"] for x in self.project.virtual_tags})
+        else:
+            v = copy.deepcopy(cur)
+        taken = {x["name"].strip().lower() for x in self.project.virtual_tags if x["id"] != v["id"]}
+        groups = {x.get("group", "") for x in self.project.virtual_tags}
+        dlg = VirtualTagDialog(self, v, self.vt_engine, self.vt_choices(), self._vt_names(), groups,
+                               self.tag_live, self._vt_pick, taken, self.vt_color({**v, "color": ""}))
+        label_, icon, what = vt.TYPES[v["kind"]]
+        dlg.setWindowTitle("Add virtual tag" if new else f"Virtual tag - {v['name']}")
+        dlg.ok_btn, title = popup_form(dlg, icon, "New virtual tag" if new else v["name"],
+                                       f"Virtual tag · {label_} · {what}", "Add tag" if new else "Save", width=560)
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or ("New virtual tag" if new else v["name"])))
+        dlg.tabs.setCurrentIndex(1 if new else 0)    # new: straight to what defines it
+        dlg.resize(dlg.width(), 520)                 # one fixed size: every tab fits, none scrolls
+        dlg._preview()                               # the verb button exists now
+        if self.recording:                           # recording: look, don't change
+            dlg.locked = True
+            dlg.ok_btn.setEnabled(False)
+            set_prop(dlg.err, "level", "bad"); dlg.err.setText("Stop recording to change virtual tags.")
+            dlg._timer.stop()
+        if not dlg.exec() or self.recording:
+            return
+        if new:
+            dlg.apply(v)
+            self.project.virtual_tags.append(v)
+        else:
+            dlg.apply(cur)
+            v = cur
+        self.virtual_changed()
+        QTimer.singleShot(0, lambda: self.tags_page.select_tag(*vt.vt_key(v["id"])))
+        self.set_status(f"Virtual tag '{v['name']}' " + ("added" if new else "saved"), "ok")
+
+    def duplicate_virtual(self, vid: str):
+        cur = self.virtual_tag(vid)
+        if cur is None or not self._recording_guard():
+            return
+        v = copy.deepcopy(cur)
+        v["id"] = vt.new_virtual()["id"]
+        v["name"] = self._unique_name(f"{cur['name']} copy", {x["name"] for x in self.project.virtual_tags})
+        tags = self.project.virtual_tags
+        tags.insert(tags.index(cur) + 1, v)
+        self.virtual_changed()
+        QTimer.singleShot(0, lambda: self.tags_page.select_tag(*vt.vt_key(v["id"])))
+
+    def delete_virtuals(self, vids: list[str]):
+        vs = [v for v in (self.virtual_tag(i) for i in vids) if v is not None]
+        if not vs or not self._recording_guard():
+            return
+        keys = {vt.vt_key(v["id"]) for v in vs}
+        users = [o["name"] for o in self.project.virtual_tags if o not in vs and set(self.vt_engine.deps(o)) & keys]
+        what = f"virtual tag '{vs[0]['name']}'" if len(vs) == 1 else f"{len(vs)} virtual tags"
+        detail = (f"Used by {', '.join(users[:4])}{' ...' if len(users) > 4 else ''} - they will show an error."
+                  if users else "Alarms and views that show them keep a '(deleted)' entry.")
+        if not confirm(self, "Delete virtual tags" if len(vs) > 1 else "Delete virtual tag", f"Delete {what}?",
+                       f"Delete {len(vs)} tags" if len(vs) > 1 else "Delete tag", detail):
+            return
+        self.project.virtual_tags[:] = [v for v in self.project.virtual_tags if v not in vs]
+        self.select_object(None)
+        self.virtual_changed()
+
+    def set_virtuals_enabled(self, vids: list[str], on: bool):
+        vs = [v for v in (self.virtual_tag(i) for i in vids) if v is not None]
+        if not vs or not self._recording_guard():
+            return
+        for v in vs:
+            v["enabled"] = on
+        self.virtual_changed()
 
     # ================================================================ System Tags (core/system_tags.py)
     def sys_tags(self) -> list[ss.SysTag]:
