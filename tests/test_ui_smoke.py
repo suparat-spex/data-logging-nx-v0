@@ -282,6 +282,97 @@ def test_aggregation_tags_and_project_groups(win, monkeypatch, tmp_path):
     win.doc_tabs.setCurrentIndex(front)
 
 
+def test_start_page(win, monkeypatch, tmp_path):
+    import json
+    from PySide6.QtCore import Qt
+    from nxlogger.core import templates as tpl
+    page = win.start_page
+    assert win.doc_tabs.widget(0) is page and win.docs["start"][1] == "Start Page"   # the first tab
+    win._rebuild_project_tree()
+    win._nav_open(win.ptree.topLevelItem(0))                       # the project root opens it
+    assert win.doc_tabs.currentWidget() is page and win._prop_key == ("project",)
+    i = win.doc_tabs.indexOf(page)                                 # closable, and back from the house
+    win.doc_tabs.removeTab(i)
+    assert win.doc_tabs.indexOf(page) == -1
+    win._show_doc("start")
+    assert win.doc_tabs.currentWidget() is page
+    saved = win.project
+    monkeypatch.setattr(win, "_confirm_discard", lambda: True)
+    for key, *_ in tpl.TEMPLATES:                                  # every template makes a project
+        win.new_from_template(key)
+        assert win.project is not saved and win.project_path is None
+        if key not in ("blank", "opcua"):
+            assert win.project.devices and win.project.views
+    assert win.project.name == "Water plant demo" and len(win.project.devices[0].tags) == 49
+    f = tmp_path / "demo.nxl"                                      # recent projects: save, then listed
+    monkeypatch.setattr("nxlogger.ui.main_window.QFileDialog.getSaveFileName", lambda *a, **k: (str(f), ""))
+    assert win._save_project_as()
+    assert win.recent_projects()[0] == os.path.abspath(str(f))
+    it = page.recent.topLevelItem(0)
+    assert it.data(0, Qt.ItemDataRole.UserRole) == os.path.abspath(str(f)) and it.font(0).bold()
+    sess = tmp_path / "logs" / "2026-10-29_060000"                 # recent sessions: the log folder
+    sess.mkdir(parents=True)
+    (sess / "project.json").write_text(json.dumps({"start_unix": 1_790_000_000, "project": {"name": "Demo"}}),
+                                       encoding="utf-8")
+    (sess / "data.csv").write_bytes(b"x" * 2048)
+    win.project.logging.folder = str(tmp_path / "logs")
+    assert win.recent_sessions(5)[0][1:] == ("Demo", str(sess), 2048 + len((sess / "project.json").read_bytes()))
+    page.refresh()
+    assert page.sessions.topLevelItem(0).text(1) == "Demo" and "KB" in page.sessions.topLevelItem(0).text(2)
+    assert "devices online" in page.cur_status.text() and page.cur_name.text().startswith("Water plant demo")
+    assert win.doc_links() and all(os.path.isfile(p) for _t, p in win.doc_links())   # from the source checkout
+    started = []
+    monkeypatch.setattr("nxlogger.ui.main_window.subprocess.Popen", lambda args, **k: started.append(args))
+    win.run_simulator("nxlogger.sim.water_plant_gui")
+    assert started and started[0][-1] == "nxlogger.sim.water_plant_gui"
+    steps = [page.step_title.text()]
+    for _ in range(3):
+        page._go(1); steps.append(page.step_title.text())
+    assert steps == ["Connect a device", "Add tags", "Create a view", "Start recording"]
+    page._go(1)
+    assert page.step_n.text() == "1/4"
+    page.show_box.setChecked(False)
+    from nxlogger.ui.widgets.start_page import show_at_startup
+    assert not show_at_startup()
+    from nxlogger.ui.main_window import DaqWindow
+    for on in (False, True):                                       # a fresh start: one tab only
+        page.show_box.setChecked(on)
+        w2 = DaqWindow()
+        assert w2.doc_tabs.count() == 1
+        assert w2.doc_tabs.widget(0) is (w2.start_page if on else w2.conn_page)
+        w2.drivers.stop_all(); w2.dirty = False; w2.close(); w2.deleteLater()
+    win.open_recent(str(f))                                        # the open project: no reload
+    assert win.project_path == str(f)
+    sizes = set()                                                  # Get started: < > never resizes it
+    for _ in range(4):
+        page._go(1)
+        _pump(0.05)
+        sizes.add(page.steps_card.size().toTuple())
+    assert len(sizes) == 1
+    page._fill_views_menu()                                        # Views: the project's views + New view...
+    names = [a.text() for a in page.views_menu.actions() if a.text()]
+    assert names[:-1] == [v["name"] for v in win.project.views] and names[-1] == "New view..."
+    win.select_object(("project",))                                # Properties: read-only + Edit...
+    t = win.props.target
+    assert t.readonly and t.apply is None and [a[0] for a in t.actions] == ["Edit..."]
+    from nxlogger.ui.dialogs import project_dialog as pd
+
+    def proj_exec(dlg):
+        assert [dlg.findChild(QtWidgets.QTabWidget).tabText(i) for i in range(2)] == ["General", "Files"]
+        dlg.name.setText(""); dlg._ok()
+        assert "name" in dlg.err.text()                            # a name is needed
+        dlg.name.setText("Plant B"); dlg.operator.setText("Ann")
+        return True
+    monkeypatch.setattr(pd.ProjectDialog, "exec", proj_exec)
+    win._project_popup()
+    assert win.project.name == "Plant B" and win.project.operator == "Ann" and win.dirty
+    assert win.props.target.values["name"] == "Plant B" and win.p_name.text() == "Plant B"
+    win._set_project(saved, None)                                  # back to the shared test project
+    win.dirty = False
+    vp = next(iter(win.view_pages.values()))                       # and its view in front, as before
+    win._show_doc(f"view:{vp.view['id']}")
+
+
 def test_properties_panel_targets(win):
     dev = win.project.devices[0]
     for ref in (("device", dev.id), ("tag", dev.id, 0), ("project",)):

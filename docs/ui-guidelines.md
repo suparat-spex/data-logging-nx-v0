@@ -49,6 +49,9 @@ brings its tab to the front.
 
 ## Pop-ups
 
+The layout, lists, row menus and pop-up tabs of the Connectivity and Tags documents are
+drawn in [layout-and-menus.md](layout-and-menus.md).
+
 The Connectivity and Tags pages work alike: their items (devices, tags, groups, virtual and aggregation tags) are added and
 edited in a settings pop-up (header band, body, footer *Cancel* · *verb*) and are
 read-only in the Properties panel. A tabbed form gets that look with `common.popup_form()`.

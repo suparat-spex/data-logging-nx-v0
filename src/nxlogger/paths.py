@@ -81,3 +81,13 @@ def recordings_dir() -> Path:
 
 def projects_dir() -> Path:
     return _configured("projects", data_dir() / "Projects")
+
+
+def docs_dir() -> Path | None:
+    """The user documentation (docs/*.md): the source checkout's docs/, or docs/ next to the
+    program when packaged with it; None when there is none."""
+    root = repo_root()
+    for d in ((root / "docs") if root else None, Path(sys.executable).parent / "docs" if FROZEN else None):
+        if d is not None and d.is_dir():
+            return d
+    return None

@@ -40,18 +40,19 @@ def _set(obj, key, value, on_change) -> bool:
 
 # ====================================================================== project
 def project_target(w) -> PropTarget:
+    """Information only, like a device - the project is changed in its pop-up (Edit...)."""
     p = w.project
-
-    def apply(k, v):
-        _set(p, k, v, lambda: (w.mark_dirty(), w.project_props_changed(k)))
-    return PropTarget(p.name, "folder", "Project" + (f" · {w.project_path}" if w.project_path else " · not saved"),
-                      [("Project", [F("name", "Name", "str", ""), F("operator", "Operator", "str", ""),
-                                    F("description", "Description", "text", "")]),
-                       ("Content", [F("n_dev", "Devices", "info", ""), F("n_tags", "Tags", "info", ""),
-                                    F("n_views", "Views", "info", "")])],
-                      {"name": p.name, "operator": p.operator, "description": p.description,
-                       "n_dev": len(p.devices), "n_tags": sum(len(d.tags) for d in p.devices),
-                       "n_views": len(p.views)}, apply, key=("project",))
+    counts = w.project_counts()
+    general = [F("name", "Name", "info", ""), F("operator", "Operator", "info", ""),
+               F("description", "Description", "info", ""), F("file", "Project file", "info", ""),
+               F("folder", "Log folder", "info", "")]
+    content = [F(k, k, "info", "") for k in counts]
+    vals = {"name": p.name, "operator": p.operator or "-", "description": p.description or "-",
+            "file": w.project_path or "Not saved yet", "folder": p.logging.folder, **{k: str(n) for k, n in counts.items()}}
+    return PropTarget(p.name + (" *" if w.dirty else ""), "folder",
+                      "Project" + (f" · {w.project_path}" if w.project_path else " · not saved"),
+                      [("Project", general), ("Content", content)], vals, None,
+                      [("Edit...", "pencil", w.edit_project)], key=("project",), readonly=True)
 
 
 # ====================================================================== devices

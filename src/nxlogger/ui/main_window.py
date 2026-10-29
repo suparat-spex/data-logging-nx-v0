@@ -23,7 +23,7 @@ NX Logger (tag-based data logger, Yokogawa GA10 / Genesis64 / FUXA style):
 
 Layout:
   * Left:   "Project" dock (navigator tree) and "Data" dock (recorded sessions)
-  * Centre: closable document tabs - Quick View, Connectivity, Tags, Logging, Alarms,
+  * Centre: closable document tabs - Start Page, Connectivity, Tags, Logging, Alarms, (Quick View),
             Variables, Views
   * Right:  "Properties" dock; bottom: "Log" dock
 Responsive (by window width): wide >= 1500 px, medium 1180-1500, compact < 1180 (the
@@ -44,6 +44,8 @@ import threading
 import os
 import queue
 import shutil
+import subprocess
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -68,6 +70,7 @@ from nxlogger.core import ml_log as mlg
 from nxlogger.core import recording as dl
 from nxlogger.core import stat_buffer as sb
 from nxlogger.core import system_tags as ss
+from nxlogger.core import templates as tpl
 from nxlogger.core import variables as vr
 from nxlogger.core import virtual_tags as vt
 from nxlogger.core import view_model as vmod
@@ -96,6 +99,7 @@ from nxlogger.ui.dialogs.ml_log_dialog import MlLogDialog
 from nxlogger.ui.dialogs.new_view_dialog import NewViewDialog
 from nxlogger.ui.dialogs.opcua_browse_dialog import OpcUaBrowseDialog
 from nxlogger.ui.dialogs.pick_dialog import PickDialog
+from nxlogger.ui.dialogs.project_dialog import ProjectDialog
 from nxlogger.ui.dialogs.tag_dialog import TagDialog
 from nxlogger.ui.dialogs.tile_dialog import TileDialog
 from nxlogger.ui.dialogs.variable_dialog import VariableDialog
@@ -111,6 +115,7 @@ from nxlogger.ui.widgets import alarm_panel as ap
 from nxlogger.ui.widgets import properties as props
 from nxlogger.ui.widgets import views as dv
 from nxlogger.ui.widgets.connectivity import STATE_TOKEN, ConnectivityPage
+from nxlogger.ui.widgets.start_page import StartPage, show_at_startup
 from nxlogger.ui.widgets.form_tab import FormTab
 from nxlogger.ui.widgets.property_grid import PropertiesPanel
 from nxlogger.ui.widgets.tags_page import CATEGORIES as TAG_CATEGORIES, TagsPage
@@ -308,6 +313,7 @@ class DaqWindow(AppWindow):
         self.brand.setToolTip(f"{APP_NAME} - data logger: Modbus, MQTT, OPC UA, simulation")
         tb.addWidget(self.brand)
         tb.addSeparator()
+        tb.addAction(self.act("Start Page", lambda: self._show_doc("start"), "Ctrl+0", "house"))
         tb.addAction(self.act("New", self._new_project, "Ctrl+N", "file-plus"))
         tb.addAction(self.act("Open...", self._open_project, "Ctrl+O", "folder-open"))
         tb.addAction(self.act("Save", self._save_project, "Ctrl+S", "save"))
@@ -407,7 +413,8 @@ class DaqWindow(AppWindow):
         add_dev = QMenu("Add device", self)               # menus are text only (no icon column)
         for k, d in DRIVERS.items():
             add_dev.addAction(d["label"] + "...", lambda kk=k: self.add_device(kk))
-        for a in (self.act("Quick View", lambda: self._show_doc("screen"), "Ctrl+1", "chart"),
+        for a in (self.act("Start Page", lambda: self._show_doc("start"), None, "house"),
+                  self.act("Quick View", lambda: self._show_doc("screen"), "Ctrl+1", "chart"),
                   self.act("Connectivity", lambda: self._show_doc("connectivity"), "Ctrl+2", "network"),
                   self.act("Tags", lambda: self._show_doc("tags"), "Ctrl+6", "tag"),
                   self.act("Logging", lambda: self._show_doc("logging"), "Ctrl+3", "file-text"),
@@ -537,6 +544,7 @@ class DaqWindow(AppWindow):
         bar.customContextMenuRequested.connect(self._tab_menu)
         bar.installEventFilter(self)                  # middle click closes a tab
         for key, w, title, short, icon in (
+                ("start", self._build_start(), "Start Page", "Start", "house"),
                 ("screen", self._build_screen(), "Quick View", "Quick", "chart"),
                 ("connectivity", self._build_connectivity(), "Connectivity", "Devices", "network"),
                 ("tags", self._build_tags(), "Tags", "Tags", "tag"),
@@ -544,9 +552,15 @@ class DaqWindow(AppWindow):
                 ("alarms", self._build_alarms(), "Alarms", "Alarms", "bell"),
                 ("variables", self._build_variables(), "Variables", "Vars", "variable")):
             self.docs[key] = (w, title, short, icon)
-            self._add_doc_tab(key)
+        # at startup only one tab: the Start Page (or Connectivity when it is switched off) - the
+        # other documents open when used (Project tree, menus, buttons: _show_doc adds the tab)
+        self._add_doc_tab("start" if show_at_startup() else "connectivity")
         self.doc_tabs.setCurrentIndex(0)
         return self.doc_tabs
+
+    def _build_start(self):
+        self.start_page = StartPage(self)
+        return self.start_page
 
     def _build_screen(self):
         pg.setConfigOptions(antialias=False)
@@ -835,6 +849,9 @@ class DaqWindow(AppWindow):
             self.view_selected(page, page.selected)
         elif page in (self.conn_page, self.tags_page):
             page.activate()                      # its selected row and properties come back
+        elif page is getattr(self, "start_page", None):
+            page.activate()
+            self.show_properties(props.project_target(self))
         self._draw(force=True)
         if page is self.tags_page:
             self.tags_page.update_live()
@@ -870,6 +887,8 @@ class DaqWindow(AppWindow):
         self.var_page.refresh()
         self.tags_page.refresh(())
         self.conn_page.refresh([])
+        if hasattr(self, "start_page"):
+            self.start_page.refresh()
         self.show_properties(props.project_target(self))
         self._sync_comm()
         if p.ml_log.get("autostart") and self.ml_logger is None:   # unattended 24/7 logging
@@ -901,6 +920,42 @@ class DaqWindow(AppWindow):
         self._update_logging_help()
         if key == "name":
             self._rebuild_project_tree()
+
+    def project_counts(self) -> dict:
+        p = self.project
+        return {"Devices": len(p.devices), "Tags": sum(len(d.tags) for d in p.devices),
+                "Virtual tags": len(p.virtual_tags), "Aggregation tags": len(p.aggregations),
+                "Groups": len(p.all_groups()), "Views": len(p.views), "Alarms": len(p.alarms)}
+
+    def edit_project(self):
+        QTimer.singleShot(0, self._project_popup)
+
+    def _project_popup(self):
+        """Project settings pop-up (tabs): name, operator, description, log folder - changes on Save."""
+        p = self.project
+        dlg = ProjectDialog(self, p, self.project_path, self.project_counts(), folder_locked=self.recording)
+        dlg.ok_btn, title = popup_form(dlg, "folder", p.name, "Project · name, description and log folder", "Save",
+                                       width=520)
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or p.name))
+        if not dlg.exec():
+            return
+        r = dlg.result()
+        changed = False
+        for k in ("name", "operator", "description"):
+            if getattr(p, k) != r[k]:
+                setattr(p, k, r[k]); changed = True
+        if r["folder"] != p.logging.folder and not self.recording:
+            self.log_folder.setText(r["folder"])
+            self._edit_logging("folder", r["folder"])
+            changed = True
+        if changed:
+            self._mark_dirty()
+            self.project_props_changed("description")
+            self._refresh_sessions()
+            if hasattr(self, "start_page"):
+                self.start_page.refresh()
+            self.set_status("Project saved in memory - File > Save to keep it", "ok")
+        self.show_properties(props.project_target(self))
 
     def project_props_changed(self, key):
         """Edited in the Properties panel: mirror into the Logging page."""
@@ -983,7 +1038,135 @@ class DaqWindow(AppWindow):
         self._set_project(p, path)
         if path:
             QSettings().setValue("last_project", path)
+            self._remember_recent(path)
         self._log(f"Project opened: {path or '(converted, not saved yet)'}")
+
+    # ---- Start Page (host API of start_page.py)
+    RECENT_KEY = "recent_projects"                   # QSettings: newest first
+    RECENT_MAX = 8
+
+    def recent_projects(self) -> list[str]:
+        v = QSettings().value(self.RECENT_KEY, [])
+        v = v if isinstance(v, list) else [v] if v else []
+        return [x for x in v if isinstance(x, str) and os.path.isfile(x)][:self.RECENT_MAX]
+
+    def _remember_recent(self, path: str):
+        path = os.path.abspath(path)
+        old = [x for x in self.recent_projects() if os.path.abspath(x) != path]
+        QSettings().setValue(self.RECENT_KEY, [path] + old[:self.RECENT_MAX - 1])
+        if hasattr(self, "start_page"):
+            self.start_page.refresh()
+
+    def open_recent(self, path: str):
+        if not os.path.isfile(path):
+            self.toast.popup("That project file no longer exists")
+            return
+        if os.path.abspath(path) == os.path.abspath(self.project_path or ""):
+            self._show_doc("connectivity")           # already open
+            return
+        if not (self._recording_guard() and self._confirm_discard()):
+            return
+        try:
+            self._load_project(path)
+            self.toast.popup(f"Opened {os.path.basename(path)}")
+        except Exception as e:
+            self.banners.post("proj", f"Could not open project: {e}", "bad")
+
+    def browse_project(self):
+        self._open_project()
+
+    def new_from_template(self, key: str):
+        """Start Page > New project: a template, after the unsaved-changes question."""
+        if not (self._recording_guard() and self._confirm_discard()):
+            return
+        p = tpl.make(key, dict(config.get().mqtt))
+        self._set_project(p, None)
+        title = tpl.TEMPLATE[key][1]
+        self._log(f"New project from the {title} template")
+        if key == "blank":
+            self.toast.popup("New project - add a device in Connectivity")
+            self._show_doc("connectivity")
+        elif key == "water_plant":
+            self.toast.popup("Water plant demo - start the simulator (Start Page > Simulators), then Connect")
+            self._show_doc("tags")
+        else:
+            self.toast.popup(f"New {title} project - check the device settings, then Connect")
+            self._show_doc("connectivity")
+
+    def recent_sessions(self, n: int = 5) -> list[tuple]:
+        """[(start unix, project name, folder, bytes)] of the newest recordings in the log folder."""
+        folder, rows = self.project.logging.folder, []
+        try:
+            entries = [e for e in os.scandir(folder) if e.is_dir()]
+        except OSError:
+            return []
+        for e in entries:
+            pj = os.path.join(e.path, "project.json")
+            try:
+                with open(pj, encoding="utf-8") as f:
+                    info = json.load(f)
+            except (OSError, ValueError):
+                continue
+            rows.append((info.get("start_unix", 0), info.get("project", {}).get("name", e.name), e.path))
+        out = []
+        for start, name, path in sorted(rows, key=lambda r: r[0], reverse=True)[:n]:
+            try:
+                size = sum(x.stat().st_size for x in os.scandir(path) if x.is_file())
+            except OSError:
+                size = None
+            out.append((start, name, path, size))
+        return out
+
+    def open_path(self, path: str):
+        self._open_path(path)
+
+    def show_doc(self, key: str):
+        self._show_doc(key)
+
+    def new_view(self):
+        self._new_view()
+
+    def start_recording(self):
+        if self.recorder is None:
+            self._start_recording()
+
+    def start_status(self) -> dict:
+        devs = self.project.devices
+        rec = self.recorder
+        return {"devices": len(devs), "online": sum(1 for d in devs if self.drivers.state(d.id)[0] == "online"),
+                "tags": sum(len(d.tags) for d in devs) + len(self.project.virtual_tags) + len(self.project.aggregations),
+                "alarms": self.alarm_engine.count(), "recording": rec is not None,
+                "elapsed": time.strftime("%H:%M:%S", time.gmtime(rec.elapsed)) if rec else ""}
+
+    DOC_LINKS = [("connectivity.md", "Connectivity and tag addresses"),
+                 ("layout-and-menus.md", "Layout and menus"),
+                 ("recording-format.md", "Recording file format (NX Viewer)"),
+                 ("config.md", "Settings file (config.ini)"),
+                 ("packet-format.md", "ESP32 waveform packet format")]
+
+    def doc_links(self) -> list[tuple[str, str]]:
+        d = paths.docs_dir()
+        return [(title, str(d / f)) for f, title in self.DOC_LINKS if d is not None and (d / f).is_file()]
+
+    SIMULATORS = [("Water treatment plant", "MQTT simulator: 49 signals in plant areas, with its own window - "
+                   "use the Water plant demo template", "nxlogger.sim.water_plant_gui"),
+                  ("ESP32 waveform publisher", "MQTT waveform packets like an ESP32 DAQ node", "nxlogger.sim")]
+
+    def simulators(self) -> list[tuple[str, str, str, bool]]:
+        ok = paths.repo_root() is not None           # the EXE has no Python to start them with
+        return [(t, x, m, ok) for t, x, m in self.SIMULATORS]
+
+    def run_simulator(self, module: str):
+        if paths.repo_root() is None:
+            self.toast.popup("Simulators start from the source code only")
+            return
+        try:
+            subprocess.Popen([sys.executable, "-m", module], cwd=str(paths.repo_root()))
+        except OSError as e:
+            self.banners.post("sim", f"Could not start the simulator: {e}", "bad")
+            return
+        self._log(f"Simulator started: python -m {module}")
+        self.toast.popup("Simulator starting - its window opens in a moment")
 
     def _project_dir(self) -> str:
         if self.project_path:
@@ -1002,6 +1185,7 @@ class DaqWindow(AppWindow):
             self.banners.post("proj", f"Could not save project: {e}", "bad")
             return False
         QSettings().setValue("last_project", self.project_path)
+        self._remember_recent(self.project_path)
         self.dirty = False
         self.project.migrated_from = ""
         self.banners.dismiss("proj")
@@ -2214,6 +2398,7 @@ class DaqWindow(AppWindow):
         if d[0] == "doc":
             self._show_doc(d[1])
         elif d[0] == "project":
+            self._show_doc("start")
             self.show_properties(props.project_target(self))
         elif d[0] == "view":
             self._show_doc(f"view:{d[1]}")
@@ -3134,6 +3319,8 @@ class DaqWindow(AppWindow):
             self.tags_page.update_states()
         elif page is self.conn_page:
             self.conn_page.update_states()
+        elif page is getattr(self, "start_page", None):
+            self.start_page.update_live()
         self._sync_comm()
 
     def _log(self, s: str):
@@ -4227,8 +4414,7 @@ class DaqWindow(AppWindow):
         page = dv.ViewPage(self, vw, editing=editing)
         self.view_pages[vw["id"]] = page
         self.docs[f"view:{vw['id']}"] = (page, vw["name"], vw["name"], "layout")
-        self._add_doc_tab(f"view:{vw['id']}")
-        if show:
+        if show:                                 # a loaded project's views open as tabs when used
             self._show_doc(f"view:{vw['id']}")
         return page
 
