@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
 
 from nxlogger.core import analysis as an
 from nxlogger.core.view_model import (ALARM_SOURCES, ALARM_TILE_COLS, COLORMAPS, GAUGE_STYLES,
-                                      STAT_TILE_COLS, TAG_TILE_COLS, TEXT_STYLES, WIN_MODES, WIN_UNITS,
+                                      MIN_H, MIN_W, STAT_TILE_COLS, TAG_TILE_COLS, TEXT_STYLES, WIN_MODES,
+                                      WIN_UNITS,
                                       axis_defaults, tile_title)
 from nxlogger.ui.dialogs.common import ChannelPicker, ColorButton, form_page, spin
 from nxlogger.ui.theme.ui_kit import label, set_prop
@@ -23,9 +24,10 @@ class TileDialog(QDialog):
     choices = [(topic_id, index, label, colour, unit)] (channels and variables)
     """
 
-    def __init__(self, parent, cfg: dict, choices):
+    def __init__(self, parent, cfg: dict, choices, canvas: tuple[int, int] = (1920, 1080), snap: int = 1):
         super().__init__(parent)
         self.cfg, self.choices = dict(cfg), choices
+        self.canvas, self.snap_px = canvas, max(1, int(snap))   # the view's size: Position stays inside it
         self.units = {(tid, idx): unit for tid, idx, _, _, unit in choices}
         kind = self.kind = cfg["kind"]
         self.ptype = cfg.get("plot", "time")          # a graph's type is fixed: one dialog per type
@@ -39,6 +41,7 @@ class TileDialog(QDialog):
             self.tabs.addTab(self._appearance(), "Appearance")
         else:
             self.tabs.addTab(self._appearance(text=True), "Appearance")
+        self.tabs.addTab(self._position(), "Position")
         self.err = QLabel(); self.err.setObjectName("statusMsg"); self.err.setWordWrap(True)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         set_prop(bb.button(QDialogButtonBox.StandardButton.Ok), "primary", True)
@@ -446,10 +449,28 @@ class TileDialog(QDialog):
                        muted=True, small=True))
         return w
 
+    def _position(self):
+        """X / Y / W / H in pixels on the view (snapped to its grid on Save, kept inside it)."""
+        c, (cw, ch) = self.cfg, self.canvas
+        w, f = form_page()
+        self.pos = {}
+        for key, text, lo, hi, d in (("x", "X", 0, cw - MIN_W, 10), ("y", "Y", 0, ch - MIN_H, 10),
+                                     ("w", "Width", MIN_W, cw, 200), ("h", "Height", MIN_H, ch, 110)):
+            sb = QSpinBox(minimum=lo, maximum=max(lo, hi), suffix=" px", singleStep=self.snap_px)
+            sb.setValue(int(c.get(key, d)))
+            self.pos[key] = sb
+            f.addRow(text, sb)
+        f.addRow(label(f"On the view of {cw} × {ch} px; snapped to its {self.snap_px} px grid. Moving or "
+                       "resizing it with the mouse (Edit) changes these too.", muted=True, small=True))
+        return w
+
     # ================================================================ result
     def _ok(self):
         err = ""
-        if self.kind == "plot" and not self.y_auto.isChecked() and self.y_min.value() >= self.y_max.value():
+        cw, ch = self.canvas
+        if self.pos["x"].value() + self.pos["w"].value() > cw or self.pos["y"].value() + self.pos["h"].value() > ch:
+            err = f"Position: the component must fit on the view ({cw} × {ch} px)."
+        elif self.kind == "plot" and not self.y_auto.isChecked() and self.y_min.value() >= self.y_max.value():
             err = "Y range: min must be below max."
         elif self.kind == "gauge" and self.g_min.value() >= self.g_max.value():
             err = "Gauge range: min must be below max."
@@ -457,13 +478,16 @@ class TileDialog(QDialog):
             err = "Choose a tag."
         if err:
             set_prop(self.err, "level", "bad"); self.err.setText(err)
-            self.tabs.setCurrentIndex(2 if err.startswith("Y") else 1 if err.startswith("Gauge") else 0)
+            self.tabs.setCurrentIndex(self.tabs.count() - 1 if err.startswith("Position") else
+                                      2 if err.startswith("Y") else 1 if err.startswith("Gauge") else 0)
             return
         self.accept()
 
     def result_cfg(self) -> dict:
         c, kind = self.cfg, self.kind
         c["card_bg"], c["border_color"] = self.card_bg.color(), self.border.color()
+        g = self.snap_px
+        c.update({k: int(round(sb.value() / g) * g) for k, sb in self.pos.items()})
         if kind != "text":
             c["title"] = self.title.text().strip()
             c["show_title"] = self.show_title.isChecked()

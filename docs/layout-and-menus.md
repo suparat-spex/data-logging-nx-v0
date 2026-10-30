@@ -318,7 +318,56 @@ Page at startup" is the check box at its bottom.
 - **Quick View** (live plots of every tag) is still in the Project menu (Ctrl+1); it no longer
   opens at startup.
 
-## 7. Planned
+## 7. Views
+
+- **Fixed size:** every view is a canvas of its own size - **1920 × 1080** by default; View
+  pop-up > Size: 1280 × 800, 1366 × 768, 1920 × 1080, 2560 × 1440, 3840 × 2160 or custom, and
+  *top left* / *top centre* on a bigger window. It never stretches: with the right panel open or
+  closed the layout is the same, a smaller window shows horizontal and vertical scroll bars.
+  Components stay inside it (dragging, resizing, the Position tab); while editing its edge is
+  drawn in the accent colour. A view is never smaller than its components.
+- **Pop-ups, like Connectivity and Tags** (tabs style, `common.popup_form`):
+  - *View* (toolbar ⚙, Properties > *Edit...*, Project tree): General · Size · Canvas · Cards.
+  - *Component* (double-click in Edit mode, right-click > *Edit...*, Properties > *Edit...*):
+    the tabs of its kind + Appearance + **Position** (X, Y, W, H, snapped to the grid).
+  - *Add* (Text / Graph / Indicator / Table ▾) opens the component pop-up first ("New
+    component", verb *Add*); Cancel adds nothing.
+  - Moving and resizing with the mouse in Edit mode stays direct.
+- **Properties is read-only** for a view (name, size, components, tags used, grid; *Edit...*,
+  *Edit layout*, *Monitor*) and a component (type, title, position, size, tags; *Edit...*,
+  *Duplicate*, *Delete*). Views and components no longer open as editor tabs.
+- **Toolbar:** Home, New, Open and Save are icons only at every window width (name and shortcut
+  in the tooltip); the other buttons still show their text when there is room.
+
+## 7a. Monitor mode
+
+Full-screen views for watching a test or a plant on a big screen - a data-logger display, not a
+control HMI. Enter with **Monitor** on a view's toolbar, View > Monitor mode or **F11**.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────┐
+│[Overview ▾] ‹ › Water Plant A   ● 4/5 online  ⚠ 2 alarm(s)  ● REC 01:12:05 │ 10:42:05 │ ⛶ [Cycle: off ▾] ✕ Exit │
+├──────────────────────────────────────────────────────────────────────────────────────────┤
+│                               the view, full size                                        │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Hidden:** menu bar, toolbar, every panel (Project, Data, Properties, Runtime, Log), the tab
+  bar, the status bar and the view's own toolbar. Editing is switched off. The connection /
+  recording banners still show.
+- **Monitor bar** (`ui/widgets/monitor_bar.py`, `QFrame#monitorBar`):
+  - *View ▾* lists the project's views; *‹ ›* or Page Up / Page Down step through them.
+  - Status chips refresh twice a second: devices online (green when all are), alarms (red;
+    a click leaves Monitor mode on the Alarms page), REC with the elapsed time.
+  - Clock, *⛶* full screen, *Cycle* (off / 10 s / 30 s / 1 min / 5 min) for wall displays.
+- **Exit:** *✕ Exit*, F11 or Esc. Panels, tabs, menu, toolbar, status bar and the window size come
+  back exactly as before (`saveState` on entry).
+- The last view, full screen and cycle are remembered per PC (QSettings `monitor/...`), not in
+  the project. Opening another project leaves Monitor mode first.
+- Out of scope (SCADA): exit PIN, kiosk start, navigation buttons, writing values from the
+  display.
+
+## 8. Planned
 
 - Connectors under Database and Web Services. They are listed now, muted, so the layout does
   not change when they arrive.

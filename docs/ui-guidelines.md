@@ -52,7 +52,7 @@ brings its tab to the front.
 The layout, lists, row menus and pop-up tabs of the Connectivity and Tags documents are
 drawn in [layout-and-menus.md](layout-and-menus.md).
 
-The Connectivity and Tags pages work alike: their items (devices, tags, groups, virtual and aggregation tags) are added and
+The Connectivity and Tags pages work alike: their items (devices, tags, groups, virtual and aggregation tags - and views and their components) are added and
 edited in a settings pop-up (header band, body, footer *Cancel* · *verb*) and are
 read-only in the Properties panel. A tabbed form gets that look with `common.popup_form()`.
 The body is tabs (default - long forms) or one page of titled sections (`common.POPUP_STYLE`);

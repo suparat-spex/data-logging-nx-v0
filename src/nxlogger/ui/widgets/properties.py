@@ -6,7 +6,7 @@ values, how an edit is applied to the project, action buttons and live (read-onl
 values. `w` is the main window (DaqWindow); the functions use its small API:
   w.project, w.mark_dirty(), w.device_changed(did), w.tags_changed(did), w.views_changed(page)
   w.edit_tag / edit_device / delete_* / write_tag / start_device / stop_device ...
-  w.channel_choices(), w.tag_live(did, idx), w.device_state(did), w.pick_keys(...)
+  w.channel_choices(), w.tag_live(did, idx), w.device_state(did)
 """
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from nxlogger.core.tags import DRIVERS, F, describe_address, driver_label
 from nxlogger.ui.widgets.property_grid import PropTarget
 
 STATS = {k: an.STAT_LABEL[k] for k in an.STAT_KEYS}
-WIN_UNITS = {k: v[0] for k, v in vm.WIN_UNITS.items()}
 
 
 def _set(obj, key, value, on_change) -> bool:
@@ -154,114 +153,60 @@ def tags_target(w, did: str, idxs: list[int]) -> PropTarget | None:
 
 # ====================================================================== views
 def view_target(w, page) -> PropTarget:
+    """Information only, like devices and tags - the view is changed in its pop-up (Edit...)."""
     v = page.view
-
-    def apply(k, val):
-        if k == "name":
-            val = val.strip()
-            if not val or val in {x["name"] for x in w.project.views if x is not v}:
-                return
-        _set(v, k, val, lambda: w.view_props_changed(page, k))
-    return PropTarget(v["name"], "layout", f"View · {len(v['tiles'])} component(s) · "
-                                           "click a component to edit it",
-                      [("View", [F("name", "Name", "str", ""), F("description", "Description", "text", "")]),
-                       ("Snap grid", [F("grid", "Grid (px)", "int", 10, (2, 100)),
-                                      F("snap", "Snap to grid", "bool", True),
-                                      F("show_grid", "Show grid (edit)", "bool", True)]),
-                       ("Appearance", [F("bg", "Background", "color", ""),
-                                       F("tile_bg", "Card background", "color", ""),
-                                       F("tile_border", "Card border", "color", ""),
-                                       F("title_bar", "Title bars (new)", "bool", True)])],
-                      {**v, "description": v.get("description", "")}, apply,
-                      [("Done" if page.editing else "Edit layout", "pencil",
+    tags = sorted({tuple(k) for t in v["tiles"] for k in (t.get("channels") or []) + ([t["channel"]]
+                                                                                     if t.get("channel") else [])})
+    rows = {"Name": v["name"], "Description": v.get("description") or "-",
+            "Size": f"{v.get('width', 1920)} × {v.get('height', 1080)} px" +
+                    (" · centred" if v.get("align") == "center" else ""),
+            "Components": f"{len(v['tiles'])} ({sum(1 for t in v['tiles'] if vm.is_graph(t))} graph(s))",
+            "Tags used": _keys_text(w, [list(k) for k in tags]) if tags else "-",
+            "Grid": f"{v.get('grid', 10)} px" + (", snap" if v.get("snap", True) else "")}
+    return PropTarget(v["name"], "layout", f"View · {len(v['tiles'])} component(s) · double-click a component "
+                                           "to edit it (Edit mode)",
+                      [("View", [F(k, k, "info", "") for k in rows])], rows, None,
+                      [("Edit...", "pencil", lambda: w.view_properties(page)),
+                       ("Done" if page.editing else "Edit layout", "layout",
                         lambda: page.btn_edit.setChecked(not page.editing)),
-                       ("", "trash", lambda: w.delete_view(page))], key=("view", v["id"]))
+                       ("Monitor", "maximize", lambda: w.enter_monitor(v["id"]))],
+                      key=("view", v["id"]), readonly=True)
 
 
-# ---------------------------------------------------------------------- components
 def _keys_text(w, keys) -> str:
     names = {(tid, idx): lbl for tid, idx, lbl, _, _ in w.channel_choices()}
     lst = [names.get(tuple(k), "?").split(" [")[0] for k in keys or []]
     return ", ".join(lst[:3]) + (f" +{len(lst) - 3}" if len(lst) > 3 else "") if lst else "(none)"
 
 
-def _window_fields() -> list:
-    return [F("win_n", "Window length", "float", 0.0, (0, 1e7),
-              "0 = the Quick View time window; otherwise buffered by the app"),
-            F("win_unit", "Window unit", "choice", "s", WIN_UNITS),
-            F("win_mode", "Window mode", "choice", "moving", vm.WIN_MODES)]
-
-
 def tile_target(w, page, cfg: dict) -> PropTarget:
+    """Information only - a component is changed in its pop-up (Edit...), or moved / resized with
+    the mouse in Edit mode."""
     kind = cfg["kind"]
     tile = page.tile_of(cfg)
-    pick_many = lambda: w.pick_keys(cfg, "channels", True, page)        # noqa: E731
-    pick_one = lambda: w.pick_keys(cfg, "channel", False, page)         # noqa: E731
-    comp = [F("type", "Type", "info", ""), F("title", "Title", "str", "", tip="empty = automatic"),
-            F("show_title", "Show title", "bool", True)]
-    geo = [F("x", "X (px)", "int", 0, (0, 20000)), F("y", "Y (px)", "int", 0, (0, 20000)),
-           F("w", "Width (px)", "int", 200, (vm.MIN_W, 20000)), F("h", "Height (px)", "int", 110, (vm.MIN_H, 20000))]
-    data, look = [], [F("card_bg", "Background", "color", ""), F("border_color", "Border", "color", "")]
+    rows = {"Type": vm.tile_title(cfg), "Title": cfg.get("title") or "(automatic)",
+            "Position": f"{cfg['x']}, {cfg['y']} px", "Size": f"{cfg['w']} × {cfg['h']} px"}
     if kind == "text":
-        comp = [comp[0]]
-        data = [F("text", "Text", "text", ""), F("style", "Style", "choice", "H1",
-                                                 {"H1": "Header 1", "H2": "Header 2", "H3": "Header 3",
-                                                  "Body": "Body text"}),
-                F("align", "Alignment", "choice", "left", {"left": "Left", "center": "Centre", "right": "Right"}),
-                F("value_color", "Text colour", "color", "")]
-    elif kind == "plot":
-        data = [F("channels", "Tags", "channels", None, pick_many, button="Choose..."),
-                F("span_s", "Time span (s)", "float", 0.0, (0, 7200), "0 = the Quick View time window"),
-                F("legend", "Legend", "bool", True), F("grid", "Grid lines", "bool", True),
-                F("stack", "Stack (one plot per tag)", "bool", False),
-                F("y_auto", "Auto Y range", "bool", True), F("y_min", "Y min", "float", -10.0),
-                F("y_max", "Y max", "float", 10.0), F("line_width", "Line width", "float", 1.5, (0.5, 6))]
-        if cfg.get("plot") != "time":
-            data = data[:1] + data[2:5]
-    elif kind in ("value", "gauge", "led"):
-        data = [F("channel", "Tag", "channel", None, pick_one, button="Choose..."),
-                F("quantity", "Show", "choice", "value", STATS)] + _window_fields() + \
-               [F("decimals", "Decimals", "int", 3, (0, 8))]
-        if kind == "value":
-            data += [F("value_size", "Value size (px)", "int", 30, (10, 160)), F("value_color", "Value colour", "color", ""),
-                     F("unit", "Unit text", "str", "", tip="empty = the tag's unit")]
-        elif kind == "gauge":
-            data += [F("gauge_style", "Style", "choice", "speed", vm.GAUGE_STYLES),
-                     F("g_min", "Minimum", "float", 0.0), F("g_max", "Maximum", "float", 100.0),
-                     F("unit", "Unit text", "str", "")]
-        else:
-            data = data[:5] + [F("led_op", "On when value", "choice", ">", [">", ">=", "<", "<=", "==", "!="]),
-                               F("led_value", "Threshold", "float", 0.5),
-                               F("led_on", "On colour", "color", ""), F("led_off", "Off colour", "color", ""),
-                               F("led_on_text", "On text", "str", "ON"), F("led_off_text", "Off text", "str", "OFF")]
-    elif kind in ("stats", "tags"):
-        data = [F("channels", "Tags", "channels", None, pick_many, button="Choose...")]
+        rows["Text"] = (cfg.get("text") or "").replace("\n", " ")[:80] or "-"
+    elif cfg.get("channel"):
+        rows["Tag"] = _keys_text(w, [cfg["channel"]])
+        rows["Show"] = STATS.get(cfg.get("quantity", "value"), "Value") + (
+            f" · {vm.win_text(cfg)}" if cfg.get("quantity", "value") != "value" else "")
+    elif kind in ("plot", "stats", "tags"):
+        rows["Tags"] = _keys_text(w, cfg.get("channels"))
         if kind == "stats":
-            data += _window_fields()
-        data.append(F("decimals", "Decimals", "int", 3, (0, 8)))
+            rows["Window"] = vm.win_text(cfg)
     elif kind == "alarms":
-        data = [F("source", "Show", "choice", "active", vm.ALARM_SOURCES),
-                F("max_rows", "Max rows", "int", 10, (1, 200))]
-    vals = {**cfg, "type": vm.tile_title(cfg), "channels": _keys_text(w, cfg.get("channels")),
-            "channel": _keys_text(w, [cfg["channel"]] if cfg.get("channel") else [])}
-
-    def apply(k, v):
-        if k in ("x", "y", "w", "h"):
-            _set(cfg, k, page.snap(int(v)), lambda: page.tile_changed(cfg, geometry=True))
-            return
-        if k == "win_n":
-            v = float(v)
-        _set(cfg, k, v, lambda: page.tile_changed(cfg))
-    actions = [("All settings...", "sliders", lambda: tile and page.edit_tile(tile)),
-               ("", "copy", lambda: tile and page.duplicate_tile(tile)),
-               ("", "trash", lambda: tile and page.delete_tile(tile))]
+        rows["Show"] = vm.ALARM_SOURCES.get(cfg.get("source", "active"), "-")
+    actions = [("Edit...", "pencil", lambda: tile and page.edit_tile(tile)),
+               ("Duplicate", "copy", lambda: tile and page.duplicate_tile(tile)),
+               ("Delete", "trash", lambda: tile and page.delete_tile(tile))]
     return PropTarget(vm.tile_title(cfg), {"plot": "chart", "text": "heading", "value": "hash", "gauge": "gauge",
                                           "led": "circle-dot", "stats": "sigma", "alarms": "bell",
                                           "tags": "tag"}.get(kind, "layout"),
                       f"{page.name} · {cfg['w']}×{cfg['h']} px at {cfg['x']}, {cfg['y']}",
-                      [("Component", comp), ("Data", data), ("Position", geo), ("Appearance", look)],
-                      vals, apply, actions,
-                      key=("tile", cfg["id"]))
+                      [("Component", [F(k, k, "info", "") for k in rows])], rows, None, actions,
+                      key=("tile", cfg["id"]), readonly=True)
 
 
 def selection_target(w, page, sel) -> PropTarget:

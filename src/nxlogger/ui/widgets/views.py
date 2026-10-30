@@ -249,15 +249,16 @@ class Tile(QFrame):
         d = e.globalPosition().toPoint() - self._press
         g = QRect(self._start)
         snap = self.page.snap
+        cw, ch = self.canvas.width(), self.canvas.height()     # the view's fixed size: stay inside it
         if self._drag == "move":
-            g.moveTo(max(0, snap(g.x() + d.x())), max(0, snap(g.y() + d.y())))
+            g.moveTo(min(max(0, snap(g.x() + d.x())), max(0, cw - g.width())),
+                     min(max(0, snap(g.y() + d.y())), max(0, ch - g.height())))
         else:
-            g.setWidth(max(MIN_W, snap(g.width() + d.x())))
-            g.setHeight(max(MIN_H, snap(g.height() + d.y())))
+            g.setWidth(min(max(MIN_W, snap(g.width() + d.x())), max(MIN_W, cw - g.x())))
+            g.setHeight(min(max(MIN_H, snap(g.height() + d.y())), max(MIN_H, ch - g.y())))
         if g != self._target:
             self._target = g
             self.canvas.ghost.setGeometry(g)
-            self.canvas.grow_to(g)
 
     def mouseReleaseEvent(self, e):
         if self._press is not None:
@@ -287,7 +288,7 @@ class Tile(QFrame):
             return super().contextMenuEvent(e)
         self.page.select(("tile", self.cfg))
         m = QMenu(self)
-        m.addAction("All settings...", lambda: self.page.edit_tile(self))
+        m.addAction("Edit...", lambda: self.page.edit_tile(self))
         m.addAction("Duplicate", lambda: self.page.duplicate_tile(self))
         m.addAction("Bring to front", self.raise_)
         m.addAction("Delete", lambda: self.page.delete_tile(self))
@@ -995,17 +996,11 @@ class Canvas(QWidget):
         self._grid_px: tuple | None = None
 
     def fit(self):
-        r = b = 0
-        for t in self.tiles:
-            g = t.geometry()
-            r, b = max(r, g.right()), max(b, g.bottom())
-        self.setMinimumSize(r + 40, b + 40)
+        """The view's fixed size (width x height, View pop-up > Size): the same layout with any panel
+        open; the scroll area shows scroll bars when the window is smaller."""
+        v = self.page.view
+        self.setFixedSize(int(v.get("width", 1920)), int(v.get("height", 1080)))
         self.empty.setVisible(not self.tiles)
-
-    def grow_to(self, g: QRect):
-        """Grow (never shrink) while dragging, so a component can be pulled past the edge."""
-        if g.right() + 40 > self.minimumWidth() or g.bottom() + 40 > self.minimumHeight():
-            self.setMinimumSize(max(self.minimumWidth(), g.right() + 40), max(self.minimumHeight(), g.bottom() + 40))
 
     def _grid_brush(self, step: int) -> QBrush:
         key = (step, T["border"])
@@ -1028,6 +1023,9 @@ class Canvas(QWidget):
             step = max(4, int(v.get("grid", GRID)))
             step *= 2 if step < 10 else 1
             p.fillRect(e.rect(), self._grid_brush(step))
+        if self.page.editing:                                    # where the screen ends
+            p.setPen(QColor(T["accent"]))
+            p.drawRect(self.rect().adjusted(0, 0, -1, -1))
         p.end()
 
 
@@ -1072,6 +1070,14 @@ class ViewPage(QWidget):
         bl.addWidget(self.hint)
         self.count_lbl = label("", muted=True, small=True)
         bl.addWidget(self.count_lbl)
+        if hasattr(host, "enter_monitor"):          # full-screen watching (Monitor mode, F11)
+            mon = QToolButton(); mon.setText("Monitor")
+            mon.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            mon.setToolTip("Monitor mode: only the views, full size (F11)")
+            host.reg_icon(mon, "maximize")
+            mon.clicked.connect(lambda: host.enter_monitor(self.view["id"]))
+            bl.addWidget(mon)
+            self.mon_btn = mon
         for tip, icon, slot in (("View properties", "sliders", lambda: host.view_properties(self)),
                                 ("Delete view", "trash", lambda: host.delete_view(self))):
             b = QToolButton(); b.setToolTip(tip); b.setAutoRaise(True)
@@ -1081,8 +1087,11 @@ class ViewPage(QWidget):
         self.bar = bar
 
         self.canvas = Canvas(self)
-        self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(self.canvas)
+        self.scroll = QScrollArea(); self.scroll.setWidgetResizable(False)   # fixed canvas: scroll bars, no stretch
+        self.scroll.setObjectName("viewScroll")
+        self.scroll.setWidget(self.canvas)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._align()
         v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
         v.addWidget(bar); v.addWidget(self.scroll, 1)
         for cfg in self.view["tiles"]:
@@ -1152,12 +1161,14 @@ class ViewPage(QWidget):
         return self.snap(y + 20) if self.tiles else self.snap(10)
 
     def add_tile(self, kind: str, **preset):
-        """Place a component below the others with sensible defaults; refine it in Properties."""
+        """A new component below the others with sensible defaults - the host's pop-up first
+        ("New component", Add), else at once."""
         ch = self.host.channel_choices()
         cfg = new_tile(kind, self.snap(10), self._free_y(), show_title=bool(self.view.get("title_bar", True)),
                        **preset)
         if not self._room(cfg):
             return
+        cfg["y"] = max(0, min(cfg["y"], self.snap(int(self.view.get("height", 1080)) - cfg["h"])))
         if kind in ("plot", "stats", "tags") and ch:   # start with every tag of the first device
             first = ch[0][0]
             cfg["channels"] = [[tid, idx] for tid, idx, *_ in ch if tid == first]
@@ -1167,6 +1178,12 @@ class ViewPage(QWidget):
             cfg["channel"] = [ch[0][0], ch[0][1]]
         if kind == "gauge":
             cfg["decimals"] = 1
+        if hasattr(self.host, "new_component"):
+            self.host.new_component(self, cfg)       # Add in its pop-up -> insert_tile
+            return
+        self.insert_tile(cfg)
+
+    def insert_tile(self, cfg: dict):
         self.view["tiles"].append(cfg)
         t = self._make_tile(cfg)
         t.raise_()
@@ -1190,10 +1207,12 @@ class ViewPage(QWidget):
         tile = self.tile_of(cfg)
         if tile is None:
             return
-        if geometry:
-            for k, lo in (("w", MIN_W), ("h", MIN_H)):
-                cfg[k] = max(lo, int(cfg[k]))
-            cfg["x"], cfg["y"] = max(0, int(cfg["x"])), max(0, int(cfg["y"]))
+        if geometry:                                 # inside the view's fixed size
+            vw, vh = int(self.view.get("width", 1920)), int(self.view.get("height", 1080))
+            cfg["w"] = min(max(MIN_W, int(cfg["w"])), vw)
+            cfg["h"] = min(max(MIN_H, int(cfg["h"])), vh)
+            cfg["x"] = min(max(0, int(cfg["x"])), vw - cfg["w"])
+            cfg["y"] = min(max(0, int(cfg["y"])), vh - cfg["h"])
             tile.setGeometry(cfg["x"], cfg["y"], cfg["w"], cfg["h"])
             self.canvas.fit()
         tile.apply_cfg()
@@ -1263,8 +1282,15 @@ class ViewPage(QWidget):
             if hasattr(self.host, "view_selected"):
                 self.host.view_selected(self, None)
 
+    def _align(self):
+        a = Qt.AlignmentFlag.AlignTop | (Qt.AlignmentFlag.AlignHCenter if self.view.get("align") == "center"
+                                         else Qt.AlignmentFlag.AlignLeft)
+        self.scroll.setAlignment(a)
+
     def apply_view(self):
-        """View properties changed: canvas, grid, component defaults."""
+        """View properties changed: size, alignment, canvas, grid, component defaults."""
+        self.canvas.fit()
+        self._align()
         self.canvas.update()
         for t in self.tiles:
             t.apply_cfg(); t.update()

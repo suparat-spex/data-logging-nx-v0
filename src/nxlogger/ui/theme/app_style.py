@@ -128,6 +128,13 @@ QTreeWidget#startList { background: transparent; border: none; }
 QTreeWidget#startList::item { padding: 3px 0; }
 QTreeWidget#startList::item:hover { background: @hover@; }
 QLabel#startLink { padding: 1px 0; }
+QFrame#monitorBar { background: @panel2@; border: none; border-bottom: 1px solid @border@; }
+QFrame#monitorBar QLabel { background: transparent; }
+QLabel#monitorChip { border: 1px solid @border@; border-radius: 9px; padding: 1px 9px; color: @muted@; }
+QLabel#monitorChip[level="ok"] { color: @ok@; border-color: @ok@; }
+QLabel#monitorChip[level="warn"] { color: @warn@; border-color: @warn@; }
+QLabel#monitorChip[level="bad"] { color: @bad@; border-color: @bad@; }
+QLabel#monitorClock { font-weight: 600; padding: 0 4px; }
 QFrame#propHead QLabel { background: transparent; }
 QFrame#formHead { background: @accent@; border-bottom: 1px solid @border@; }
 QFrame#formHead QLabel#formPath { color: @accent_text@; font-style: italic; background: transparent; }

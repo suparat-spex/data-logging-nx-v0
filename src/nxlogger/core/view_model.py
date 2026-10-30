@@ -1,8 +1,9 @@
 """
 View (custom screen) data model: plain dicts saved in the project file, no Qt.
 
-A view is a free-form canvas: every component has x / y / w / h in pixels and snaps to the
-view's grid (default 10 px) while it is moved or resized. Components: header / text, graph
+A view is a free-form canvas of a fixed size (width x height, default 1920 x 1080; it scrolls in a
+smaller window): every component has x / y / w / h in pixels inside it and snaps to the view's
+grid (default 10 px) while it is moved or resized. Components: header / text, graph
 (trend, FFT, STFT, histogram), number, gauge, LED, statistics / alarm / tag table.
 Views saved as grids (NX Logger 2.0 grid layout: rows / cols / row / col / spans) are
 converted to pixel positions in normalize_view.
@@ -50,7 +51,11 @@ GAUGE_STYLES = {"basic": "Basic needle", "speed": "Speed (arc + needle)", "progr
 COLORMAPS = ["viridis", "inferno", "plasma", "magma", "cividis", "turbo"]
 
 VIEW_DEFAULTS = {"bg": "", "grid": GRID, "show_grid": True, "snap": True, "layout": "free",
-                 "tile_bg": "", "tile_border": "", "title_bar": True, "margin": 10}
+                 "tile_bg": "", "tile_border": "", "title_bar": True, "margin": 10,
+                 "width": 1920, "height": 1080, "align": "left"}       # fixed canvas (px); scrolls when bigger
+VIEW_SIZES = [(1280, 800), (1366, 768), (1920, 1080), (2560, 1440), (3840, 2160)]   # presets of the View pop-up
+VIEW_ALIGN = {"left": "Top left", "center": "Top centre"}       # where the canvas sits on a bigger window
+MAX_VIEW = 8000
 TILE_DEFAULTS = {"title": "", "show_title": True, "card_bg": "", "border_color": "",
                  "x": 10, "y": 10, "w": 200, "h": 110,
                  "channels": [], "channel": None, "decimals": 3, "text": "Heading", "style": "H1",
@@ -135,7 +140,18 @@ def normalize_view(v: dict) -> dict:
         v.setdefault(k, d)
     for t in v.setdefault("tiles", []):
         normalize_tile(t)
+    ew, eh = view_extent(v)                    # older views: never smaller than their components
+    v["width"] = max(int(v.get("width") or 1920), ew)
+    v["height"] = max(int(v.get("height") or 1080), eh)
     return v
+
+
+def view_extent(v: dict) -> tuple[int, int]:
+    """The smallest canvas that holds every component (+ the margin)."""
+    m = int(v.get("margin", 10))
+    tiles = v.get("tiles", [])
+    return (max((int(t["x"]) + int(t["w"]) for t in tiles), default=0) + m,
+            max((int(t["y"]) + int(t["h"]) for t in tiles), default=0) + m)
 
 
 def is_graph(t: dict) -> bool:

@@ -373,26 +373,110 @@ def test_start_page(win, monkeypatch, tmp_path):
     win._show_doc(f"view:{vp.view['id']}")
 
 
-def test_properties_panel_targets(win):
+def test_monitor_mode(win):
+    from nxlogger.core import view_model as vmod
+    vp = next(iter(win.view_pages.values()))
+    extra = vmod.new_view("Energy"); win.project.views.append(extra)
+    win._open_view_page(extra, editing=False, show=False)
+    win._show_doc(f"view:{vp.view['id']}")
+    left_was = win.left_dock.isVisible()
+    win.enter_monitor(vp.view["id"])                               # the Monitor button of the view
+    bar = win.monitor_bar
+    assert win._monitor is not None and bar.isVisible() or not win.isVisible()
+    assert not win.menuBar().isVisible() and not win.toolbar.isVisible() and not win.statusBar().isVisible()
+    assert win.doc_tabs.tabBar().isHidden() and win.left_dock.isHidden() and win.right_dock.isHidden()
+    assert vp.bar.isHidden() and not vp.editing                    # watching, not editing
+    assert [bar.views.itemText(i) for i in range(bar.views.count())] == [v["name"] for v in win.project.views]
+    assert bar.views.currentData() == vp.view["id"]
+    bar.step(1)                                                    # next view (Page Down)
+    assert win.doc_tabs.currentWidget() is win.view_pages[extra["id"]] and bar.views.currentText() == "Energy"
+    bar.step(-1)
+    assert win.doc_tabs.currentWidget() is vp
+    bar.cycle.setCurrentIndex(bar.cycle.findData(10))              # auto-cycle
+    assert win._mon_cycle.isActive() and win._mon_cycle.interval() == 10_000
+    bar.update_live()
+    assert "online" in bar.online.text() and bar.clock.text()
+    win.exit_monitor("alarms")                                     # the alarm chip: out, on the Alarms page
+    assert win._monitor is None and not win._mon_cycle.isActive() and bar.isHidden()
+    assert win.menuBar().isVisible() == True or not win.isVisible()   # noqa: E712
+    assert not win.doc_tabs.tabBar().isHidden() and not vp.bar.isHidden()
+    assert win.left_dock.isVisible() == left_was
+    assert win.doc_tabs.currentWidget() is win.docs["alarms"][0]
+    bar.cycle.setCurrentIndex(0)
+    win.toggle_monitor(); assert win._monitor is not None            # F11 in, F11 out
+    win.toggle_monitor(); assert win._monitor is None
+    win.project.views.remove(extra)
+    win._load_views()
+    win._show_doc(f"view:{next(iter(win.view_pages.values())).view['id']}")
+
+
+def test_properties_panel_targets(win, monkeypatch):
+    from nxlogger.ui.dialogs import tile_dialog as td
+    from nxlogger.ui.dialogs import view_dialog as vd
     dev = win.project.devices[0]
     for ref in (("device", dev.id), ("tag", dev.id, 0), ("project",)):
         win.select_object(ref)
         assert win.props.target is not None and win.props.grid.topLevelItemCount() > 0
     page = next(iter(win.view_pages.values()))
+    win._show_doc(f"view:{page.view['id']}")             # views open as tabs when used
     page.btn_edit.setChecked(True)
     tile = page.view["tiles"][1]
-    page.select(("tile", tile))
-    assert win.props.target.key == ("tile", tile["id"])
-    win.props.target.apply("decimals", 1)
-    assert tile["decimals"] == 1
-    win.props.target.apply("w", 333)                     # snaps to the 10 px grid
-    tile_w = page.tile_of(tile).width()
-    assert tile["w"] == 330 and tile_w == 330
-    page.add_tile("led")
-    assert page.view["tiles"][-1]["kind"] == "led" and win.props.target.key[0] == "tile"
-    page.select(None)
-    assert win.props.target.key == ("view", page.view["id"])
+    page.select(("tile", tile))                          # Properties: read-only + Edit...
+    t = win.props.target
+    assert t.key == ("tile", tile["id"]) and t.readonly and t.apply is None
+    assert [a[0] for a in t.actions] == ["Edit...", "Duplicate", "Delete"]
+
+    def tile_exec(dlg):                                  # the component pop-up: Position tab, snapped, inside
+        tabs = [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())]
+        assert tabs[-1] == "Position"
+        dlg.dec.setValue(1); dlg.pos["w"].setValue(333)
+        dlg.pos["x"].setValue(1900)                      # does not fit on 1920 px: refused
+        dlg._ok()
+        assert "Position" in dlg.err.text()
+        dlg.pos["x"].setValue(20)
+        return True
+    monkeypatch.setattr(td.TileDialog, "exec", tile_exec)
+    win._tile_popup(page, tile)
+    assert tile["decimals"] == 1 and tile["w"] == 330 and page.tile_of(tile).width() == 330   # 10 px grid
+
+    def add_exec(dlg):                                   # Add: the pop-up first
+        assert dlg.ok_btn.text() == "Add"
+        return True
+    monkeypatch.setattr(td.TileDialog, "exec", add_exec)
+    n = len(page.view["tiles"])
+    win.new_component(page, __import__("nxlogger.core.view_model", fromlist=["x"]).new_tile("led", 10, 10))
+    _pump(0.05)
+    assert len(page.view["tiles"]) == n + 1 and page.view["tiles"][-1]["kind"] == "led"
+    monkeypatch.setattr(td.TileDialog, "exec", lambda dlg: False)        # Cancel: nothing added
+    page.add_tile("value"); _pump(0.05)
+    assert len(page.view["tiles"]) == n + 1
+
+    page.select(None)                                    # the view: read-only, its pop-up has Size
+    vt = win.props.target
+    assert vt.key == ("view", page.view["id"]) and vt.readonly and vt.actions[0][0] == "Edit..."
+    assert page.canvas.size().toTuple() == (1920, 1080)  # the fixed size, whatever the window
+
+    def view_exec(dlg):
+        assert dlg.preset.currentText() == "1920 × 1080"
+        dlg.w_px.setValue(320); dlg.h_px.setValue(240)   # smaller than the components
+        dlg._ok()
+        assert "Size" in dlg.err.text()
+        dlg.preset.setCurrentIndex(dlg.preset.findData("1366x768"))
+        dlg.align.setCurrentIndex(dlg.align.findData("center"))
+        return True
+    monkeypatch.setattr(vd.ViewDialog, "exec", view_exec)
+    win._view_popup(page)
+    assert (page.view["width"], page.view["height"], page.view["align"]) == (1366, 768, "center")
+    assert page.canvas.size().toTuple() == (1366, 768)
+    page.view.update(width=1920, height=1080, align="left"); page.apply_view()
     page.btn_edit.setChecked(False)
+    for a in win._icon_only:                             # Home / New / Open / Save: icons only, always
+        assert win.toolbar.widgetForAction(a).toolButtonStyle() == QtCore_ToolButtonIconOnly()
+
+
+def QtCore_ToolButtonIconOnly():
+    from PySide6.QtCore import Qt
+    return Qt.ToolButtonStyle.ToolButtonIconOnly
 
 
 def test_tree_layout(win):
@@ -517,14 +601,19 @@ def test_editor_tabs(win, monkeypatch):
     assert not win.close_editor(e) and win.doc_tabs.indexOf(e) >= 0
     monkeypatch.setattr(ft, "ask_unsaved", lambda *a, **k: "discard")
     assert win.close_editor(e)
-    # saved settings that used to be pop-ups are editor tabs too
+    # the AI/ML log settings are an editor tab; views and components are pop-ups (like devices / tags)
+    e = win.open_editor("mllog", "settings")
+    assert isinstance(e, FormTab) and e.dlg is not None
     page = next(iter(win.view_pages.values()))
-    for what, ident in (("view", page.view["id"]), ("tile", (page.view["id"], page.view["tiles"][1]["id"])),
-                        ("mllog", "settings")):
-        e = win.open_editor(what, ident)
-        assert isinstance(e, FormTab) and e.dlg is not None, what
-    win.edit_component(page, page.view["tiles"][1])
-    assert win.doc_tabs.currentWidget().key == f"edit:tile:{page.view['id']}:{page.view['tiles'][1]['id']}"
+    from nxlogger.ui.dialogs import tile_dialog as td
+    from nxlogger.ui.dialogs import view_dialog as vd
+    seen = []
+    monkeypatch.setattr(td.TileDialog, "exec", lambda dlg: seen.append(dlg.ok_btn.text()) or False)
+    monkeypatch.setattr(vd.ViewDialog, "exec", lambda dlg: seen.append(dlg.ok_btn.text()) or False)
+    tabs = win.doc_tabs.count()
+    win.edit_component(page, page.view["tiles"][1]); win.view_properties(page)
+    _pump(0.05)
+    assert seen == ["Save", "Save"] and win.doc_tabs.count() == tabs        # pop-ups, no new tab
     win._close_editors()
     assert not any(k.startswith("edit:") for k in win.docs)
 

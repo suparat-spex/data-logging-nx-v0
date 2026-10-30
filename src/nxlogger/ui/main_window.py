@@ -52,7 +52,7 @@ from contextlib import contextmanager
 
 import numpy as np
 from PySide6.QtCore import QEvent, QObject, QSettings, QSize, QTimer, QUrl, Qt
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDockWidget,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
@@ -115,6 +115,7 @@ from nxlogger.ui.widgets import alarm_panel as ap
 from nxlogger.ui.widgets import properties as props
 from nxlogger.ui.widgets import views as dv
 from nxlogger.ui.widgets.connectivity import STATE_TOKEN, ConnectivityPage
+from nxlogger.ui.widgets.monitor_bar import MonitorBar
 from nxlogger.ui.widgets.start_page import StartPage, show_at_startup
 from nxlogger.ui.widgets.form_tab import FormTab
 from nxlogger.ui.widgets.property_grid import PropertiesPanel
@@ -286,6 +287,17 @@ class DaqWindow(AppWindow):
         self.stat_timer = QTimer(self, interval=500, timeout=self._update_stats)
         self._agg_saver = QTimer(self, interval=30_000, timeout=self._agg_save)   # running values (retain)
         self._agg_saver.start()
+        self.monitor_bar = MonitorBar(self)          # Monitor mode (full-screen views)
+        self.monitor_bar.hide()
+        self.centralWidget().layout().insertWidget(0, self.monitor_bar)
+        self._monitor: dict | None = None            # the layout to bring back while in Monitor mode
+        self._mon_cycle = QTimer(self, timeout=lambda: self.monitor_bar.step(1))
+        for key, slot in (("F11", self.toggle_monitor), ("Esc", lambda: self._monitor and self.exit_monitor()),
+                          ("PgUp", lambda: self._monitor and self.monitor_bar.step(-1)),
+                          ("PgDown", lambda: self._monitor and self.monitor_bar.step(1))):
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.ShortcutContext.ApplicationShortcut if key == "F11" else Qt.ShortcutContext.WindowShortcut)
+            sc.activated.connect(slot)
         self.stat_timer.start()
 
     def apply_theme(self):
@@ -313,10 +325,16 @@ class DaqWindow(AppWindow):
         self.brand.setToolTip(f"{APP_NAME} - data logger: Modbus, MQTT, OPC UA, simulation")
         tb.addWidget(self.brand)
         tb.addSeparator()
-        tb.addAction(self.act("Start Page", lambda: self._show_doc("start"), "Ctrl+0", "house"))
-        tb.addAction(self.act("New", self._new_project, "Ctrl+N", "file-plus"))
-        tb.addAction(self.act("Open...", self._open_project, "Ctrl+O", "folder-open"))
-        tb.addAction(self.act("Save", self._save_project, "Ctrl+S", "save"))
+        self._icon_only = []                         # Home / New / Open / Save: icons only, always
+        for text, slot, key, icon in (("Start Page", lambda: self._show_doc("start"), "Ctrl+0", "house"),
+                                      ("New project", self._new_project, "Ctrl+N", "file-plus"),
+                                      ("Open project...", self._open_project, "Ctrl+O", "folder-open"),
+                                      ("Save project", self._save_project, "Ctrl+S", "save")):
+            a = self.act(text, slot, key, icon)
+            a.setToolTip(f"{text}  ({key})")
+            tb.addAction(a)
+            tb.widgetForAction(a).setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            self._icon_only.append(a)
         tb.addSeparator()
         tb.addAction(self.act_connect)
         tb.addSeparator()
@@ -413,6 +431,8 @@ class DaqWindow(AppWindow):
         add_dev = QMenu("Add device", self)               # menus are text only (no icon column)
         for k, d in DRIVERS.items():
             add_dev.addAction(d["label"] + "...", lambda kk=k: self.add_device(kk))
+        self.view_menu.insertAction(self.view_menu.actions()[0] if self.view_menu.actions() else None,
+                                    self.act("Monitor mode  (F11)", self.toggle_monitor, None, "maximize"))
         for a in (self.act("Start Page", lambda: self._show_doc("start"), None, "house"),
                   self.act("Quick View", lambda: self._show_doc("screen"), "Ctrl+1", "chart"),
                   self.act("Connectivity", lambda: self._show_doc("connectivity"), "Ctrl+2", "network"),
@@ -860,6 +880,8 @@ class DaqWindow(AppWindow):
 
     # ================================================================ project
     def _set_project(self, p: Project, path: str | None):
+        if getattr(self, "_monitor", None) is not None:
+            self.exit_monitor()
         self.drivers.stop_all()
         if hasattr(self, "doc_tabs"):
             self._close_editors()                # editors of the old project
@@ -1553,52 +1575,6 @@ class DaqWindow(AppWindow):
         return spec
 
     # ---- views and their components
-    def _spec_view(self, vid):
-        page = self.view_pages.get(vid)
-        if page is None:
-            return None
-        v = page.view
-        spec = {"key": f"edit:view:{vid}", "title": v["name"], "icon": "layout",
-                "path": f"Project / Views / {v['name']}", "kind": "view", "section": "View"}
-        spec["build"] = lambda: ViewDialog(self, v, {x["name"] for x in self.project.views if x is not v})
-
-        def apply(dlg):
-            dlg.apply(v)
-            self.view_props_changed(page, "name")
-            self._refresh_properties()
-            spec["tab"].set_identity(spec["key"], v["name"], f"Project / Views / {v['name']}")
-            return True
-        spec["apply"] = apply
-        spec["actions"] = [("Open view", "layout", lambda: self._show_doc(f"view:{vid}")),
-                           self._delete_action(spec, lambda: self.delete_view(page),
-                                               lambda: vid in self.view_pages)]
-        return spec
-
-    def _spec_tile(self, ident):
-        vid, tid = ident
-        page = self.view_pages.get(vid)
-        cfg = next((t for t in page.view["tiles"] if t["id"] == tid), None) if page else None
-        if cfg is None:
-            return None
-        name = lambda: cfg.get("title") or vmod.tile_title(cfg)                     # noqa: E731
-        spec = {"key": f"edit:tile:{vid}:{tid}", "title": name(), "icon": "sliders",
-                "path": f"Project / Views / {page.name} / {name()}", "kind": vmod.tile_title(cfg)}
-        spec["build"] = lambda: TileDialog(self, cfg, self.channel_choices())
-
-        def apply(dlg):
-            cfg.update(dlg.result_cfg())
-            page.tile_changed(cfg)
-            self._stat_dirty = True
-            self._refresh_properties()
-            spec["tab"].set_identity(spec["key"], name(), f"Project / Views / {page.name} / {name()}")
-            return True
-        spec["apply"] = apply
-        exists = lambda: vid in self.view_pages and any(t is cfg for t in page.view["tiles"])   # noqa: E731
-        spec["actions"] = [("Open view", "layout", lambda: self._show_doc(f"view:{vid}")),
-                           self._delete_action(spec, lambda: page.tile_of(cfg) and page.delete_tile(page.tile_of(cfg)),
-                                               exists)]
-        return spec
-
     def _spec_mllog(self, _ident):
         spec = {"key": "edit:mllog", "title": "AI/ML data log", "icon": "brain-circuit",
                 "path": "Project / Logging / AI/ML data log", "kind": "settings", "section": "AI/ML data log"}
@@ -3321,6 +3297,8 @@ class DaqWindow(AppWindow):
             self.conn_page.update_states()
         elif page is getattr(self, "start_page", None):
             self.start_page.update_live()
+        if self._monitor is not None:
+            self.monitor_bar.update_live()
         self._sync_comm()
 
     def _log(self, s: str):
@@ -3681,21 +3659,6 @@ class DaqWindow(AppWindow):
         t, y = s
         i = np.searchsorted(t, t[-1] - win, side="left") if win else 0
         return t[i:], y[i:]
-
-    def pick_keys(self, cfg: dict, field: str, multi: bool, page):
-        """Properties panel: choose the tag(s) of a component."""
-        chosen = cfg.get(field) or []
-        dlg = PickDialog(self, self.channel_choices(), chosen if multi else [chosen], multi,
-                         "Choose tags" if multi else "Choose a tag")
-        if dlg.exec():
-            keys = dlg.result_keys()
-            if keys is None:
-                return
-            if cfg.get("kind") == "plot" and cfg.get("plot") == "stft" and multi:
-                keys = keys[:1]
-            cfg[field] = keys
-            page.tile_changed(cfg)
-            self.show_properties(props.tile_target(self, page, cfg))
 
     def view_props_changed(self, page, key: str):
         if key == "name":
@@ -4209,6 +4172,96 @@ class DaqWindow(AppWindow):
         self._log(f"Aggregation tag '{a['name']}' reset by hand (was {now})")
         self._refresh_properties()
 
+    # ================================================================ Monitor mode (full-screen views)
+    MON_KEY = "monitor"                              # QSettings: last view, full screen, cycle (per PC)
+
+    def toggle_monitor(self):
+        if self._monitor is None:
+            self.enter_monitor()
+        else:
+            self.exit_monitor()
+
+    def enter_monitor(self, vid: str | None = None):
+        """Only the views, full size: menu, toolbar, panels, tabs and status bar hidden, the slim
+        Monitor bar on top. The layout before comes back on exit."""
+        views = self.project.views
+        if not views:
+            self.toast.popup("Add a view first (Start Page > Views > New view...)")
+            return
+        if self._monitor is not None:
+            if vid:
+                self.monitor_show(vid)
+            return
+        page = self.doc_tabs.currentWidget()
+        if vid is None:                              # the view in front, else the last one, else the first
+            vid = next((k for k, p in self.view_pages.items() if p is page), None) or \
+                str(QSettings().value(f"{self.MON_KEY}/view", "")) or views[0]["id"]
+        if not any(v["id"] == vid for v in views):
+            vid = views[0]["id"]
+        self._monitor = {"state": self.saveState(), "current": page, "max": self.isMaximized(),
+                         "full": self.isFullScreen(), "menu": self.menuBar().isVisible(),
+                         "tool": self.toolbar.isVisible(), "status": self.statusBar().isVisible()}
+        for p in self.view_pages.values():           # watching, not editing
+            if p.editing:
+                p.btn_edit.setChecked(False)
+            p.bar.hide()
+        for d in self.findChildren(QDockWidget):
+            d.hide()
+        self.menuBar().hide(); self.toolbar.hide(); self.statusBar().hide()
+        self.doc_tabs.tabBar().hide()
+        self.monitor_bar.show()
+        s = QSettings()
+        full = s.value(f"{self.MON_KEY}/fullscreen", False) in (True, "true", 1, "1")
+        cycle = int(s.value(f"{self.MON_KEY}/cycle_s", 0) or 0)
+        self.monitor_bar.set_options(full, cycle)
+        self.monitor_show(vid)
+        self.set_monitor_fullscreen(full)
+        self.set_monitor_cycle(cycle)
+        self.monitor_bar.update_live()
+        self._log("Monitor mode on")
+
+    def monitor_show(self, vid: str):
+        if f"view:{vid}" not in self.docs:
+            return
+        self._show_doc(f"view:{vid}")
+        self.monitor_bar.fill(vid)
+        QSettings().setValue(f"{self.MON_KEY}/view", vid)
+
+    def set_monitor_fullscreen(self, on: bool):
+        if self._monitor is None:
+            return
+        QSettings().setValue(f"{self.MON_KEY}/fullscreen", bool(on))
+        if on and not self.isFullScreen():
+            self.showFullScreen()
+        elif not on and self.isFullScreen():
+            self.showMaximized() if self._monitor["max"] else self.showNormal()
+
+    def set_monitor_cycle(self, seconds: int):
+        QSettings().setValue(f"{self.MON_KEY}/cycle_s", int(seconds or 0))
+        self._mon_cycle.stop()
+        if seconds and self._monitor is not None and len(self.project.views) > 1:
+            self._mon_cycle.start(int(seconds) * 1000)
+
+    def exit_monitor(self, to: str | None = None):
+        """Back to the layout before: panels, tabs, menu, toolbar, status bar, window size."""
+        m = self._monitor
+        if m is None:
+            return
+        self._monitor = None
+        self._mon_cycle.stop()
+        self.monitor_bar.hide()
+        for p in self.view_pages.values():
+            p.bar.show()
+        self.doc_tabs.tabBar().show()
+        self.menuBar().setVisible(m["menu"]); self.toolbar.setVisible(m["tool"])
+        self.statusBar().setVisible(m["status"])
+        if self.isFullScreen() and not m["full"]:
+            self.showMaximized() if m["max"] else self.showNormal()
+        self.restoreState(m["state"])
+        if to:
+            self._show_doc(to)
+        self._log("Monitor mode off")
+
     # ================================================================ Groups (Tags > Groups: one tree for all tags)
     def _regroup(self, fix):
         """Apply fix(path) -> path to every group path of the project (devices, tags, virtual,
@@ -4437,11 +4490,54 @@ class DaqWindow(AppWindow):
 
     def view_properties(self, page):
         if page is not None:
-            self.open_editor("view", page.view["id"])
+            QTimer.singleShot(0, lambda: self._view_popup(page))
+
+    def _view_popup(self, page):
+        """View pop-up (tabs, like devices and tags): name, size, background, grid, cards - on Save."""
+        v = page.view
+        dlg = ViewDialog(self, v, {x["name"] for x in self.project.views if x is not v}, vmod.view_extent(v))
+        dlg.ok_btn, title = popup_form(dlg, "layout", v["name"],
+                                       f"View · {v.get('width', 1920)} × {v.get('height', 1080)} px · "
+                                       f"{len(v['tiles'])} component(s)", "Save", width=520)
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or v["name"]))
+        if not dlg.exec():
+            return
+        dlg.apply(v)
+        self.view_props_changed(page, "name")
+        self._refresh_properties()
+        self.set_status(f"View '{v['name']}' saved", "ok")
 
     def edit_component(self, page, cfg: dict):
-        """A view component's "All settings..." (host API of views.py): an editor tab."""
-        self.open_editor("tile", (page.view["id"], cfg["id"]))
+        """A view component's Edit... (host API of views.py): its pop-up."""
+        QTimer.singleShot(0, lambda: self._tile_popup(page, cfg))
+
+    def new_component(self, page, cfg: dict):
+        """Add > ... on a view: the component's pop-up first ("New component", Add)."""
+        QTimer.singleShot(0, lambda: self._tile_popup(page, cfg, new=True))
+
+    def _tile_popup(self, page, cfg: dict, new: bool = False):
+        """Component pop-up (tabs per kind + Position): changes only on Save / Add."""
+        if not new and page.tile_of(cfg) is None:
+            return
+        v = page.view
+        dlg = TileDialog(self, cfg, self.channel_choices(), (int(v.get("width", 1920)), int(v.get("height", 1080))),
+                         int(v.get("grid", vmod.GRID)) if v.get("snap", True) else 1)
+        kind = vmod.tile_title(cfg)
+        icon = {"plot": "chart", "text": "heading", "value": "hash", "gauge": "gauge", "led": "circle-dot",
+                "stats": "sigma", "alarms": "bell", "tags": "tag"}.get(cfg["kind"], "layout")
+        dlg.ok_btn, title = popup_form(dlg, icon, "New component" if new else (cfg.get("title") or kind),
+                                       f"{page.name} · {kind}", "Add" if new else "Save", width=600)
+        if not dlg.exec():
+            return
+        cfg.update(dlg.result_cfg())
+        if new:
+            page.insert_tile(cfg)
+            page.tile_changed(cfg, geometry=True)
+        else:
+            page.tile_changed(cfg, geometry=True)
+        self._stat_dirty = True
+        self._refresh_properties()
+        self.set_status(f"{kind} " + ("added" if new else "saved"), "ok")
 
     def delete_view(self, page):
         if page is None:
@@ -4519,7 +4615,8 @@ class DaqWindow(AppWindow):
         keep = {self.act_connect, self.act_rec, self.act_stop}
         for a in self.toolbar.actions():
             btn = self.toolbar.widgetForAction(a)
-            if isinstance(btn, QToolButton) and a not in (self.act_left, self.act_panel, self.act_log):
+            if isinstance(btn, QToolButton) and a not in (self.act_left, self.act_panel, self.act_log,
+                                                          *self._icon_only):
                 text = mode == "wide" or (mode == "medium" and a in keep)
                 btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon if text
                                        else Qt.ToolButtonStyle.ToolButtonIconOnly)
