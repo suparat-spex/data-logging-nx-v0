@@ -1172,6 +1172,8 @@ class DaqWindow(AppWindow):
 
     SIMULATORS = [("Water treatment plant", "MQTT simulator: 49 signals in plant areas, with its own window - "
                    "use the Water plant demo template", "nxlogger.sim.water_plant_gui"),
+                  ("Factory energy", "Modbus TCP server with 11 power meters (127.0.0.1:5020) - use the Factory "
+                   "energy demo template", "nxlogger.sim.factory_energy_gui"),
                   ("ESP32 waveform publisher", "MQTT waveform packets like an ESP32 DAQ node", "nxlogger.sim")]
 
     def simulators(self) -> list[tuple[str, str, str, bool]]:

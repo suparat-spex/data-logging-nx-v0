@@ -20,6 +20,7 @@ Formerly SX Logger / MQDAQ (MQTT waveform logger; last flat-file version: git ta
 | `paths.py`, `config.py` | File locations (dev vs EXE) and `config.ini` |
 | `sim/publisher.py` | ESP32 waveform generator over MQTT |
 | `sim/water_plant.py` | Water treatment plant simulator over MQTT (JSON per area: raw water, pumps, dosing, filters, treated, power meter, environment, KPI); exports the NX Logger device / tag CSV; `water_plant_gui.py` = its window |
+| `sim/factory_energy.py` | Factory energy simulator: 11 power meters on a local Modbus TCP server (127.0.0.1:5020, units 1-11, float32 ABCD from address 0; pymodbus SimDevice, classic blocks as fallback): shifts, compressors, chiller, solar, events (trip, capacitor bank, demand peak); `factory_energy_gui.py` = its window. Start Page template "Factory energy demo" (`core/templates._factory_energy`: TOU cost, demand, kWh today, alarms, 3 views) |
 
 Docs: `docs/ui-guidelines.md` (editor tabs vs pop-ups), `docs/layout-and-menus.md` (Connectivity / Tags layout, lists, menus, pop-up tabs), `docs/connectivity.md` (connectors, addresses, tag CSV), `docs/recording-format.md`
 (session files - the contract with the NX Viewer), `docs/packet-format.md`, `docs/config.md`.
@@ -31,6 +32,7 @@ pip install -e ".[dev]"                 # once
 python -m nxlogger                      # app        (python -m nxlogger.sim = waveform publisher)
 python -m nxlogger.sim.water_plant      # water treatment plant over MQTT (--help; --export-device wtp.json)
 python -m nxlogger.sim.water_plant_gui  # the same with a window (live values, copy topic / JSON path)
+python -m nxlogger.sim.factory_energy_gui  # factory energy: 11 meters on Modbus TCP 127.0.0.1:5020 (--speed 60)
 python -m pytest -q                     # fast tests (Modbus / OPC UA tests start local servers)
 python -m pyflakes src tests            # lint
 .\packaging\build.ps1                   # EXE + installer

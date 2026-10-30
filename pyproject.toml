@@ -27,9 +27,11 @@ build = ["pyinstaller>=6.10"]
 nxlogger = "nxlogger.ui.app:main"
 nxlogger-sim = "nxlogger.sim.publisher:main"
 nxlogger-wtp-gui = "nxlogger.sim.water_plant_gui:main"
+nxlogger-energy-gui = "nxlogger.sim.factory_energy_gui:main"
 
 [project.scripts]
 nxlogger-wtp = "nxlogger.sim.water_plant:main"   # water treatment plant simulator (MQTT)
+nxlogger-energy = "nxlogger.sim.factory_energy:main"   # factory energy simulator (Modbus TCP)
 
 [tool.setuptools.dynamic]
 version = { attr = "nxlogger.__version__" }

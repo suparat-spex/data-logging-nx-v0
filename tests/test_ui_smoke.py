@@ -303,7 +303,10 @@ def test_start_page(win, monkeypatch, tmp_path):
         assert win.project is not saved and win.project_path is None
         if key not in ("blank", "opcua"):
             assert win.project.devices and win.project.views
-    assert win.project.name == "Water plant demo" and len(win.project.devices[0].tags) == 49
+        assert not win.vt_engine.errors and not win.agg_engine.errors, (key, win.vt_engine.errors,
+                                                                          win.agg_engine.errors)
+    assert win.project.name == "Factory energy demo" and len(win.project.devices[0].tags) == 99
+    assert len(win.project.virtual_tags) == 12 and len(win.project.aggregations) == 6
     f = tmp_path / "demo.nxl"                                      # recent projects: save, then listed
     monkeypatch.setattr("nxlogger.ui.main_window.QFileDialog.getSaveFileName", lambda *a, **k: (str(f), ""))
     assert win._save_project_as()
@@ -319,7 +322,7 @@ def test_start_page(win, monkeypatch, tmp_path):
     assert win.recent_sessions(5)[0][1:] == ("Demo", str(sess), 2048 + len((sess / "project.json").read_bytes()))
     page.refresh()
     assert page.sessions.topLevelItem(0).text(1) == "Demo" and "KB" in page.sessions.topLevelItem(0).text(2)
-    assert "devices online" in page.cur_status.text() and page.cur_name.text().startswith("Water plant demo")
+    assert "devices online" in page.cur_status.text() and page.cur_name.text().startswith("Factory energy demo")
     assert win.doc_links() and all(os.path.isfile(p) for _t, p in win.doc_links())   # from the source checkout
     started = []
     monkeypatch.setattr("nxlogger.ui.main_window.subprocess.Popen", lambda args, **k: started.append(args))
