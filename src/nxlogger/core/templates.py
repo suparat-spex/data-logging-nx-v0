@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from nxlogger.core import aggregation as ag
 from nxlogger.core import alarm_rules as ar
+from nxlogger.core import assets
 from nxlogger.core import system_tags as ss
 from nxlogger.core import virtual_tags as vt
 from nxlogger.core.project import Project, new_log_profile
@@ -47,7 +48,14 @@ def _with_view(p: Project, max_tags: int = 8) -> Project:
 
 
 def make(key: str, broker: dict | None = None) -> Project:
-    """A new project from a template (KeyError for an unknown key)."""
+    """A new project from a template (KeyError for an unknown key). The areas of the demos
+    (written as groups by the simulators) become assets."""
+    p = _make(key, broker)
+    assets.migrate_groups(p)
+    return p
+
+
+def _make(key: str, broker: dict | None = None) -> Project:
     broker = broker or {}
     host, port = broker.get("host") or "broker.emqx.io", int(broker.get("port") or 1883)
     title = TEMPLATE[key][1]

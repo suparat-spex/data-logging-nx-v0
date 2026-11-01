@@ -5,7 +5,7 @@ import queue
 import threading
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
 from nxlogger.ui.theme.ui_kit import label, set_prop
@@ -14,7 +14,7 @@ from nxlogger.ui.theme.ui_kit import label, set_prop
 class OpcUaBrowseDialog(QDialog):
     """selected() -> [(node id, browse name)] of the ticked variables."""
 
-    def __init__(self, parent, settings: dict, groups: list[str], group: str = ""):
+    def __init__(self, parent, settings: dict):
         super().__init__(parent)
         self.setWindowTitle(f"Browse OPC UA - {settings.get('endpoint', '')}")
         self.resize(640, 520)
@@ -24,9 +24,6 @@ class OpcUaBrowseDialog(QDialog):
         for c, w in enumerate((220, 80, 90)):
             self.tree.header().resizeSection(c, w)
         self.tree.itemExpanded.connect(self._expand)
-        self.group = QComboBox(); self.group.setEditable(True)
-        self.group.addItems([""] + groups); self.group.setCurrentText(group)
-        f = QFormLayout(); f.addRow("Add to group", self.group)
         self.status = label("Connecting...", muted=True, small=True)
         set_prop(self.status, "level", "muted"); self.status.setObjectName("statusMsg")
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -36,7 +33,7 @@ class OpcUaBrowseDialog(QDialog):
         v = QVBoxLayout(self)
         v.addWidget(label("Tick the variables to add as tags. Folders and objects load when expanded.",
                           muted=True, small=True))
-        v.addWidget(self.tree, 1); v.addLayout(f); v.addWidget(self.status); v.addWidget(bb)
+        v.addWidget(self.tree, 1); v.addWidget(self.status); v.addWidget(bb)
         self._jobs: "queue.Queue" = queue.Queue()
         self._results: "queue.Queue" = queue.Queue()
         self._items: dict[str, QTreeWidgetItem] = {}
@@ -100,8 +97,6 @@ class OpcUaBrowseDialog(QDialog):
         return [(it.data(0, Qt.ItemDataRole.UserRole)["node"], it.text(0)) for it in self._items.values()
                 if it.flags() & Qt.ItemFlag.ItemIsUserCheckable and it.checkState(0) == Qt.CheckState.Checked]
 
-    def group_path(self) -> str:
-        return "/".join(p.strip() for p in self.group.currentText().split("/") if p.strip())
 
     def done(self, r):
         self._timer.stop()

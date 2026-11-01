@@ -1,7 +1,7 @@
 """Add / edit a Virtual tag (Tags > Virtual): the settings pop-up, tabs style like the device and
 tag pop-ups. The type is chosen before it opens and is fixed (like a device's connector).
 
-  General      name, group, data type, unit, colour (swatch + Default, like device tags), description, enabled
+  General      name, data type, unit, colour (swatch + Default, like device tags), description, enabled
   <type>       Value (constant) · Expression (formula) · Condition (logic) · Inputs (selector)
                · Conversion · Text map
   Calculation  update (any input changes / trigger tag / every N ms), bad input (not constants)
@@ -41,10 +41,10 @@ LOGIC_TEMPLATES = [("A and B", "A and B"), ("A or B", "A or B"), ("not A", "not 
 class VirtualTagDialog(QDialog):
     """v: the definition (a copy - apply(v) writes the fields). engine: the VirtualEngine (check /
     preview); choices: [(tid, idx, label, colour, unit)] it can read; names: {formula name: key};
-    groups: existing group names; live(key) -> (value text, quality text, good, time);
+    live(key) -> (value text, quality text, good, time);
     pick(choices, chosen, multi, title) -> keys | None (the window's tag picker)."""
 
-    def __init__(self, parent, v: dict, engine, choices, names: dict, groups, live, pick, taken: set,
+    def __init__(self, parent, v: dict, engine, choices, names: dict, live, pick, taken: set,
                  default_color: str = ""):
         super().__init__(parent)
         self.v, self.engine, self.names, self.live, self.pick, self.taken = dict(v), engine, names, live, pick, taken
@@ -55,7 +55,7 @@ class VirtualTagDialog(QDialog):
         self.labels = {(c[0], c[1]): c[2] for c in self.choices}
         self.setWindowTitle(vt.TYPES[self.kind][0])
         tabs = self.tabs = QTabWidget()
-        tabs.addTab(self._general(groups), "General")
+        tabs.addTab(self._general(), "General")
         tabs.addTab(self._type_page(), TAB_OF[self.kind])
         if self.kind not in vt.NO_INPUT:
             tabs.addTab(self._calculation(), "Calculation")
@@ -72,12 +72,9 @@ class VirtualTagDialog(QDialog):
         self._preview()
 
     # ------------------------------------------------------------------ pages
-    def _general(self, groups):
+    def _general(self):
         w, f = form_page()
         self.name = QLineEdit(self.v["name"]); self.name.setPlaceholderText("e.g. Total_Flow")
-        self.group = QComboBox(); self.group.setEditable(True); self.group.addItem("")
-        self.group.addItems(sorted(g for g in groups if g)); self.group.setCurrentText(self.v.get("group", ""))
-        self.group.lineEdit().setPlaceholderText("(no group) - type a new one or pick")
         self.dtype = QComboBox()
         for k, t in vt.DTYPES.items():
             self.dtype.addItem(t, k)
@@ -98,7 +95,6 @@ class VirtualTagDialog(QDialog):
         self.enabled = QCheckBox("Enabled - calculate it and show it in views", checked=self.v.get("enabled", True))
         f.addRow("Type", label(f"{vt.TYPES[self.kind][0]} - {vt.TYPES[self.kind][2]}", muted=True))
         f.addRow("Name", self.name)
-        f.addRow("Group", self.group)
         f.addRow("Data type", self.dtype)
         f.addRow("Unit", self.unit)
         f.addRow("Colour", colour)
@@ -408,7 +404,7 @@ class VirtualTagDialog(QDialog):
     def collect(self) -> dict:
         """The definition as the widgets say (does not change self.v)."""
         v = dict(self.v)
-        v.update(name=self.name.text().strip(), group=self.group.currentText().strip().strip("/"),
+        v.update(name=self.name.text().strip(),
                  dtype=self.dtype.currentData(), unit=self.unit.currentText().strip(),
                  description=self.desc.text().strip(), enabled=self.enabled.isChecked(),
                  decimals=self.decimals.value(),

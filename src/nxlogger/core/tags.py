@@ -251,15 +251,6 @@ class DeviceCfg:
             return f"{s.get('host')}/{s.get('server')}"
         return "built-in"
 
-    def all_groups(self) -> list[str]:
-        """Every group path, parents included, sorted."""
-        out = set()
-        for g in list(self.groups) + [t.group for t in self.tags]:
-            parts = [p for p in (g or "").split("/") if p]
-            for i in range(1, len(parts) + 1):
-                out.add("/".join(parts[:i]))
-        return sorted(out, key=str.lower)
-
     def next_index(self) -> int:
         return max((t.index for t in self.tags), default=-1) + 1
 

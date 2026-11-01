@@ -197,8 +197,7 @@ def test_virtual_tags_popup_page_and_data_path(win, monkeypatch):
     win.doc_tabs.setCurrentIndex(front)
 
 
-def test_aggregation_tags_and_project_groups(win, monkeypatch, tmp_path):
-    from PySide6.QtCore import Qt
+def test_aggregation_tags_and_all_tags(win, monkeypatch, tmp_path):
     from nxlogger.core import aggregation as ag
     from nxlogger.ui.dialogs import aggregation_dialog as ad
     monkeypatch.setattr("nxlogger.ui.main_window.paths.data_dir", lambda: tmp_path)
@@ -215,7 +214,7 @@ def test_aggregation_tags_and_project_groups(win, monkeypatch, tmp_path):
         dlg.rate_per.setCurrentIndex(dlg.rate_per.findData("s")); dlg.skip_neg.setChecked(False)
         dlg.reset.setCurrentIndex(dlg.reset.findData("day")); dlg.reset_at.setText("6:7x")
         assert not dlg.ok_btn.isEnabled() and "●" in dlg.tabs.tabText(2)      # bad time: Period tab
-        dlg.reset_at.setText("06:00"); dlg.name.setText("Total"); dlg.group.setCurrentText("Plant/Area1")
+        dlg.reset_at.setText("06:00"); dlg.name.setText("Total")
         assert dlg.ok_btn.isEnabled() and "Next reset" in dlg.next_reset.text()
         dlg._ok()
         return True
@@ -261,24 +260,103 @@ def test_aggregation_tags_and_project_groups(win, monkeypatch, tmp_path):
     page._tag_menu(page.table.visualItemRect(page._rows[ag.agg_key(a["id"])]).center())
     assert "Reset now..." in menu_texts and menu_texts[-1] == "Delete tag..."
 
-    # Groups: one tree for all tags - a device tag and the aggregation tag in the same group
-    win.move_to_group([src], "Plant/Area1")
-    page.refresh(("cat", "groups"))
-    data = [page.dtree.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole) for i in range(page.dtree.topLevelItemCount())]
-    assert data[0] == ("all",) and ("pgroup", "Plant") in data and data[-1] == ("pnone",)
-    page.refresh(("pgroup", "Plant"))                    # a parent shows its sub-groups' tags too
-    assert set(page._rows) == {src, ag.agg_key(a["id"])} and win.group_count("Plant") == 2
-    assert page.btn_add.menu() is page.grp_menu and page.btn_del.isEnabled()
-    monkeypatch.setattr(win, "_recording_guard", lambda: True)
-    win._regroup(lambda g: "Site" + g[len("Plant"):] if g == "Plant" or g.startswith("Plant/") else g)  # rename
-    assert dev.tags[0].group == "Site/Area1" and a["group"] == "Site/Area1"
-    win.delete_project_group("Site/Area1")               # its tags move up, none is deleted
-    assert dev.tags[0].group == "Site" and a["group"] == "Site" and dev.tags[0] in dev.tags
-    win.move_to_group([src, ag.agg_key(a["id"])], "")
-    assert "Site" not in win.project.all_groups()        # a group nobody uses (and not kept empty) is gone
+    # All tags: every category in one table
+    page.refresh(("cat", "all"))
+    assert src in page._rows and ag.agg_key(a["id"]) in page._rows
+    page.refresh(("part", "aggregation"))
+    assert set(page._rows) == {ag.agg_key(a["id"])}
     win.delete_aggregations([a["id"]])
     assert win.project.aggregations == [] and a["id"] not in win.agg_engine.states
     page.refresh(("cat", "device"))
+    win.doc_tabs.setCurrentIndex(front)
+
+
+def test_assets_page_picker_and_logging(win, monkeypatch):
+    from PySide6.QtCore import Qt
+    from nxlogger.core import assets as asm
+    from nxlogger.ui.dialogs import asset_dialog as ad
+    from nxlogger.ui.dialogs.common import ChannelPicker
+    monkeypatch.setattr("nxlogger.ui.main_window.confirm", lambda *a_, **k_: True)
+    front = win.doc_tabs.currentIndex()
+    dev = win.project.devices[0]
+    k = [(dev.id, t.index) for t in dev.tags]
+
+    def make(name, parent=None, keys=(), short=()):
+        def run(dlg):                                    # the pop-up: name, parent, attributes
+            dlg.name.setText(name)
+            dlg.parent_box.setCurrentIndex(dlg.parent_box.findData(parent))
+            for key in keys:
+                dlg._row(list(key), "")
+            for i, s_ in enumerate(short):
+                dlg.attrs.topLevelItem(i).setText(0, s_)
+            assert dlg.ok_btn.isEnabled(), dlg.err.text()
+            return True
+        monkeypatch.setattr(ad.AssetDialog, "exec", run)
+        win._asset_popup(None, parent)
+        return next(a for a in win.project.assets if a["name"] == name and a.get("parent") == parent)
+    station = make("Station A")
+    p1 = make("Pump 01", station["id"], k[:2], ("Speed", "Status"))
+    p2 = make("Pump 02", station["id"], k[2:4], ("Speed", "Status"))
+    assert asm.path(win.project.assets, p1["id"]) == "Station A / Pump 01"
+    assert p1["attributes"][0] == {"key": list(k[0]), "name": "Speed"}
+
+    def dup_exec(dlg):                                   # same name under the same parent: refused
+        dlg.name.setText("Pump 01"); dlg.parent_box.setCurrentIndex(dlg.parent_box.findData(station["id"]))
+        assert not dlg.ok_btn.isEnabled() and "already" in dlg.err.text()
+        return False
+    monkeypatch.setattr(ad.AssetDialog, "exec", dup_exec)
+    win._asset_popup(None, station["id"])
+
+    win._rebuild_project_tree()                          # Project tree: Assets, one level
+    root = win.ptree.topLevelItem(0)
+    node = next(root.child(i) for i in range(root.childCount()) if root.child(i).text(0) == "Assets")
+    assert node.childCount() == 1 and node.child(0).childCount() == 0
+    assert node.child(0).data(0, Qt.ItemDataRole.UserRole) == ("asset", station["id"])
+    assert node.child(0).text(0) == "Station A  (4)"
+
+    page = win.assets_page                               # the Assets document: the whole tree
+    win._show_doc("assets"); page.refresh(station["id"])
+    assert len(page._rows) == 4 and {it.text(0) for it in page._rows.values()} == {"Speed", "Status"}
+    page.refresh(p1["id"])
+    assert len(page._rows) == 2
+
+    win.add_to_asset([k[0]], station["id"])              # Tags > Add to asset (a tag in several assets)
+    assert len(asm.keys(win.project.assets, station["id"])) == 4 and len(win.assets_of(k[0])) == 2
+    win.tags_page.refresh(("device", dev.id))
+    assert "Station A" in win.tags_page._rows[k[0]].text(2)          # the Assets column
+
+    pick = ChannelPicker(win.channel_choices(), [], assets=True)     # the picker: By asset, same attribute
+    assert pick.by_asset.isVisible() or not pick.isVisible()
+    pick._mode(True)
+    pick.atree.setCurrentItem(pick.anodes[station["id"]])
+    pick._fill_same()
+    pick.same_attr.setCurrentText("Speed"); pick._select_same()
+    assert {tuple(x) for x in pick.checked()} == {k[0], k[2]}        # Speed of both pumps
+    pick.anodes[p2["id"]].setCheckState(0, Qt.CheckState.Checked)   # a whole asset (kept live)
+    assert pick.checked_assets() == [p2["id"]] and [tuple(x) for x in pick.checked_outside_assets()] == [k[0]]
+
+    pr = {"channels": [list(k[0])], "assets": [p2["id"]]}           # logging by asset: its tags, live
+    asm.add_attributes(p2, [k[1]])                       # added to the asset later: logged too
+    logged = {(d["id"], c[0]) for d in win._profile_topics(pr) for c in d["channels"]}
+    assert logged == {k[0], k[1], k[2], k[3]}
+
+    n_views = len(win.project.views)
+    win.new_view_from(asm.keys(win.project.assets, p1["id"]), "Pump 01")
+    vw = win.project.views[-1]
+    assert len(win.project.views) == n_views + 1 and vw["name"] == "Pump 01"
+    assert [t["kind"] for t in vw["tiles"]] == ["text", "plot", "tags"]
+    n_alarms = len(win.project.alarms)
+    win.alarms_for_asset(p1["id"])
+    new = win.project.alarms[n_alarms:]
+    assert {tuple(a["channel"]) for a in new} <= set(asm.keys(win.project.assets, p1["id"]))
+    assert new and all(a["levels"][0]["type"] == "D" for a in new)
+
+    win.move_asset(station["id"], p1["id"])              # a cycle: refused
+    assert station.get("parent") is None
+    win.delete_asset(station["id"])                      # with its sub-assets; the tags stay
+    assert win.project.assets == [] and len(dev.tags) == len(k)
+    win.project.alarms[n_alarms:] = []
+    win.delete_view(win.view_pages[vw["id"]])
     win.doc_tabs.setCurrentIndex(front)
 
 
@@ -495,7 +573,7 @@ def test_tree_layout(win):
     assert conn.child(0).text(0) == f"Protocols  ({len(win.project.devices)})"
     tags = kids["Tags"]                                     # six categories + Groups, flat
     cats = [tags.child(i).data(0, Qt.ItemDataRole.UserRole) for i in range(tags.childCount())]
-    assert [c[1] for c in cats] == ["device", "virtual", "action", "aggregation", "memory", "system", "groups"]
+    assert [c[1] for c in cats] == ["all", "device", "virtual", "action", "aggregation", "memory", "system"]
     assert all(c[0] == "tagcat" for c in cats) and all(tags.child(i).childCount() == 0 for i in range(7))
 
 
@@ -560,8 +638,7 @@ def test_editor_tabs(win, monkeypatch):
     assert len(win.project.devices) == n_dev + 1
     plc = win.project.devices[-1]
     assert plc.driver == "modbus_tcp" and plc.settings["host"] == "10.0.0.5" and win.conn_page.selected() == [plc.id]
-    # tags and groups: pop-ups like the device (Add group / Add tag / Save; Cancel changes nothing)
-    from nxlogger.ui.dialogs.group_dialog import GroupDialog
+    # tags: pop-ups like the device (Add tag / Save; Cancel changes nothing)
     from nxlogger.ui.dialogs.tag_dialog import TagDialog
     seen = []
 
@@ -569,14 +646,10 @@ def test_editor_tabs(win, monkeypatch):
         seen.append(next(b.text() for b in dlg.findChildren(QtWidgets.QPushButton) if b.property("primary")))
         answer["edit"](dlg)
         return answer["ok"]
-    monkeypatch.setattr(GroupDialog, "exec", popup_exec)
     monkeypatch.setattr(TagDialog, "exec", popup_exec)
-    answer["edit"] = lambda d: d.name.setText("Boiler")
-    win.add_group(dev.id, "")
-    assert "Boiler" in dev.all_groups() and seen[-1] == "Add group" and win.doc_tabs.count() == tabs
     answer["edit"] = lambda d: d.name.setText("Steam")
-    win.add_tags(dev.id, "Boiler", False)
-    assert len(dev.tags) == n_tags + 1 and dev.tags[-1].group == "Boiler" and seen[-1] == "Add tag"
+    win.add_tags(dev.id, False)
+    assert len(dev.tags) == n_tags + 1 and seen[-1] == "Add tag" and win.doc_tabs.count() == tabs
     answer["edit"] = lambda d: d.name.setText("Steam 2")
     answer["ok"] = False
     win.edit_tag(dev.id, dev.tags[-1].index)
@@ -944,7 +1017,7 @@ def test_tag_import_export_popups(win, monkeypatch, tmp_path):
     dev = win.project.devices[0]
     page = win.tags_page
     page.refresh(("device", dev.id))
-    assert COLS[1] == "Device" and all(it.text(1) == dev.name for it in page._rows.values())
+    assert COLS[1] == "Source" and all(it.text(1) == dev.name for it in page._rows.values())
     assert page.btn_exp.isEnabled() and page.btn_imp.isEnabled()
     page.refresh(("cat", "device"))
     assert page.btn_exp.isEnabled() and not page.btn_imp.isEnabled()      # import needs one device

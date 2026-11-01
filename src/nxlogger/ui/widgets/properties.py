@@ -14,6 +14,7 @@ import time
 
 from nxlogger.core import aggregation as ag
 from nxlogger.core import analysis as an
+from nxlogger.core import assets as asm
 from nxlogger.core import channel_math as cm
 from nxlogger.core import system_tags as ss
 from nxlogger.core import view_model as vm
@@ -82,18 +83,22 @@ def device_target(w, did: str) -> PropTarget | None:
                       key=("device", did), readonly=True)
 
 
-def group_target(w, did: str, path: str) -> PropTarget | None:
-    """Information only - a group is changed in its pop-up (Edit...)."""
-    d = w.project.device(did)
-    if d is None:
+def asset_target(w, aid: str) -> PropTarget | None:
+    """Information only - an asset is changed in its pop-up (Edit...)."""
+    assets = w.project.assets
+    a = asm.by_id(assets).get(aid)
+    if a is None:
         return None
-    n = sum(1 for t in d.tags if t.group == path or t.group.startswith(path + "/"))
-    return PropTarget(path.rsplit("/", 1)[-1], "folder", f"Group in {d.name} · {n} tag(s)",
-                      [("Group", [F("name", "Name", "info", ""), F("path", "Path", "info", ""),
-                                  F("device", "Device", "info", ""), F("tags", "Tags", "info", "")])],
-                      {"name": path.rsplit("/", 1)[-1], "path": path, "device": d.name, "tags": str(n)}, None,
-                      [("Edit...", "pencil", lambda: w.edit_group(did, path))], key=("group", did, path),
-                      readonly=True)
+    subs = asm.descendants(assets, aid)
+    rows = {"Name": a["name"], "Path": asm.path(assets, aid), "Description": a.get("description") or "-",
+            "Attributes": f"{len(a['attributes'])} (+ {len(asm.keys(assets, aid)) - len(a['attributes'])} "
+                          "in sub-assets)" if subs else str(len(a["attributes"])),
+            "Sub-assets": str(len(subs)),
+            "Tags": _keys_text(w, [list(k) for k in asm.keys(assets, aid)])}
+    return PropTarget(a["name"], "boxes", f"Asset · {asm.path(assets, aid)}",
+                      [("Asset", [F(k, k, "info", "") for k in rows])], rows, None,
+                      [("Edit...", "pencil", lambda: w.edit_asset(aid)),
+                       ("Add tags...", "tag", lambda: w.asset_add_tags(aid))], key=("asset", aid), readonly=True)
 
 
 # ====================================================================== tags
@@ -104,7 +109,7 @@ def tag_target(w, did: str, idx: int) -> PropTarget | None:
     if t is None:
         return None
     general = [F("name", "Name", "info", ""), F("enabled", "Enabled", "bool", True),
-               F("group", "Group", "info", ""), F("unit", "Unit", "info", ""),
+               F("assets", "Assets", "info", ""), F("unit", "Unit", "info", ""),
                F("description", "Description", "info", ""), F("color", "Colour", "info", "")]
     if t.kind == "number":
         general.append(F("access", "Access", "info", ""))
@@ -115,7 +120,8 @@ def tag_target(w, did: str, idx: int) -> PropTarget | None:
               ("bad" if q in ("Bad", "No data") else "")),
             F("time", "Updated", "info", ""), F("key", "Formula name", "info", "",
                                                   tip="Use this name in variables (formulas)")]
-    vals = {"name": t.name, "enabled": t.enabled, "group": t.group or "-", "unit": t.unit or "-",
+    vals = {"name": t.name, "enabled": t.enabled, "assets": ", ".join(w.assets_of((did, idx))) or "-",
+            "unit": t.unit or "-",
             "description": t.description or "-", "color": t.color or w.color_of(did, idx),
             "access": "Read / write" if t.access == "RW" else "Read only", "decimals": str(t.decimals),
             "scaling": cm.describe_scale(t.scale) or "None", "ch": f"CH{t.index + 1} of the waveform packets",
@@ -125,7 +131,7 @@ def tag_target(w, did: str, idx: int) -> PropTarget | None:
     def lv():
         val, qual, good, stamp = w.tag_live(did, idx)
         return {"value": f"{val} {t.unit}".strip() if val else "-", "quality": qual or "-", "time": stamp or "-"}
-    sub = f"{'Array' if t.kind == 'array' else 'Number'} tag · {d.name}" +           (f" / {t.group}" if t.group else "") + f" · {describe_address(d.driver, '', t)}"
+    sub = f"{'Array' if t.kind == 'array' else 'Number'} tag · {d.name} · {describe_address(d.driver, '', t)}"
     return PropTarget(t.name, "tag", sub, [("Tag", general), ("Address", addr), ("Display", display),
                                            ("Live", live)],
                       {**vals, **lv()}, None, [("Edit...", "pencil", lambda: w.edit_tag(did, idx))], lv,
@@ -138,15 +144,15 @@ def tags_target(w, did: str, idxs: list[int]) -> PropTarget | None:
     if d is None:
         return None
     tags = [t for t in (d.tag(i) for i in idxs) if t is not None]
-    groups = sorted({t.group or "(no group)" for t in tags})
+    used = sorted({p for t in tags for p in w.assets_of((did, t.index))})
     units = sorted({t.unit or "-" for t in tags})
     return PropTarget(f"{len(tags)} tags", "list", f"{d.name} · right-click the table to enable, move or delete",
                       [("Selected tags", [F("device", "Device", "info", ""), F("count", "Tags", "info", ""),
-                                          F("enabled", "Enabled", "info", ""), F("groups", "Groups", "info", ""),
+                                          F("enabled", "Enabled", "info", ""), F("assets", "Assets", "info", ""),
                                           F("units", "Units", "info", "")])],
                       {"device": d.name, "count": str(len(tags)),
                        "enabled": f"{sum(t.enabled for t in tags)} of {len(tags)}",
-                       "groups": ", ".join(groups[:6]) + (" ..." if len(groups) > 6 else ""),
+                       "assets": (", ".join(used[:6]) + (" ..." if len(used) > 6 else "")) or "-",
                        "units": ", ".join(units[:6]) + (" ..." if len(units) > 6 else "")},
                       None, [], key=("tags", did, tuple(idxs)), readonly=True)
 
@@ -229,7 +235,7 @@ def virtual_target(w, vid: str) -> PropTarget | None:
         return None
     text = v.get("dtype") == "text"
     rows = {"Name": v["name"], "Type": vt.TYPES[v["kind"]][0], "Data type": vt.DTYPES[v.get("dtype", "number")],
-            "Group": v.get("group") or "-", "Unit": v.get("unit") or "-",
+            "Assets": ", ".join(w.assets_of(vt.vt_key(v["id"]))) or "-", "Unit": v.get("unit") or "-",
             "Definition": w.vt_describe(v) or "-",
             "Inputs": ", ".join(f"{i['alias']} = {w.key_label(tuple(i['key']))}" for i in v.get("inputs", [])) or "-",
             "Update": "-" if v["kind"] in vt.NO_INPUT else vt.UPDATES.get(v.get("update"), "-"),
@@ -267,7 +273,8 @@ def aggregation_target(w, aid: str) -> PropTarget | None:
     if a is None:
         return None
     period = ag.has_period(a)
-    rows = {"Name": a["name"], "Type": ag.TYPES[a["kind"]][0], "Group": a.get("group") or "-",
+    rows = {"Name": a["name"], "Type": ag.TYPES[a["kind"]][0],
+            "Assets": ", ".join(w.assets_of(ag.agg_key(a["id"]))) or "-",
             "Unit": a.get("unit") or "-", "Definition": w.agg_describe(a), "Period": ag.describe_period(a),
             "Formula name": ag.formula_name(a) + (f", {ag.formula_name(a, True)}" if period and a.get("keep_prev")
                                                    else ""),
@@ -308,7 +315,7 @@ def system_target(w, tid: str) -> PropTarget | None:
     t = w.sys_tag(tid)
     if t is None:
         return None
-    rows = {"Name": t.name, "Group": t.group, "Type": ss.KINDS[t.kind],
+    rows = {"Name": t.name, "Section": t.group, "Type": ss.KINDS[t.kind],
             "Unit": t.unit or "-", "Formula name": f"System_{t.name}" if t.streamed else "- (text)",
             "Description": t.description}
     live = [F("value", "Value", "info", ""), F("time", "Updated", "info", "")]

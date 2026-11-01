@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 
 from nxlogger import paths
 from nxlogger.core import aggregation as agg
+from nxlogger.core import assets
 from nxlogger.core import alarm_rules as ar
 from nxlogger.core import ml_log as mlg
 from nxlogger.core import variables as vr
@@ -59,6 +60,7 @@ def new_log_profile(kind: str = "signal", name: str = "") -> dict:
     return {"id": uuid.uuid4().hex[:8], "name": name or ("Data" if kind == "signal" else "Statistics"),
             "enabled": True, "type": kind, "format": "CSV", "keep_raw": False,
             "channels": None,                   # None = all enabled tags, else [[device_id, index]]
+            "assets": [],                       # + whole assets, kept live (their tags as they change)
             "interval_s": 1.0 if kind == "signal" else 60.0, "stats": ["mean", "min", "max"]}
 
 
@@ -86,7 +88,8 @@ class Project:
     variables: list[dict] = field(default_factory=list)         # calculated channels (variables.py)
     virtual_tags: list[dict] = field(default_factory=list)      # Tags > Virtual (virtual_tags.py)
     aggregations: list[dict] = field(default_factory=list)      # Tags > Aggregation (aggregation.py)
-    groups: list[str] = field(default_factory=list)             # Tags > Groups: project-wide paths (empty ones too)
+    groups: list[str] = field(default_factory=list)             # older files only: become assets on load
+    assets: list[dict] = field(default_factory=list)            # Project tree > Assets (core/assets.py)
     quick_hidden: list = field(default_factory=list)            # [[device_id, index]] not in Quick View
     ml_log: dict = field(default_factory=mlg.new_settings)   # AI/ML data log (core/ml_log.py)
     migrated_from: str = ""                                  # "" or the old format (not saved)
@@ -103,18 +106,6 @@ class Project:
         d = self.device(did)
         return d.tag(idx) if d else None
 
-    def all_groups(self) -> list[str]:
-        """Tags > Groups: every group path of the project, parents included, sorted. One tree for
-        all tags - the same path on two devices (or a virtual / aggregation tag) is one group."""
-        paths = list(self.groups) + [x.get("group", "") for x in self.virtual_tags + self.aggregations]
-        for d in self.devices:
-            paths += list(d.groups) + [t.group for t in d.tags]
-        out = set()
-        for g in paths:
-            parts = [p for p in (g or "").split("/") if p]
-            for i in range(1, len(parts) + 1):
-                out.add("/".join(parts[:i]))
-        return sorted(out, key=str.lower)
 
     @classmethod
     def from_dict(cls, d: dict, broker: dict | None = None) -> "Project":
@@ -138,7 +129,7 @@ class Project:
                 alarm_profiles=d.get("alarm_profiles", []),
                 alarm_settings={**cls().alarm_settings, **d.get("alarm_settings", {})},
                 variables=d.get("variables", []), virtual_tags=d.get("virtual_tags", []),
-                aggregations=d.get("aggregations", []), groups=list(d.get("groups", [])), quick_hidden=d.get("quick_hidden", []),
+                aggregations=d.get("aggregations", []), groups=list(d.get("groups", [])), assets=list(d.get("assets", [])), quick_hidden=d.get("quick_hidden", []),
                 ml_log={**mlg.new_settings(), **d.get("ml_log", {})}, migrated_from=migrated)
         if "logging_profiles" not in d:          # v5 file: its one format becomes a profile
             p.logging_profiles = [{**new_log_profile("signal", "Waveform"), "format": p.logging.format,
@@ -163,6 +154,9 @@ class Project:
             vt.normalize_virtual(x)
         for x in p.aggregations:                 # files before Aggregation tags: none
             agg.normalize_aggregation(x)
+        for x in p.assets:
+            assets.normalize_asset(x)
+        assets.migrate_groups(p)                 # Tags groups (before Assets) -> assets with the same tags
         p.views = [y for x in p.views for y in split_tabs(x)]   # early v7 tabs -> separate views
         for x in p.views:                        # free-form views -> grid, new tile properties
             normalize_view(x)

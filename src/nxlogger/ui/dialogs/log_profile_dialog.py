@@ -86,7 +86,7 @@ class LogProfileDialog(QDialog):
         v.addWidget(self.all)
         self.picker_box = QVBoxLayout()
         v.addLayout(self.picker_box, 1)
-        self._set_picker(choices, self.p.get("channels") or [])
+        self._set_picker(choices, self.p.get("channels") or [], self.p.get("assets") or [])
         self.all.toggled.connect(lambda on: self.picker.setDisabled(on))
         self.err = QLabel(); self.err.setObjectName("statusMsg")
         v.addWidget(self.err)
@@ -95,10 +95,11 @@ class LogProfileDialog(QDialog):
         bb.accepted.connect(self._ok); bb.rejected.connect(self.reject)
         v.addWidget(bb)
 
-    def _set_picker(self, choices, chosen):
+    def _set_picker(self, choices, chosen, chosen_assets=()):
         if getattr(self, "picker", None) is not None:
             self.picker.setParent(None); self.picker.deleteLater()
-        self.picker = ChannelPicker(choices, chosen)
+        # By asset: a whole asset is kept live - tags added to it later are logged too
+        self.picker = ChannelPicker(choices, chosen, assets=True, chosen_assets=chosen_assets)
         self.picker.setMinimumHeight(170)
         self.picker.setDisabled(self.all.isChecked())
         self.picker_box.addWidget(self.picker)
@@ -109,7 +110,7 @@ class LogProfileDialog(QDialog):
             return
         key, choices = res
         chosen = self.picker.checked() + [list(key)]
-        self._set_picker(choices, chosen)
+        self._set_picker(choices, chosen, self.picker.checked_assets())
         if self.all.isChecked():                     # it is logged anyway (Logged is on by default)
             set_prop(self.err, "level", "muted")
             self.err.setText("Variable added - logged with all enabled tags.")
@@ -134,7 +135,7 @@ class LogProfileDialog(QDialog):
             err = "Another profile already uses this name."
         elif self.stat and not any(b.isChecked() for b in self.stats.values()):
             err = "Choose at least one statistic."
-        elif not self.all.isChecked() and not self.picker.checked():
+        elif not self.all.isChecked() and not self.picker.checked() and not self.picker.checked_assets():
             err = "Choose at least one tag."
         if err:
             set_prop(self.err, "level", "bad"); self.err.setText(err)
@@ -145,7 +146,8 @@ class LogProfileDialog(QDialog):
         p = self.p
         p.update(name=self.name.text().strip(), enabled=self.enabled.isChecked(),
                  format=self.fmt.currentData(),
-                 channels=None if self.all.isChecked() else self.picker.checked())
+                 channels=None if self.all.isChecked() else self.picker.checked_outside_assets(),
+                 assets=[] if self.all.isChecked() else self.picker.checked_assets())
         if self.stat:
             p.update(interval_s=self.interval.value(),
                      stats=[k for k in dl.STAT_KEYS if self.stats[k].isChecked()], keep_raw=False)

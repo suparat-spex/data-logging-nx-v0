@@ -1,4 +1,4 @@
-"""Edit one tag: name, unit, colour, group, address, scaling (linear / two-point / formula),
+"""Edit one tag: name, unit, colour, address, scaling (linear / two-point / formula),
 display range. ChannelDialog is the common part (also every waveform channel); TagDialog adds
 the Address tab of the device's connector."""
 from __future__ import annotations
@@ -256,17 +256,12 @@ class ChannelDialog(QDialog):
 
 # ====================================================================== tag
 class TagDialog(ChannelDialog):
-    def __init__(self, parent, dev: DeviceCfg, tag: TagCfg, default_color: str, raw_value, groups=None):
+    def __init__(self, parent, dev: DeviceCfg, tag: TagCfg, default_color: str, raw_value):
         super().__init__(parent, dev.name, tag, default_color, raw_value, dev.topic, alarms=False)
         self.dev, self.tag = dev, tag
         self.setWindowTitle(f"Tag - {dev.name} · {tag.name}")
         tabs = self.tabs
         w, f = form_page()
-        self.group = QComboBox(); self.group.setEditable(True)
-        self.group.addItems([""] + (dev.all_groups() if groups is None else list(groups)))   # the project's groups
-        self.group.setCurrentText(tag.group)
-        self.group.setToolTip("Group (Tags > Groups, one tree for all tags); use / for sub-groups (Boiler/Pumps)")
-        f.addRow("Group", self.group)
         self.access = QCheckBox("Writable (RW) - values can be written from the tag table",
                                 checked=tag.access == "RW")
         if tag.kind == "array":
@@ -285,7 +280,6 @@ class TagDialog(ChannelDialog):
 
     def apply(self, tag: TagCfg):
         super().apply(tag)
-        tag.group = "/".join(p.strip() for p in self.group.currentText().split("/") if p.strip())
         if self.addr is not None:
             tag.address = {**tag.address, **self.addr.values()}
             tag.access = "RW" if self.access.isChecked() else "R"

@@ -1,7 +1,7 @@
 """Add / edit an Aggregation tag (Tags > Aggregation): the settings pop-up, tabs style like the
 Virtual tag pop-up. The type is chosen before it opens and is fixed.
 
-  General   name, group, unit, colour (swatch + Default), description, enabled
+  General   name, unit, colour (swatch + Default), description, enabled
   <type>    Statistic · Totalizer · Counter · Runtime · Hold · Change: the source and its rule
   Period    reset (never / hour / day / week / month / shifts / a tag), keep the previous
             period's value, keep the running value on restart (not for a statistic)
@@ -34,10 +34,10 @@ UNIT_HINT = {("totalizer", "m³/h"): "m³", ("totalizer", "L/s"): "L", ("totaliz
 class AggregationDialog(QDialog):
     """a: the definition (a copy - apply(a) writes the fields). engine: the AggregationEngine;
     choices: [(tid, idx, label, colour, unit)] of number tags; names: {formula name: key};
-    groups: the project's group paths; live(key) -> (value text, quality, good, time);
+    live(key) -> (value text, quality, good, time);
     taken: other aggregation names (lower case); default_color: the palette colour."""
 
-    def __init__(self, parent, a: dict, engine, choices, names: dict, groups, live, taken: set,
+    def __init__(self, parent, a: dict, engine, choices, names: dict, live, taken: set,
                  default_color: str = ""):
         super().__init__(parent)
         self.a, self.engine, self.names, self.live, self.taken = dict(a), engine, names, live, taken
@@ -48,7 +48,7 @@ class AggregationDialog(QDialog):
         self._color = a.get("color") or self.default_color
         self.setWindowTitle(ag.TYPES[self.kind][0])
         tabs = self.tabs = QTabWidget()
-        tabs.addTab(self._general(groups), "General")
+        tabs.addTab(self._general(), "General")
         tabs.addTab(self._type_page(), TAB_OF[self.kind])
         if ag.has_period(self.a):
             tabs.addTab(self._period(), "Period")
@@ -65,12 +65,9 @@ class AggregationDialog(QDialog):
         self._check()
 
     # ------------------------------------------------------------------ pages
-    def _general(self, groups):
+    def _general(self):
         w, f = form_page()
         self.name = QLineEdit(self.a["name"]); self.name.setPlaceholderText("e.g. Volume_Today")
-        self.group = QComboBox(); self.group.setEditable(True); self.group.addItem("")
-        self.group.addItems([g for g in groups if g]); self.group.setCurrentText(self.a.get("group", ""))
-        self.group.lineEdit().setPlaceholderText("(no group) - pick one or type a new one")
         self.unit = QComboBox(); self.unit.setEditable(True); self.unit.addItems(cm.UNITS)
         self.unit.setCurrentText(self.a.get("unit", ""))
         self.color_btn = QPushButton(); self.color_btn.clicked.connect(self._pick_color)
@@ -84,7 +81,6 @@ class AggregationDialog(QDialog):
         self.enabled = QCheckBox("Enabled - update it and show it in views", checked=self.a.get("enabled", True))
         f.addRow("Type", label(f"{ag.TYPES[self.kind][0]} - {ag.TYPES[self.kind][2]}", muted=True))
         f.addRow("Name", self.name)
-        f.addRow("Group", self.group)
         f.addRow("Unit", self.unit)
         f.addRow("Colour", colour)
         f.addRow("Description", self.desc)
@@ -235,7 +231,7 @@ class AggregationDialog(QDialog):
     # ------------------------------------------------------------------ data
     def collect(self) -> dict:
         a = dict(self.a)
-        a.update(name=self.name.text().strip(), group=self.group.currentText().strip().strip("/"),
+        a.update(name=self.name.text().strip(),
                  unit=self.unit.currentText().strip(), description=self.desc.text().strip(),
                  enabled=self.enabled.isChecked(), decimals=self.decimals.value(),
                  color="" if self._color.lower() == self.default_color.lower() else self._color,

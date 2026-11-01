@@ -31,21 +31,24 @@ menus exist and what the pop-ups look like. **When to use** an editor tab or a p
       Database       (0)        muted while it has no devices
       Web Services   (0)
   ▾ Tags
+      All tags     (127)        every category in one table
       Device        (81)
       Virtual        (7)
       Action                    planned (muted)
       Aggregation    (6)
       Memory                    planned (muted)
       System        (33)
-      Groups         (5)        number of groups
+  ▾ Assets
+      Pumping stations  (7)     top-level assets only - the Assets document shows the tree
+      Energy KPIs       (8)
   ▸ Logging
   ▸ Alarms
   ▸ Variables
   ▸ Views
 ```
 
-Section headers (the project, Connectivity, Tags, Logging, Alarms, Variables, Views) and the
-category nodes have **no right-click menu**.
+Section headers (the project, Connectivity, Tags, Assets, Logging, Alarms, Variables, Views),
+the category nodes and the asset nodes have **no right-click menu**.
 
 ## 3. Connectivity document
 
@@ -129,11 +132,11 @@ Description.
 
 | Category | Left list | Add ▾ | Rows edited in |
 |---|---|---|---|
-| Device | All tags, devices > groups | Tag..., Tags..., Group..., Browse OPC UA... | Tag pop-up |
-| Virtual | All tags, one row per type, the groups in use | Constant..., Formula..., Conversion..., Logic..., Selector..., Text map... | Virtual tag pop-up |
-| Aggregation | All tags, one row per type, the groups in use | Statistic..., Totalizer..., Counter..., Runtime..., Min / Max hold..., Change... | Aggregation pop-up |
+| All tags | All, Device, Virtual, Aggregation, System | - | Each row's own pop-up |
+| Device | All tags, devices | Tag..., Tags..., Browse OPC UA... | Tag pop-up |
+| Virtual | All tags, one row per type | Constant..., Formula..., Conversion..., Logic..., Selector..., Text map... | Virtual tag pop-up |
+| Aggregation | All tags, one row per type | Statistic..., Totalizer..., Counter..., Runtime..., Min / Max hold..., Change... | Aggregation pop-up |
 | System | All tags, Clock, App, Recording, Alarms, Devices > device | - (read-only) | - |
-| Groups | All tags, the group tree, (no group) | Group... | Each row's own pop-up |
 | Action, Memory | planned | - | - |
 
 A type row turns red when one of its tags has an error. Import / Export are disabled outside
@@ -174,33 +177,43 @@ Delete tag...                ───────────────
 
 While recording, everything except *Add alarm...* (and *Reset now...*) is disabled.
 
-### Groups
+### All tags
 
-One group tree for the whole project (`Project.all_groups()`); the same path on two devices
-is one group.
+The first Tags node: every tag of every category in one table; the left list filters it by
+Device / Virtual / Aggregation / System. Tags have **no groups** - search and sort find a tag,
+the **Assets** column shows where it is used. Right-click any tag rows: *Add to asset ▸*
+(an existing asset or *New asset...*) and *New view from selection*.
+
+### Assets (Project tree > Assets)
+
+How tags are used together - like AWS SiteWise, Cognite, Seeq asset trees. The Project tree shows
+the top-level assets only; the Assets document shows the whole tree (up to 4 levels).
 
 ```
-┌──────────────────┬───────────────────────────────────────────────────────────┐
-│▌📁 Groups        │ Name           Device       Group           Type           │
-│ All tags    (90) │ RawFlow        PLC-01       Raw water       Device · Number│
-│ 📁 Filters   (6) │ Pump1_Run      PLC-01       Raw water/Pumps Device · Number│
-│ ▾ 📁 Raw water(9)│ Volume_Today   Aggregation  Raw water       Aggregation ·  │
-│     📁 Pumps (4) │ Flow_x2        Virtual      Raw water       Virtual · Formula│
-│ (no group)  (12) │                                                          │
-└──────────────────┴───────────────────────────────────────────────────────────┘
+┌────────────────────────────┬────────────────────────────────────────────────────────────┐
+│▌◈ Assets                   │ Attribute  Tag                 Source  Asset        Value │
+│ All assets            (90) │ Speed      PLC-A · P1_Speed    PLC-A   Station A /…  48.2 │
+│ ▾ Pumping stations     (7) │ Status     PLC-A · P1_Status   PLC-A   Station A /…  1    │
+│   ▾ Station A          (5) │                                                            │
+│     ▸ Pump 01          (3) │                                                            │
+│   ▸ Station B          (2) │                                                            │
+│ ▸ Energy KPIs          (8) │                                                            │
+└────────────────────────────┴────────────────────────────────────────────────────────────┘
+ toolbar: [+ Add ▾ (Asset... · Sub-asset...)] [Edit] [🗑] | [Add tags...] [Remove] | [New view]
 ```
 
-- Counts include sub-groups. A parent group shows the tags of its sub-groups too.
-- **Toolbar:**
-  - *Add ▾ > Group...* adds a group under the selected one.
-  - *Edit* renames the selected group (with no row selected) or opens the selected row's own
-    pop-up.
-  - *Delete* deletes the selected group.
-- **Rename** changes the path in every category. **Delete** moves the group's tags and
-  sub-groups up one level - no tag is ever deleted from here.
-- **Row menu:** *Edit...* · *Move to group ▸* (every group and "(no group)").
-- The Group field of the device tag, Add tags, Virtual and Aggregation pop-ups offers the same
-  project groups.
+- An asset's **attributes** reference tags of any category by key (a tag can be in several
+  assets; deleting an asset never deletes a tag). An attribute can have a short name
+  ("Speed" for `StationA_P1_Speed`).
+- **Asset pop-up** (tabs): *General* (name, parent, description, colour) · *Attributes*
+  (tags + short names, *Add tags...*, *Remove*).
+- **Asset row menu:** Edit... · Add sub-asset... · Add tags... · Move to ▸ · Duplicate · New view ·
+  Add alarms for its attributes... (data loss 10 s, edit the limits after) · Delete...
+- **Attribute row menu:** Open tag... · New view from selection · Remove from asset.
+- **Every tag picker** (views, alarms, logging, pop-ups) has *By tag* / *By asset*; under an asset,
+  *Same attribute ▾ - Select in all* ticks e.g. Speed of every pump (compare equipment).
+- **Logging profiles** can tick whole assets: kept live - tags added to the asset later are logged.
+- Groups of older projects (and a `group` column of a tag CSV) become assets with the same tags.
 
 ## 5. Settings pop-ups
 

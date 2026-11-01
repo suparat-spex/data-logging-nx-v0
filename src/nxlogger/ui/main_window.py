@@ -63,6 +63,7 @@ import pyqtgraph as pg
 from nxlogger import APP_NAME, __version__, config, paths
 from nxlogger.comms.manager import DriverManager
 from nxlogger.core import aggregation as ag
+from nxlogger.core import assets as asm
 from nxlogger.core import alarm_rules as ar
 from nxlogger.core import analysis as an
 from nxlogger.core import channel_math as cm
@@ -87,12 +88,12 @@ from nxlogger.ui.dialogs.aggregation_dialog import AggregationDialog
 from nxlogger.ui.dialogs.alarm_dialog import AlarmDialog
 from nxlogger.ui.dialogs.alarm_profile_dialog import AlarmProfileDialog
 from nxlogger.ui.dialogs.device_dialog import DeviceDialog
-from nxlogger.ui.dialogs.group_dialog import GroupDialog
+from nxlogger.ui.dialogs.asset_dialog import AssetDialog
 from nxlogger.ui.dialogs.export_devices_dialog import ExportDevicesDialog
 from nxlogger.ui.dialogs.export_tags_dialog import ExportTagsDialog
 from nxlogger.ui.dialogs.import_devices_dialog import ImportDevicesDialog
 from nxlogger.ui.dialogs.import_tags_dialog import ImportTagsDialog
-from nxlogger.ui.dialogs.common import ask_unsaved, confirm, popup_form
+from nxlogger.ui.dialogs.common import ChannelPicker, ask_unsaved, confirm, popup_form
 from nxlogger.ui.dialogs.log_profile_dialog import LogProfileDialog
 from nxlogger.ui.dialogs.marker_dialog import MarkerDialog
 from nxlogger.ui.dialogs.ml_log_dialog import MlLogDialog
@@ -114,6 +115,7 @@ from nxlogger.ui.theme.ui_kit import (AppWindow, Card, Chip, EmptyState, T, fixe
 from nxlogger.ui.widgets import alarm_panel as ap
 from nxlogger.ui.widgets import properties as props
 from nxlogger.ui.widgets import views as dv
+from nxlogger.ui.widgets.assets_page import AssetsPage
 from nxlogger.ui.widgets.connectivity import STATE_TOKEN, ConnectivityPage
 from nxlogger.ui.widgets.monitor_bar import MonitorBar
 from nxlogger.ui.widgets.start_page import StartPage, show_at_startup
@@ -143,7 +145,7 @@ CHIP_W = 132                    # status chips keep one width whatever the text
 
 
 # ======================================================================= window
-HEADER_NODES = ("project", "doc", "conncat", "tagsroot", "alarms", "vars", "views")   # Project tree sections: no right-click menu
+HEADER_NODES = ("project", "doc", "conncat", "asset", "tagsroot", "alarms", "vars", "views")   # Project tree sections: no right-click menu
 
 
 class _NoFlash(QObject):
@@ -568,6 +570,7 @@ class DaqWindow(AppWindow):
                 ("screen", self._build_screen(), "Quick View", "Quick", "chart"),
                 ("connectivity", self._build_connectivity(), "Connectivity", "Devices", "network"),
                 ("tags", self._build_tags(), "Tags", "Tags", "tag"),
+                ("assets", self._build_assets(), "Assets", "Assets", "boxes"),
                 ("logging", self._build_logging_spec(), "Logging", "Logging", "file-text"),
                 ("alarms", self._build_alarms(), "Alarms", "Alarms", "bell"),
                 ("variables", self._build_variables(), "Variables", "Vars", "variable")):
@@ -577,6 +580,11 @@ class DaqWindow(AppWindow):
         self._add_doc_tab("start" if show_at_startup() else "connectivity")
         self.doc_tabs.setCurrentIndex(0)
         return self.doc_tabs
+
+    def _build_assets(self):
+        self.assets_page = AssetsPage(self)
+        ChannelPicker.asset_source = lambda: self.project.assets      # every tag picker: By asset
+        return self.assets_page
 
     def _build_start(self):
         self.start_page = StartPage(self)
@@ -814,8 +822,8 @@ class DaqWindow(AppWindow):
             kind = ref[0]
             if kind == "device":
                 t = props.device_target(self, ref[1])
-            elif kind == "group":
-                t = props.group_target(self, ref[1], ref[2])
+            elif kind == "asset":
+                t = props.asset_target(self, ref[1])
             elif kind == "tag":
                 t = props.tag_target(self, ref[1], ref[2])
             elif kind == "tags":
@@ -836,7 +844,7 @@ class DaqWindow(AppWindow):
         if page is getattr(self, "conn_page", None):
             return self.conn_page.empty_hint()          # in the category's words (device / database / web service)
         if page is getattr(self, "tags_page", None):
-            return "No tag selected", "Select a device, group or tag to view its settings"
+            return "No tag selected", "Select a device or a tag to view its settings"
         if isinstance(page, dv.ViewPage):
             return "No component selected", "Select a component to view its settings"
         return "No selection", "Select an object to view its settings"
@@ -850,7 +858,7 @@ class DaqWindow(AppWindow):
         k = self._prop_key
         if not k:
             return
-        if k[0] in ("device", "group", "tag", "tags", "project", "vt", "agg"):
+        if k[0] in ("device", "asset", "tag", "tags", "project", "vt", "agg"):
             ref = k if k[0] != "tags" else ("tags", k[1], list(k[2]))
             self.select_object(ref)
         elif k[0] in ("view", "tile"):
@@ -867,7 +875,7 @@ class DaqWindow(AppWindow):
         page = self.doc_tabs.currentWidget()
         if isinstance(page, dv.ViewPage):
             self.view_selected(page, page.selected)
-        elif page in (self.conn_page, self.tags_page):
+        elif page in (self.conn_page, self.tags_page, getattr(self, "assets_page", None)):
             page.activate()                      # its selected row and properties come back
         elif page is getattr(self, "start_page", None):
             page.activate()
@@ -909,6 +917,8 @@ class DaqWindow(AppWindow):
         self.var_page.refresh()
         self.tags_page.refresh(())
         self.conn_page.refresh([])
+        if hasattr(self, "assets_page"):
+            self.assets_page.refresh(None)
         if hasattr(self, "start_page"):
             self.start_page.refresh()
         self.show_properties(props.project_target(self))
@@ -947,7 +957,7 @@ class DaqWindow(AppWindow):
         p = self.project
         return {"Devices": len(p.devices), "Tags": sum(len(d.tags) for d in p.devices),
                 "Virtual tags": len(p.virtual_tags), "Aggregation tags": len(p.aggregations),
-                "Groups": len(p.all_groups()), "Views": len(p.views), "Alarms": len(p.alarms)}
+                "Assets": len(p.assets), "Views": len(p.views), "Alarms": len(p.alarms)}
 
     def edit_project(self):
         QTimer.singleShot(0, self._project_popup)
@@ -1381,8 +1391,8 @@ class DaqWindow(AppWindow):
             self.device_changed(dev.id, structure=was_wave != dev.wave)
         self.set_status(f"Device '{dev.name}' " + ("added" if new else "saved"), "ok")
 
-    # ---- tags and groups: pop-ups like the device settings (the Tags page works like Connectivity)
-    def _tag_popup(self, did: str, idx: int | None = None, group: str = ""):
+    # ---- tags: pop-ups like the device settings (the Tags page works like Connectivity)
+    def _tag_popup(self, did: str, idx: int | None = None):
         """Add tag / Edit tag pop-up: the tag joins the project or changes only on Add tag / Save."""
         dev = self.project.device(did)
         if dev is None:
@@ -1394,7 +1404,7 @@ class DaqWindow(AppWindow):
             if dev.wave and len(dev.tags) >= wp.MAX_CH:
                 self.toast.popup("A waveform packet has at most 8 channels")
                 return
-            t = new_tag(dev, "", group)
+            t = new_tag(dev, "")
             t.name = self._unique_name(t.name, {x.name for x in dev.tags})
         else:
             t = dev.tag(idx)
@@ -1403,10 +1413,9 @@ class DaqWindow(AppWindow):
         st = self.streams.get(dev.id)
         k = sum(len(d.tags) for d in self.project.devices[:self.project.devices.index(dev)]) + \
             (dev.tags.index(t) if t in dev.tags else len(dev.tags))
-        dlg = TagDialog(self, dev, t, COLORS[k % len(COLORS)], lambda: st.raw_mean.get(t.index) if st else None,
-                        self.project.all_groups())
+        dlg = TagDialog(self, dev, t, COLORS[k % len(COLORS)], lambda: st.raw_mean.get(t.index) if st else None)
         dlg.setWindowTitle("Add tag" if new else f"Tag - {t.name}")
-        where = " · ".join(x for x in (dev.name, driver_label(dev.driver), t.group) if x)
+        where = " · ".join(x for x in (dev.name, driver_label(dev.driver)) if x)
         dlg.ok_btn, title = popup_form(dlg, "tag", "New tag" if new else t.name,
                                        f"{where} · {'array (waveform channel)' if t.kind == 'array' else 'tag'}",
                                        "Add tag" if new else "Save")
@@ -1435,34 +1444,6 @@ class DaqWindow(AppWindow):
         if new:
             QTimer.singleShot(0, lambda: self.tags_page.select_tag(dev.id, t.index))
         self.set_status(f"Tag '{t.name}' " + ("added" if new else "saved"), "ok")
-
-    def _group_popup(self, did: str, path: str = "", parent: str = ""):
-        """Add group / Edit group pop-up (renaming moves its tags and sub-groups along)."""
-        dev = self.project.device(did)
-        if dev is None or not self._recording_guard():
-            return
-        new = not path
-        n = sum(1 for t in dev.tags if path and (t.group == path or t.group.startswith(path + "/")))
-        dlg = GroupDialog(self, dev.name, dev.all_groups(), path, parent, n)
-        dlg.setWindowTitle("Add group" if new else f"Group - {path}")
-        _ok, title = popup_form(dlg, "folder", "New group" if new else path.rsplit("/", 1)[-1],
-                                f"{dev.name} · folder of tags (use sub-groups for areas, machines ...)",
-                                "Add group" if new else "Save", width=480)
-        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or "New group"))
-        if not dlg.exec() or self.recording:
-            return
-        newp = dlg.result_path()
-        if new:
-            dev.groups.append(newp)
-        elif newp != path:
-            fix = lambda g: newp + g[len(path):] if g == path or g.startswith(path + "/") else g   # noqa: E731
-            dev.groups = sorted({fix(g) for g in dev.groups} | {newp})
-            for x in dev.tags:
-                x.group = fix(x.group)
-        self._mark_dirty()
-        self.tags_page.refresh(("group", dev.id, newp))
-        self._rebuild_project_tree()
-        self.set_status(f"Group '{newp}' " + ("added" if new else "saved"), "ok")
 
     # ---- alarms and notification profiles
     def _spec_alarm(self, aid, channel=None):
@@ -1917,6 +1898,8 @@ class DaqWindow(AppWindow):
         self.conn_page.refresh(added)
         self._show_doc("connectivity")
         self._log(f"Imported devices from {path}: {len(added)} added, {replaced} replaced")
+        if asm.migrate_groups(self.project):        # groups of the imported tags -> assets
+            self.assets_changed()
         self.toast.popup(f"{len(added)} device(s) added" + (f", {replaced} replaced" if replaced else ""))
 
     def _add_tag_current(self):
@@ -1927,26 +1910,26 @@ class DaqWindow(AppWindow):
             self._show_doc("connectivity")
             self.toast.popup("Add a device first")
             return
-        self.add_tags(did, page.current_group() if page.current_device_id() == did else "", False)
+        self.add_tags(did, False)
 
-    def add_tags(self, did: str, group: str, bulk: bool):
+    def add_tags(self, did: str, bulk: bool):
         """bulk: Add tags... pop-up; one tag: the Add tag pop-up."""
         dev = self.project.device(did)
         if dev is None or not self._recording_guard():
             return
         if not bulk:
-            self._tag_popup(did, None, group)
+            self._tag_popup(did, None)
             return
         if dev.wave and len(dev.tags) >= wp.MAX_CH:
             self.toast.popup("A waveform packet has at most 8 channels")
             return
         if bulk:
-            dlg = AddTagsDialog(self, dev, group, self.project.all_groups())
+            dlg = AddTagsDialog(self, dev)
             if not dlg.exec():
                 return
             new = dlg.tags()
         else:
-            t = new_tag(dev, "", group)
+            t = new_tag(dev, "")
             t.name = self._unique_name(t.name, {x.name for x in dev.tags})
             new = [t]
         dev.tags.extend(new)
@@ -1985,63 +1968,6 @@ class DaqWindow(AppWindow):
                 t.enabled = on
         self.tags_changed(did, restart=True)
 
-    def move_tags(self, did: str, idxs: list[int], group: str):
-        dev = self.project.device(did)
-        if dev is None or not self._recording_guard():
-            return
-        for t in dev.tags:
-            if t.index in idxs:
-                t.group = group
-        self.tags_changed(did)
-
-    def add_group(self, did: str, parent: str):
-        self._group_popup(did, "", parent)
-
-    def edit_group(self, did: str, path: str):
-        self._group_popup(did, path)
-
-    def rename_group(self, did: str, path: str, name: str):
-        dev = self.project.device(did)
-        name = name.strip().replace("/", "-")
-        if dev is None or not name or not self._recording_guard():
-            return
-        new = (path.rsplit("/", 1)[0] + "/" + name) if "/" in path else name
-        fix = lambda g: new + g[len(path):] if g == path or g.startswith(path + "/") else g   # noqa: E731
-        dev.groups = sorted({fix(g) for g in dev.groups})
-        for t in dev.tags:
-            t.group = fix(t.group)
-        self._mark_dirty()
-        self.tags_page.refresh(("group", did, new))
-        self.select_object(("group", did, new))
-
-    def delete_group(self, did: str, path: str):
-        dev = self.project.device(did)
-        if dev is None or not self._recording_guard():
-            return
-        inside = [t for t in dev.tags if t.group == path or t.group.startswith(path + "/")]
-        if inside:
-            box = QMessageBox(self)
-            box.setWindowTitle("Delete group"); box.setIcon(QMessageBox.Icon.Warning)
-            box.setText(f"Group '{path}' holds {len(inside)} tag(s).")
-            box.setInformativeText("Keep the tags (they move up one level) or delete them with the group?")
-            keep = box.addButton("Keep tags", QMessageBox.ButtonRole.AcceptRole)
-            kill = box.addButton("Delete group and tags", QMessageBox.ButtonRole.DestructiveRole)
-            cancel = box.addButton(QMessageBox.StandardButton.Cancel)
-            box.setDefaultButton(keep); box.setEscapeButton(cancel)
-            box.exec()
-            if box.clickedButton() not in (keep, kill):
-                return
-            if box.clickedButton() is kill:
-                dev.tags = [t for t in dev.tags if t not in inside]
-            else:
-                parent = path.rsplit("/", 1)[0] if "/" in path else ""
-                for t in inside:
-                    t.group = parent
-        dev.groups = [g for g in dev.groups if not (g == path or g.startswith(path + "/"))]
-        self.show_properties(None)
-        self.tags_page.refresh(("device", did))
-        self.tags_changed(did, restart=bool(inside))
-
     def write_tag(self, did: str, idx: int):
         t = self.project.tag(did, idx)
         if t is None:
@@ -2057,11 +1983,11 @@ class DaqWindow(AppWindow):
             self.drivers.write(did, idx, val)
             self._log(f"Write {t.name} ← {val:g}")
 
-    def browse_opcua(self, did: str, group: str):
+    def browse_opcua(self, did: str):
         dev = self.project.device(did)
         if dev is None or not self._recording_guard():
             return
-        dlg = OpcUaBrowseDialog(self, dict(dev.settings), dev.all_groups(), group)
+        dlg = OpcUaBrowseDialog(self, dict(dev.settings))
         if not dlg.exec():
             return
         picked = dlg.selected()
@@ -2070,7 +1996,7 @@ class DaqWindow(AppWindow):
         for node, name in picked:
             if node in have:
                 continue
-            t = new_tag(dev, self._unique_name(name, {x.name for x in dev.tags}), dlg.group_path(), node=node)
+            t = new_tag(dev, self._unique_name(name, {x.name for x in dev.tags}), node=node)
             dev.tags.append(t); new.append(t)
         if new:
             self.tags_changed(did, restart=True)
@@ -2106,12 +2032,14 @@ class DaqWindow(AppWindow):
             added += 1
         if dev.wave:
             dev.tags.sort(key=lambda x: x.index)
-        for g in {t.group for t in dev.tags if t.group} - set(dev.all_groups()):
-            dev.groups.append(g)
+        placed = asm.migrate_groups(self.project)   # a "group" column of the CSV -> assets
         if not added and not replaced:
             return
         self.tags_changed(did, restart=True)
-        self._log(f"Imported tags into {dev.name} from {dlg.path}: {added} added, {replaced} replaced")
+        self._log(f"Imported tags into {dev.name} from {dlg.path}: {added} added, {replaced} replaced"
+                  + (f", {placed} placed in assets" if placed else ""))
+        if placed:
+            self.assets_changed()
         self.toast.popup(f"{added} tag(s) added" + (f", {replaced} replaced" if replaced else ""))
 
     def export_tags(self, did: str | None = None, keys: list = ()):
@@ -2253,17 +2181,24 @@ class DaqWindow(AppWindow):
             ci = node(self.nav_conn, f"{name}  ({n})", make_icon(icon, T["text" if n else "muted"]), ("conncat", key), tip)
             if not n:
                 ci.setForeground(0, muted)
-        # Tags: the six tag categories, flat - the Tags document lists devices, groups and tags
+        # Tags: All tags + the six tag categories, flat - the Tags document lists them
         tags = node(root, "Tags", make_icon("tag", T["text"]), ("tagsroot",),
                     "Tag management: Device, Virtual, Action, Aggregation, Memory, System")
         counts = {"device": sum(len(d.tags) for d in self.project.devices), "system": len(self.sys_tags()),
-                  "virtual": len(self.project.virtual_tags), "aggregation": len(self.project.aggregations),
-                  "groups": len(self.project.all_groups())}
+                  "virtual": len(self.project.virtual_tags), "aggregation": len(self.project.aggregations)}
+        counts["all"] = sum(counts.values())
         for key, name, icon, tip, ready in TAG_CATEGORIES:
             ci = node(tags, name + (f"  ({counts.get(key, 0)})" if ready else ""),
                       make_icon(icon, T["text" if ready else "muted"]), ("tagcat", key), tip)
             if not ready:
                 ci.setForeground(0, muted)
+        # Assets: the top-level assets only (one level) - the Assets document shows the whole tree
+        asn = node(root, "Assets", make_icon("boxes", T["text"]), ("doc", "assets"),
+                   "How tags are used together: areas, equipment, KPI and report sets")
+        for a in asm.children(self.project.assets, None):
+            node(asn, f"{a['name']}  ({len(asm.keys(self.project.assets, a['id']))})",
+                 swatch(a["color"]) if a.get("color") else make_icon("boxes", T["muted"]), ("asset", a["id"]),
+                 asm.path(self.project.assets, a["id"]) + (f" - {a['description']}" if a.get("description") else ""))
         logn = node(root, "Logging", make_icon("file-text", T["text"]), ("doc", "logging"),
                     "Test properties, log folder and logging profiles")
         for pr in self.project.logging_profiles:
@@ -2375,6 +2310,8 @@ class DaqWindow(AppWindow):
             return
         if d[0] == "doc":
             self._show_doc(d[1])
+            if d[1] == "assets":                     # the node itself: every asset
+                self.assets_page.refresh(None)
         elif d[0] == "project":
             self._show_doc("start")
             self.show_properties(props.project_target(self))
@@ -2397,9 +2334,10 @@ class DaqWindow(AppWindow):
             self._show_doc("tags")
             self.tags_page.refresh(("cat", d[1]))
             self.select_object(None)
-        elif d[0] == "group":
-            self.tags_page.refresh(("group", d[1], d[2]))
-            self.select_object(("group", d[1], d[2]))
+        elif d[0] == "asset":
+            self._show_doc("assets")
+            self.assets_page.refresh(d[1])
+            self.select_object(("asset", d[1]))
         elif d[0] == "tag":
             self.tags_page.select_tag(d[1], d[2])
             self.select_object(("tag", d[1], d[2]))
@@ -2434,7 +2372,7 @@ class DaqWindow(AppWindow):
             return
         go = {"device": lambda: self.edit_device(d[1]),
               "tag": lambda: self.edit_tag(d[1], d[2]),
-              "group": lambda: self.edit_group(d[1], d[2]),
+              "asset": lambda: self.edit_asset(d[1]),
               "lprof": lambda: self.open_editor("lprofile", d[1]),
               "alarm": lambda: self.open_editor("alarm", d[1]),
               "aprof": lambda: self.open_editor("aprofile", d[1]),
@@ -2456,7 +2394,7 @@ class DaqWindow(AppWindow):
             m.addAction("Disconnect" if run else "Connect",
                         lambda: (self.stop_device if run else self.start_device)(d[1]))
             if dev and dev.driver == "opcua":
-                m.addAction("Browse server...", lambda: self.browse_opcua(d[1], ""))
+                m.addAction("Browse server...", lambda: self.browse_opcua(d[1]))
             m.addSeparator()
             m.addAction("Delete device", lambda: self.delete_device(d[1]))
         elif tuple(d[:2]) == ("doc", "connectivity"):
@@ -2465,11 +2403,9 @@ class DaqWindow(AppWindow):
                 add.addAction(dd["label"] + "...", lambda kk=k: self.add_device(kk))
         elif tuple(d[:2]) == ("tagcat", "system"):
             m.addAction("Open system tags", lambda: (self._show_doc("tags"), self.tags_page.refresh(("cat", "system"))))
-        elif d[0] in ("tagsroot", "group", "tag") or tuple(d[:2]) == ("tagcat", "device"):
+        elif d[0] in ("tagsroot", "tag") or tuple(d[:2]) == ("tagcat", "device"):
             first = self.project.devices[0].id if self.project.devices else None
-            did = d[1] if d[0] in ("group", "tag") else (self.tags_page.current_device_id() or first)
-            group = d[2] if d[0] == "group" else (self.project.tag(d[1], d[2]).group
-                                                   if d[0] == "tag" and self.project.tag(d[1], d[2]) else "")
+            did = d[1] if d[0] == "tag" else (self.tags_page.current_device_id() or first)
             if d[0] == "tag":
                 t = self.project.tag(d[1], d[2])
                 m.addAction("Edit tag...", later(lambda: self.edit_tag(d[1], d[2])))
@@ -2478,23 +2414,13 @@ class DaqWindow(AppWindow):
                                 lambda: self.set_tags_enabled(d[1], [d[2]], not t.enabled))
                     if t.access == "RW":
                         m.addAction("Write value...", lambda: self.write_tag(d[1], d[2]))
-                    mv = m.addMenu("Move to group")
-                    mv.addAction("(no group)", lambda: self.move_tags(d[1], [d[2]], ""))
-                    for g in self.project.device(d[1]).all_groups():
-                        mv.addAction(g, lambda gg=g: self.move_tags(d[1], [d[2]], gg))
                 m.addAction("Add alarm for this tag...", lambda: self.add_alarm_for((d[1], d[2])))
                 m.addAction("Add statistic variable of this tag...", lambda: self._var_action("add", [d[1], d[2]]))
                 m.addAction("Delete tag", lambda: self.delete_tags(d[1], [d[2]]))
                 m.addSeparator()
-            elif d[0] == "group":
-                m.addAction("Edit group...", later(lambda: self.edit_group(d[1], d[2])))
-                m.addAction("Delete group", lambda: self.delete_group(d[1], d[2]))
-                m.addSeparator()
             if did is not None:
-                where = f" ({group})" if group else ""
-                m.addAction(f"New tag{where}...", later(lambda: self.add_tags(did, group, False)))
-                m.addAction(f"Add tags{where}...", lambda: self.add_tags(did, group, True))
-                m.addAction(f"New group{where}...", later(lambda: self.add_group(did, group)))
+                m.addAction("New tag...", later(lambda: self.add_tags(did, False)))
+                m.addAction("Add tags...", lambda: self.add_tags(did, True))
                 if d[0] in ("tagcat", "tagsroot"):
                     m.addSeparator()
                     m.addAction("Import tags...", lambda: self.import_tags(did))
@@ -2637,6 +2563,9 @@ class DaqWindow(AppWindow):
     def _profile_topics(self, pr: dict) -> list[dict]:
         """Recorder device list for one logging profile (enabled devices / tags only)."""
         sel = None if pr.get("channels") is None else {tuple(x) for x in pr["channels"]}
+        if sel is not None:                      # whole assets: their tags as they are now
+            for aid in pr.get("assets") or []:
+                sel |= set(asm.keys(self.project.assets, aid))
         out = []
         for d in self.project.devices:
             if not d.enabled:
@@ -3299,6 +3228,8 @@ class DaqWindow(AppWindow):
             self.conn_page.update_states()
         elif page is getattr(self, "start_page", None):
             self.start_page.update_live()
+        elif page is getattr(self, "assets_page", None):
+            self.assets_page.update_live()
         if self._monitor is not None:
             self.monitor_bar.update_live()
         self._sync_comm()
@@ -3869,9 +3800,9 @@ class DaqWindow(AppWindow):
                 self.stats.feed((tid, 0), np.array([r.stamp]), vb.y[0])
             self._compute_variables(tid, r.stamp, vb)
 
-    def add_virtual(self, kind: str, group: str = ""):
+    def add_virtual(self, kind: str):
         if self._recording_guard():
-            QTimer.singleShot(0, lambda: self._vt_popup(None, kind, group))
+            QTimer.singleShot(0, lambda: self._vt_popup(None, kind))
 
     def edit_virtual(self, vid: str):
         QTimer.singleShot(0, lambda: self._vt_popup(vid))
@@ -3880,7 +3811,7 @@ class DaqWindow(AppWindow):
         dlg = PickDialog(self, choices, chosen, multi, title)
         return dlg.result_keys() if dlg.exec() else None
 
-    def _vt_popup(self, vid: str | None = None, kind: str = "formula", group: str = ""):
+    def _vt_popup(self, vid: str | None = None, kind: str = "formula"):
         """Add / Edit virtual tag pop-up (tabs): the tag joins the project or changes only on Add tag / Save."""
         new = vid is None
         cur = None if new else self.virtual_tag(vid)
@@ -3888,13 +3819,11 @@ class DaqWindow(AppWindow):
             return
         if new:
             v = vt.new_virtual(kind)
-            v["group"] = group
             v["name"] = self._unique_name(v["name"], {x["name"] for x in self.project.virtual_tags})
         else:
             v = copy.deepcopy(cur)
         taken = {x["name"].strip().lower() for x in self.project.virtual_tags if x["id"] != v["id"]}
-        groups = self.project.all_groups()
-        dlg = VirtualTagDialog(self, v, self.vt_engine, self.vt_choices(), self._vt_names(), groups,
+        dlg = VirtualTagDialog(self, v, self.vt_engine, self.vt_choices(), self._vt_names(),
                                self.tag_live, self._vt_pick, taken, self.vt_color({**v, "color": ""}))
         label_, icon, what = vt.TYPES[v["kind"]]
         dlg.setWindowTitle("Add virtual tag" if new else f"Virtual tag - {v['name']}")
@@ -4073,14 +4002,14 @@ class DaqWindow(AppWindow):
                     self.stats.feed((tid, i), np.array([now]), vb.y[i])
             self._compute_variables(tid, now, vb)
 
-    def add_aggregation(self, kind: str, group: str = ""):
+    def add_aggregation(self, kind: str):
         if self._recording_guard():
-            QTimer.singleShot(0, lambda: self._agg_popup(None, kind, group))
+            QTimer.singleShot(0, lambda: self._agg_popup(None, kind))
 
     def edit_aggregation(self, aid: str):
         QTimer.singleShot(0, lambda: self._agg_popup(aid))
 
-    def _agg_popup(self, aid: str | None = None, kind: str = "totalizer", group: str = ""):
+    def _agg_popup(self, aid: str | None = None, kind: str = "totalizer"):
         """Add / Edit aggregation tag pop-up (tabs): joins the project or changes only on Add tag / Save."""
         new = aid is None
         cur = None if new else self.aggregation(aid)
@@ -4088,13 +4017,12 @@ class DaqWindow(AppWindow):
             return
         if new:
             a = ag.new_aggregation(kind)
-            a["group"] = group
             a["name"] = self._unique_name(a["name"], {x["name"] for x in self.project.aggregations})
         else:
             a = copy.deepcopy(cur)
         taken = {x["name"].strip().lower() for x in self.project.aggregations if x["id"] != a["id"]}
         choices = [c for c in self.channel_choices() if not (ag.is_agg(c[0]) and c[0] == ag.AGG_PREFIX + a["id"])]
-        dlg = AggregationDialog(self, a, self.agg_engine, choices, self._vt_names(), self.project.all_groups(),
+        dlg = AggregationDialog(self, a, self.agg_engine, choices, self._vt_names(),
                                 self.tag_live, taken, self.agg_color({**a, "color": ""}))
         label_, icon, what = ag.TYPES[a["kind"]]
         dlg.setWindowTitle("Add aggregation tag" if new else f"Aggregation tag - {a['name']}")
@@ -4264,89 +4192,211 @@ class DaqWindow(AppWindow):
             self._show_doc(to)
         self._log("Monitor mode off")
 
-    # ================================================================ Groups (Tags > Groups: one tree for all tags)
-    def _regroup(self, fix):
-        """Apply fix(path) -> path to every group path of the project (devices, tags, virtual,
-        aggregation, the project's own list)."""
-        self.project.groups = sorted({g for g in (fix(x) for x in self.project.groups) if g})
-        for d in self.project.devices:
-            d.groups = sorted({g for g in (fix(x) for x in d.groups) if g})
-            for t in d.tags:
-                t.group = fix(t.group)
-        for x in self.project.virtual_tags + self.project.aggregations:
-            x["group"] = fix(x.get("group", ""))
+    # ================================================================ Assets (core/assets.py)
+    def assets_of(self, key) -> list[str]:
+        return asm.assets_of(self.project.assets, key)
 
-    def group_count(self, path: str) -> int:
-        inside = lambda g: bool(g) and (g == path or g.startswith(path + "/"))    # noqa: E731
-        return (sum(1 for d in self.project.devices for t in d.tags if inside(t.group))
-                + sum(1 for x in self.project.virtual_tags + self.project.aggregations if inside(x.get("group", ""))))
+    def key_source(self, key) -> str:
+        tid = key[0]
+        if vt.is_vt(tid):
+            return "Virtual"
+        if ag.is_agg(tid):
+            return "Aggregation"
+        if ss.is_sys(tid):
+            return "System"
+        if vr.is_var(tid):
+            return "Variables"
+        d = self.project.device(tid)
+        return d.name if d else "(deleted)"
 
-    def add_project_group(self, parent: str = ""):
-        if not self._recording_guard():
-            return
-        dlg = GroupDialog(self, "Project (all tags)", self.project.all_groups(), "", parent, root="(top level)")
-        dlg.setWindowTitle("Add group")
-        _ok, title = popup_form(dlg, "folder", "New group", "Tags > Groups · one tree for all tags (areas, machines ...)",
-                                "Add group", width=480)
-        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or "New group"))
-        if not dlg.exec() or self.recording:
-            return
-        newp = dlg.result_path()
-        self.project.groups = sorted(set(self.project.groups) | {newp})
-        self._groups_changed(newp)
+    def select_key(self, key):
+        """Properties of any tag key (device, virtual, aggregation, system)."""
+        tid, idx = key
+        self.select_object(("agg", tid[len(ag.AGG_PREFIX):]) if ag.is_agg(tid) else
+                           ("vt", tid[len(vt.VT_PREFIX):]) if vt.is_vt(tid) else
+                           ("sys", tid) if ss.is_sys(tid) else
+                           None if vr.is_var(tid) else ("tag", tid, idx))
 
-    def edit_project_group(self, path: str):
-        if not path or not self._recording_guard():
-            return
-        dlg = GroupDialog(self, "Project (all tags)", self.project.all_groups(), path, "", self.group_count(path),
-                          root="(top level)")
-        dlg.setWindowTitle(f"Group - {path}")
-        _ok, title = popup_form(dlg, "folder", path.rsplit("/", 1)[-1],
-                                "Tags > Groups · renaming moves its tags and sub-groups along", "Save", width=480)
-        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or path))
-        if not dlg.exec() or self.recording:
-            return
-        newp = dlg.result_path()
-        if newp != path:
-            self._regroup(lambda g: newp + g[len(path):] if g == path or g.startswith(path + "/") else g)
-        self._groups_changed(newp)
+    def open_tag(self, key):
+        """A tag's own pop-up (System Tags: the Tags page - they are read-only)."""
+        tid, idx = key
+        if ag.is_agg(tid):
+            self.edit_aggregation(tid[len(ag.AGG_PREFIX):])
+        elif vt.is_vt(tid):
+            self.edit_virtual(tid[len(vt.VT_PREFIX):])
+        elif ss.is_sys(tid):
+            self._show_doc("tags"); self.tags_page.select_tag(tid, idx)
+        elif self.project.tag(tid, idx) is not None:
+            QTimer.singleShot(0, lambda: self.edit_tag(tid, idx))
 
-    def delete_project_group(self, path: str):
-        if not path or not self._recording_guard():
-            return
-        n = self.group_count(path)
-        up = path.rsplit("/", 1)[0] if "/" in path else ""
-        if not confirm(self, "Delete group", f"Delete group '{path}'?", "Delete group",
-                       f"Its {n} tag(s) and sub-groups move up to {up or 'the top level'} - no tag is deleted."
-                       if n else "It holds no tags."):
-            return
-        self._regroup(lambda g: (up + "/" + g[len(path) + 1:]).strip("/") if g.startswith(path + "/")
-                      else (up if g == path else g))
-        self._groups_changed(up or None)
-
-    def move_to_group(self, keys, group: str):
-        """Put tags of any category (device, virtual, aggregation keys) into a project group."""
-        if not self._recording_guard():
-            return
-        for tid, idx in keys:
-            if vt.is_vt(tid):
-                x = self.virtual_tag(tid)
-            elif ag.is_agg(tid):
-                x = self.aggregation(tid)
-            else:
-                t = self.project.tag(tid, idx)
-                if t is not None:
-                    t.group = group
-                continue
-            if x is not None:
-                x["group"] = group
-        self._groups_changed(group or None)
-
-    def _groups_changed(self, select: str | None):
+    def assets_changed(self, select=False):
         self._mark_dirty()
+        if hasattr(self, "assets_page"):
+            self.assets_page.refresh(select)
+        self.tags_page.refresh_assets()
         self._rebuild_project_tree()
-        self.tags_page.refresh(("pgroup", select) if select else ("cat", "groups"))
         self._refresh_properties()
+
+    def asset(self, aid: str) -> dict | None:
+        return asm.by_id(self.project.assets).get(aid)
+
+    def _asset_pick(self, chosen):
+        return self._vt_pick(self.vt_choices(), [list(k) for k in chosen], True, "Add tags to the asset")
+
+    def add_asset(self, parent: str | None = None):
+        QTimer.singleShot(0, lambda: self._asset_popup(None, parent))
+
+    def edit_asset(self, aid: str):
+        QTimer.singleShot(0, lambda: self._asset_popup(aid))
+
+    def _asset_popup(self, aid: str | None = None, parent: str | None = None, keys=()):
+        """Add / Edit asset pop-up (tabs General / Attributes): changes only on Add asset / Save."""
+        assets = self.project.assets
+        new = aid is None
+        cur = None if new else self.asset(aid)
+        if not new and cur is None:
+            return
+        if new:
+            a = asm.new_asset(self._unique_name("Asset", {x["name"] for x in assets if x.get("parent") == parent}),
+                              parent)
+            asm.add_attributes(a, keys)
+        else:
+            a = copy.deepcopy(cur)
+        dlg = AssetDialog(self, a, assets, self.key_label, self._asset_pick, T["muted"])
+        where = asm.path(assets, parent) if new and parent else (asm.path(assets, aid) if not new else "")
+        dlg.ok_btn, title = popup_form(dlg, "boxes", "New asset" if new else a["name"],
+                                       "Asset" + (f" · {where}" if where else " · top level"),
+                                       "Add asset" if new else "Save", width=560)
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or ("New asset" if new else a["name"])))
+        dlg.resize(dlg.width(), 480)
+        dlg._check()
+        if not dlg.exec():
+            return
+        if new:
+            dlg.apply(a)
+            assets.append(a)
+        else:
+            dlg.apply(cur)
+            a = cur
+        self.assets_changed(a["id"])
+        self.set_status(f"Asset '{a['name']}' " + ("added" if new else "saved"), "ok")
+
+    def delete_asset(self, aid: str):
+        a = self.asset(aid)
+        if a is None:
+            return
+        subs = asm.descendants(self.project.assets, aid)
+        n = len(asm.keys(self.project.assets, aid))
+        if not confirm(self, "Delete asset", f"Delete asset '{a['name']}'" +
+                       (f" and its {len(subs)} sub-asset(s)?" if subs else "?"), "Delete asset",
+                       f"{n} tag reference(s) go with it - the tags themselves stay. Logging profiles that use it "
+                       "log its tags no longer."):
+            return
+        self.project.assets = asm.delete(self.project.assets, aid)
+        self.select_object(None)
+        self.assets_changed(a.get("parent"))
+
+    def duplicate_asset(self, aid: str):
+        assets = self.project.assets
+        a = self.asset(aid)
+        if a is None:
+            return
+        idmap = {}
+        for x in [a] + asm.descendants(assets, aid):           # parents before children
+            y = copy.deepcopy(x)
+            y["id"] = asm.new_asset()["id"]
+            idmap[x["id"]] = y["id"]
+            y["parent"] = idmap.get(x.get("parent"), x.get("parent"))
+            if x is a:
+                y["name"] = self._unique_name(f"{a['name']} copy", {z["name"] for z in assets
+                                                                     if z.get("parent") == a.get("parent")})
+            assets.append(y)
+        self.assets_changed(idmap[aid])
+
+    def move_asset(self, aid: str, parent: str | None):
+        msg = asm.can_move(self.project.assets, aid, parent)
+        if msg:
+            self.toast.popup(msg)
+            return
+        self.asset(aid)["parent"] = parent
+        self.assets_changed(aid)
+
+    def asset_add_tags(self, aid: str):
+        a = self.asset(aid)
+        if a is None:
+            return
+        keys = self._asset_pick([tuple(x["key"]) for x in a["attributes"]])
+        if keys is None:
+            return
+        chosen = {tuple(k) for k in keys}
+        a["attributes"] = [x for x in a["attributes"] if tuple(x["key"]) in chosen]   # unticked: removed
+        asm.add_attributes(a, keys)
+        self.assets_changed(aid)
+
+    def add_to_asset(self, keys, aid: str | None):
+        """Tags > Add to asset ▸: an existing asset, or a new one (its pop-up, with the tags)."""
+        if aid is None:
+            QTimer.singleShot(0, lambda: self._asset_popup(None, None, [tuple(k) for k in keys]))
+            return
+        a = self.asset(aid)
+        if a is not None:
+            n = asm.add_attributes(a, keys)
+            self.assets_changed()
+            self.toast.popup(f"{n} tag(s) added to {asm.path(self.project.assets, aid)}" if n else
+                             "Already in the asset")
+
+    def remove_attributes(self, rows):
+        """[(asset id, key)] -> out of their assets (the tags stay)."""
+        for aid, key in rows:
+            a = self.asset(aid)
+            if a is not None:
+                a["attributes"] = [x for x in a["attributes"] if tuple(x["key"]) != tuple(key)]
+        self.assets_changed()
+
+    def new_view_from(self, keys, name: str | None = None):
+        """A view with a trend (number tags, at most 8) and a tag table of the keys."""
+        keys = [tuple(k) for k in keys]
+        numeric = {(c[0], c[1]) for c in self.channel_choices()}
+        nums = [list(k) for k in keys if k in numeric]
+        if not nums:
+            self.toast.popup("No number tags to show")
+            return
+        taken = {v["name"] for v in self.project.views}
+        vw = vmod.new_view(self._unique_name(name or f"View {len(self.project.views) + 1}", taken))
+        vw["tiles"] = [vmod.new_tile("text", 10, 10, w=1180, h=60, text=vw["name"], style="H1", show_title=False),
+                       vmod.new_tile("plot", 10, 80, w=1180, h=320, channels=nums[:8], title="Trend"),
+                       vmod.new_tile("tags", 10, 420, w=1180, h=min(600, 60 + 26 * len(nums)), channels=nums,
+                                     title="Values")]
+        self.project.views.append(vw)
+        self._open_view_page(vw, editing=False)
+        self._mark_dirty()
+        self._stat_dirty = True
+        self._rebuild_project_tree()
+        self.set_status(f"View '{vw['name']}' made from {len(nums)} tag(s)", "ok")
+
+    def alarms_for_asset(self, aid: str):
+        """One alarm per number attribute: data loss after 10 s (edit the limits afterwards)."""
+        assets = self.project.assets
+        numeric = {(c[0], c[1]) for c in self.channel_choices()}
+        have = {tuple(a["channel"]) for a in self.project.alarms if a.get("channel")}
+        keys = [k for k in asm.keys(assets, aid) if k in numeric and k not in have]
+        if not keys:
+            self.toast.popup("Every number attribute already has an alarm")
+            return
+        path = asm.path(assets, aid)
+        if not confirm(self, "Add alarms", f"Add {len(keys)} alarm(s) for {path}?", f"Add {len(keys)} alarms",
+                       "Each starts with a data-loss level (no data for 10 s) - set the limits in each alarm.",
+                       danger=False):
+            return
+        prof = [p["id"] for p in self.project.alarm_profiles[:1]]
+        for k in keys:
+            a = ar.new_alarm(k, f"{path} · {self.key_label(k).split(' · ')[-1]}")
+            a["levels"][0].update(enabled=True, type="D", value=10.0)
+            a["profiles"] = prof
+            self.project.alarms.append(a)
+        self._mark_dirty()
+        self._alarms_reload()
+        self.set_status(f"{len(keys)} alarm(s) added for {path}", "ok")
 
     # ================================================================ System Tags (core/system_tags.py)
     def sys_tags(self) -> list[ss.SysTag]:

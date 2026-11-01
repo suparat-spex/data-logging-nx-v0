@@ -1,7 +1,7 @@
-"""Add several tags at once: count, name pattern, group, first address and address step."""
+"""Add several tags at once: count, name pattern, first address and address step."""
 from __future__ import annotations
 
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QLineEdit, QSpinBox, QVBoxLayout)
+from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLineEdit, QSpinBox, QVBoxLayout)
 
 from nxlogger.core.tags import DRIVERS, MODBUS_TYPES, DeviceCfg, TagCfg, new_tag
 from nxlogger.ui.dialogs.common import SchemaForm, form_page
@@ -9,7 +9,7 @@ from nxlogger.ui.theme.ui_kit import label, set_prop
 
 
 class AddTagsDialog(QDialog):
-    def __init__(self, parent, dev: DeviceCfg, group: str = "", groups=None):
+    def __init__(self, parent, dev: DeviceCfg):
         super().__init__(parent)
         self.dev = dev
         self.setWindowTitle(f"Add tags - {dev.name}")
@@ -20,13 +20,9 @@ class AddTagsDialog(QDialog):
         self.name.setToolTip("{n} = running number (1, 2, 3 ...)")
         self.first = QSpinBox(minimum=1, maximum=100000, value=dev.next_index() + 1)
         self.first.setToolTip("Number used for {n} in the first tag")
-        self.group = QComboBox(); self.group.setEditable(True)
-        self.group.addItems([""] + (dev.all_groups() if groups is None else list(groups)))
-        self.group.setCurrentText(group)
         f.addRow("How many", self.count)
         f.addRow("Name", self.name)
         f.addRow("First number", self.first)
-        f.addRow("Group", self.group)
         self.addr = None
         self.step = QSpinBox(minimum=0, maximum=1000)
         if not dev.wave:
@@ -52,7 +48,6 @@ class AddTagsDialog(QDialog):
         """The new tags (not yet added to the device)."""
         out = []
         base = self.addr.values() if self.addr else {}
-        group = "/".join(p.strip() for p in self.group.currentText().split("/") if p.strip())
         tmp = DeviceCfg(self.dev.name, self.dev.driver, settings=dict(self.dev.settings),
                         tags=list(self.dev.tags))
         step = self.step.value() or (1 if base.get("area") in ("coil", "discrete")
@@ -62,7 +57,7 @@ class AddTagsDialog(QDialog):
             if "addr" in addr:
                 addr["addr"] = int(base["addr"]) + i * step
             name = self.name.text().replace("{n}", str(self.first.value() + i)) or f"Tag{tmp.next_index() + 1}"
-            t = new_tag(tmp, name, group, **addr)
+            t = new_tag(tmp, name, **addr)
             tmp.tags.append(t)
             out.append(t)
         return out
