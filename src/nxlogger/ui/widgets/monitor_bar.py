@@ -2,15 +2,16 @@
 monitor_bar.py - the slim top bar of Monitor mode (full-screen views for watching a test or a
 plant on a big screen; a data-logger display, not a control HMI).
 
-  [▤ Overview ▾] ‹ ›  Water Plant A   ● 4/5 online  ⚠ 2 alarms  ● REC 01:12:05   10:42:05  [⛶] [Cycle: Off ▾] [✕ Exit]
+  [▤ Overview ▾] ‹ ›  Water Plant A   Power 412 kW  Cost 4.2 THB/kWh   ● 4/5 online  ⚠ 2 alarms  ● REC 01:12:05
+                                                                           10:42:05  [⛶] [Cycle: Off ▾] [✕ Exit]
 
 View ▾ / ‹ › (Page Up / Page Down) switch views; the status chips follow the logger (twice a
-second); ⛶ full screen; Cycle switches to the next view every N seconds; Exit (F11 / Esc)
+second) - KPI chips: the first KPI_CHIPS tags of the KPI collections; ⛶ full screen; Cycle switches to the next view every N seconds; Exit (F11 / Esc)
 brings the previous layout back. Clicking the alarm chip leaves Monitor mode on the Alarms page.
 
 Host API (duck-typed, DaqWindow):
   host.project (views), host.reg_icon(target, name, token), host.start_status() -> {"devices",
-  "online", "alarms", "recording", "elapsed"}, host.monitor_show(vid), host.exit_monitor(to=None),
+  "online", "alarms", "recording", "elapsed"}, host.kpi_values(limit), host.monitor_show(vid), host.exit_monitor(to=None),
   host.set_monitor_fullscreen(on), host.set_monitor_cycle(seconds)
 """
 from __future__ import annotations
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLabel, QToolButto
 
 from nxlogger.ui.theme.ui_kit import label, set_prop, vsep
 
+KPI_CHIPS = 4                                     # KPI values in the bar (the first ones)
 CYCLES = [(0, "Cycle: off"), (10, "Every 10 s"), (30, "Every 30 s"), (60, "Every 1 min"), (300, "Every 5 min")]
 
 
@@ -80,7 +82,8 @@ class MonitorBar(QFrame):
         self.exit_btn.setToolTip("Leave Monitor mode (F11 / Esc)")
         host.reg_icon(self.exit_btn, "x")
         self.exit_btn.clicked.connect(lambda: host.exit_monitor())
-        for w in (self.views, self.prev_btn, self.next_btn, self.project):
+        self.kpis = [_Chip() for _ in range(KPI_CHIPS)]
+        for w in (self.views, self.prev_btn, self.next_btn, self.project, *self.kpis):
             h.addWidget(w)
         h.addStretch(1)
         for w in (self.online, self.alarms, self.rec, vsep(), self.clock, vsep(), self.full_btn, self.cycle,
@@ -125,3 +128,10 @@ class MonitorBar(QFrame):
         self.rec.set(f"● REC {s['elapsed']}" if s["recording"] else "Not recording",
                      "bad" if s["recording"] else "muted")
         self.clock.setText(time.strftime("%H:%M:%S"))
+        rows = self.host.kpi_values(KPI_CHIPS)
+        for i, chip in enumerate(self.kpis):
+            if i < len(rows):
+                name, text, unit, good, _k = rows[i]
+                chip.set(f"{name} {text} {unit}".strip() if text else f"{name} —",
+                         "muted" if good is None else ("ok" if good else "bad"))
+            chip.setVisible(i < len(rows))

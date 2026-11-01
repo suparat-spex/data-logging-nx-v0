@@ -63,7 +63,7 @@ import pyqtgraph as pg
 from nxlogger import APP_NAME, __version__, config, paths
 from nxlogger.comms.manager import DriverManager
 from nxlogger.core import aggregation as ag
-from nxlogger.core import assets as asm
+from nxlogger.core import tag_collections as tc
 from nxlogger.core import alarm_rules as ar
 from nxlogger.core import analysis as an
 from nxlogger.core import channel_math as cm
@@ -76,7 +76,8 @@ from nxlogger.core import variables as vr
 from nxlogger.core import virtual_tags as vt
 from nxlogger.core import view_model as vmod
 from nxlogger.core import wavepacket as wp
-from nxlogger.core.project import (OLD_PROJECT_EXTS, PROJECT_EXT, Project, fmt_interval, new_log_profile)
+from nxlogger.core.project import (OLD_PROJECT_EXTS, PROJECT_EXT, Project, fmt_interval, new_log_profile,
+                                   report_profile)
 from nxlogger.core.ring import MAX_PLOT_S, TopicStream
 from nxlogger.core.tags import (COLORS, CONN_CATEGORIES, DRIVERS, PLANNED, DeviceCfg, ScanBlock, TagCfg, describe_address,
                                 DEVICE_COLS, devices_to_json,
@@ -88,7 +89,7 @@ from nxlogger.ui.dialogs.aggregation_dialog import AggregationDialog
 from nxlogger.ui.dialogs.alarm_dialog import AlarmDialog
 from nxlogger.ui.dialogs.alarm_profile_dialog import AlarmProfileDialog
 from nxlogger.ui.dialogs.device_dialog import DeviceDialog
-from nxlogger.ui.dialogs.asset_dialog import AssetDialog
+from nxlogger.ui.dialogs.collection_dialog import CollectionDialog
 from nxlogger.ui.dialogs.export_devices_dialog import ExportDevicesDialog
 from nxlogger.ui.dialogs.export_tags_dialog import ExportTagsDialog
 from nxlogger.ui.dialogs.import_devices_dialog import ImportDevicesDialog
@@ -115,7 +116,7 @@ from nxlogger.ui.theme.ui_kit import (AppWindow, Card, Chip, EmptyState, T, fixe
 from nxlogger.ui.widgets import alarm_panel as ap
 from nxlogger.ui.widgets import properties as props
 from nxlogger.ui.widgets import views as dv
-from nxlogger.ui.widgets.assets_page import AssetsPage
+from nxlogger.ui.widgets.collections_page import CollectionsPage
 from nxlogger.ui.widgets.connectivity import STATE_TOKEN, ConnectivityPage
 from nxlogger.ui.widgets.monitor_bar import MonitorBar
 from nxlogger.ui.widgets.start_page import StartPage, show_at_startup
@@ -145,7 +146,7 @@ CHIP_W = 132                    # status chips keep one width whatever the text
 
 
 # ======================================================================= window
-HEADER_NODES = ("project", "doc", "conncat", "asset", "tagsroot", "alarms", "vars", "views")   # Project tree sections: no right-click menu
+HEADER_NODES = ("project", "doc", "conncat", "colpurpose", "tagsroot", "alarms", "vars", "views")   # Project tree sections: no right-click menu
 
 
 class _NoFlash(QObject):
@@ -570,7 +571,7 @@ class DaqWindow(AppWindow):
                 ("screen", self._build_screen(), "Quick View", "Quick", "chart"),
                 ("connectivity", self._build_connectivity(), "Connectivity", "Devices", "network"),
                 ("tags", self._build_tags(), "Tags", "Tags", "tag"),
-                ("assets", self._build_assets(), "Assets", "Assets", "boxes"),
+                ("collections", self._build_collections(), "Collections", "Collections", "boxes"),
                 ("logging", self._build_logging_spec(), "Logging", "Logging", "file-text"),
                 ("alarms", self._build_alarms(), "Alarms", "Alarms", "bell"),
                 ("variables", self._build_variables(), "Variables", "Vars", "variable")):
@@ -581,10 +582,10 @@ class DaqWindow(AppWindow):
         self.doc_tabs.setCurrentIndex(0)
         return self.doc_tabs
 
-    def _build_assets(self):
-        self.assets_page = AssetsPage(self)
-        ChannelPicker.asset_source = lambda: self.project.assets      # every tag picker: By asset
-        return self.assets_page
+    def _build_collections(self):
+        self.collections_page = CollectionsPage(self)
+        ChannelPicker.collection_source = lambda: self.project.collections   # every tag picker: By collection
+        return self.collections_page
 
     def _build_start(self):
         self.start_page = StartPage(self)
@@ -822,8 +823,8 @@ class DaqWindow(AppWindow):
             kind = ref[0]
             if kind == "device":
                 t = props.device_target(self, ref[1])
-            elif kind == "asset":
-                t = props.asset_target(self, ref[1])
+            elif kind == "collection":
+                t = props.collection_target(self, ref[1])
             elif kind == "tag":
                 t = props.tag_target(self, ref[1], ref[2])
             elif kind == "tags":
@@ -858,7 +859,7 @@ class DaqWindow(AppWindow):
         k = self._prop_key
         if not k:
             return
-        if k[0] in ("device", "asset", "tag", "tags", "project", "vt", "agg"):
+        if k[0] in ("device", "collection", "tag", "tags", "project", "vt", "agg"):
             ref = k if k[0] != "tags" else ("tags", k[1], list(k[2]))
             self.select_object(ref)
         elif k[0] in ("view", "tile"):
@@ -875,7 +876,7 @@ class DaqWindow(AppWindow):
         page = self.doc_tabs.currentWidget()
         if isinstance(page, dv.ViewPage):
             self.view_selected(page, page.selected)
-        elif page in (self.conn_page, self.tags_page, getattr(self, "assets_page", None)):
+        elif page in (self.conn_page, self.tags_page, getattr(self, "collections_page", None)):
             page.activate()                      # its selected row and properties come back
         elif page is getattr(self, "start_page", None):
             page.activate()
@@ -917,8 +918,8 @@ class DaqWindow(AppWindow):
         self.var_page.refresh()
         self.tags_page.refresh(())
         self.conn_page.refresh([])
-        if hasattr(self, "assets_page"):
-            self.assets_page.refresh(None)
+        if hasattr(self, "collections_page"):
+            self.collections_page.refresh(None)
         if hasattr(self, "start_page"):
             self.start_page.refresh()
         self.show_properties(props.project_target(self))
@@ -957,7 +958,7 @@ class DaqWindow(AppWindow):
         p = self.project
         return {"Devices": len(p.devices), "Tags": sum(len(d.tags) for d in p.devices),
                 "Virtual tags": len(p.virtual_tags), "Aggregation tags": len(p.aggregations),
-                "Assets": len(p.assets), "Views": len(p.views), "Alarms": len(p.alarms)}
+                "Collections": len(p.collections), "Views": len(p.views), "Alarms": len(p.alarms)}
 
     def edit_project(self):
         QTimer.singleShot(0, self._project_popup)
@@ -1898,8 +1899,8 @@ class DaqWindow(AppWindow):
         self.conn_page.refresh(added)
         self._show_doc("connectivity")
         self._log(f"Imported devices from {path}: {len(added)} added, {replaced} replaced")
-        if asm.migrate_groups(self.project):        # groups of the imported tags -> assets
-            self.assets_changed()
+        if tc.migrate(self.project):                # groups of the imported tags -> Equipment collections
+            self.collections_changed()
         self.toast.popup(f"{len(added)} device(s) added" + (f", {replaced} replaced" if replaced else ""))
 
     def _add_tag_current(self):
@@ -2032,14 +2033,14 @@ class DaqWindow(AppWindow):
             added += 1
         if dev.wave:
             dev.tags.sort(key=lambda x: x.index)
-        placed = asm.migrate_groups(self.project)   # a "group" column of the CSV -> assets
+        placed = tc.migrate(self.project)           # a "group" column of the CSV -> Equipment collections
         if not added and not replaced:
             return
         self.tags_changed(did, restart=True)
         self._log(f"Imported tags into {dev.name} from {dlg.path}: {added} added, {replaced} replaced"
-                  + (f", {placed} placed in assets" if placed else ""))
+                  + (f", {placed} placed in Equipment collections" if placed else ""))
         if placed:
-            self.assets_changed()
+            self.collections_changed()
         self.toast.popup(f"{added} tag(s) added" + (f", {replaced} replaced" if replaced else ""))
 
     def export_tags(self, did: str | None = None, keys: list = ()):
@@ -2192,13 +2193,14 @@ class DaqWindow(AppWindow):
                       make_icon(icon, T["text" if ready else "muted"]), ("tagcat", key), tip)
             if not ready:
                 ci.setForeground(0, muted)
-        # Assets: the top-level assets only (one level) - the Assets document shows the whole tree
-        asn = node(root, "Assets", make_icon("boxes", T["text"]), ("doc", "assets"),
-                   "How tags are used together: areas, equipment, KPI and report sets")
-        for a in asm.children(self.project.assets, None):
-            node(asn, f"{a['name']}  ({len(asm.keys(self.project.assets, a['id']))})",
-                 swatch(a["color"]) if a.get("color") else make_icon("boxes", T["muted"]), ("asset", a["id"]),
-                 asm.path(self.project.assets, a["id"]) + (f" - {a['description']}" if a.get("description") else ""))
+        # Collections: the four purposes, flat - the Collections document lists their collections
+        csn = node(root, "Collections", make_icon("boxes", T["text"]), ("doc", "collections"),
+                   "Sets of tags for a purpose: Report, KPI, Monitoring, Equipment")
+        for key, name, icon, what in tc.PURPOSES:
+            n = len(tc.of_purpose(self.project.collections, key))
+            ci = node(csn, f"{name}  ({n})", make_icon(icon, T["text" if n else "muted"]), ("colpurpose", key), what)
+            if not n:
+                ci.setForeground(0, muted)
         logn = node(root, "Logging", make_icon("file-text", T["text"]), ("doc", "logging"),
                     "Test properties, log folder and logging profiles")
         for pr in self.project.logging_profiles:
@@ -2310,8 +2312,8 @@ class DaqWindow(AppWindow):
             return
         if d[0] == "doc":
             self._show_doc(d[1])
-            if d[1] == "assets":                     # the node itself: every asset
-                self.assets_page.refresh(None)
+            if d[1] == "collections":                # the node itself: the purpose shown last, all of it
+                self.collections_page.refresh(None)
         elif d[0] == "project":
             self._show_doc("start")
             self.show_properties(props.project_target(self))
@@ -2334,10 +2336,10 @@ class DaqWindow(AppWindow):
             self._show_doc("tags")
             self.tags_page.refresh(("cat", d[1]))
             self.select_object(None)
-        elif d[0] == "asset":
-            self._show_doc("assets")
-            self.assets_page.refresh(d[1])
-            self.select_object(("asset", d[1]))
+        elif d[0] == "colpurpose":
+            self._show_doc("collections")
+            self.collections_page.show_purpose(d[1])
+            self.select_object(None)
         elif d[0] == "tag":
             self.tags_page.select_tag(d[1], d[2])
             self.select_object(("tag", d[1], d[2]))
@@ -2372,7 +2374,6 @@ class DaqWindow(AppWindow):
             return
         go = {"device": lambda: self.edit_device(d[1]),
               "tag": lambda: self.edit_tag(d[1], d[2]),
-              "asset": lambda: self.edit_asset(d[1]),
               "lprof": lambda: self.open_editor("lprofile", d[1]),
               "alarm": lambda: self.open_editor("alarm", d[1]),
               "aprof": lambda: self.open_editor("aprofile", d[1]),
@@ -2563,9 +2564,9 @@ class DaqWindow(AppWindow):
     def _profile_topics(self, pr: dict) -> list[dict]:
         """Recorder device list for one logging profile (enabled devices / tags only)."""
         sel = None if pr.get("channels") is None else {tuple(x) for x in pr["channels"]}
-        if sel is not None:                      # whole assets: their tags as they are now
-            for aid in pr.get("assets") or []:
-                sel |= set(asm.keys(self.project.assets, aid))
+        if sel is not None:                      # whole collections: their tags as they are now
+            for cid in pr.get("collections") or []:
+                sel |= set(tc.keys(self.project.collections, cid))
         out = []
         for d in self.project.devices:
             if not d.enabled:
@@ -3228,8 +3229,8 @@ class DaqWindow(AppWindow):
             self.conn_page.update_states()
         elif page is getattr(self, "start_page", None):
             self.start_page.update_live()
-        elif page is getattr(self, "assets_page", None):
-            self.assets_page.update_live()
+        elif page is getattr(self, "collections_page", None):
+            self.collections_page.update_live()
         if self._monitor is not None:
             self.monitor_bar.update_live()
         self._sync_comm()
@@ -4192,9 +4193,9 @@ class DaqWindow(AppWindow):
             self._show_doc(to)
         self._log("Monitor mode off")
 
-    # ================================================================ Assets (core/assets.py)
-    def assets_of(self, key) -> list[str]:
-        return asm.assets_of(self.project.assets, key)
+    # ================================================================ Collections (core/tag_collections.py)
+    def collections_of(self, key) -> list[str]:
+        return tc.collections_of(self.project.collections, key)
 
     def key_source(self, key) -> str:
         tid = key[0]
@@ -4229,129 +4230,184 @@ class DaqWindow(AppWindow):
         elif self.project.tag(tid, idx) is not None:
             QTimer.singleShot(0, lambda: self.edit_tag(tid, idx))
 
-    def assets_changed(self, select=False):
+    def collections_changed(self, select=False):
         self._mark_dirty()
-        if hasattr(self, "assets_page"):
-            self.assets_page.refresh(select)
-        self.tags_page.refresh_assets()
+        if hasattr(self, "collections_page"):
+            self.collections_page.refresh(select)
+        self.tags_page.refresh_collections()
         self._rebuild_project_tree()
         self._refresh_properties()
+        if hasattr(self, "start_page"):
+            self.start_page.refresh()
 
-    def asset(self, aid: str) -> dict | None:
-        return asm.by_id(self.project.assets).get(aid)
+    def collection(self, cid: str) -> dict | None:
+        return tc.by_id(self.project.collections).get(cid)
 
-    def _asset_pick(self, chosen):
-        return self._vt_pick(self.vt_choices(), [list(k) for k in chosen], True, "Add tags to the asset")
+    def _collection_pick(self, chosen):
+        return self._vt_pick(self.vt_choices(), [list(k) for k in chosen], True, "Add tags to the collection")
 
-    def add_asset(self, parent: str | None = None):
-        QTimer.singleShot(0, lambda: self._asset_popup(None, parent))
+    def add_collection(self, purpose: str = "monitoring", parent: str | None = None):
+        QTimer.singleShot(0, lambda: self._collection_popup(None, purpose, parent))
 
-    def edit_asset(self, aid: str):
-        QTimer.singleShot(0, lambda: self._asset_popup(aid))
+    def edit_collection(self, cid: str):
+        QTimer.singleShot(0, lambda: self._collection_popup(cid))
 
-    def _asset_popup(self, aid: str | None = None, parent: str | None = None, keys=()):
-        """Add / Edit asset pop-up (tabs General / Attributes): changes only on Add asset / Save."""
-        assets = self.project.assets
-        new = aid is None
-        cur = None if new else self.asset(aid)
+    def _collection_popup(self, cid: str | None = None, purpose: str = "monitoring", parent: str | None = None,
+                          keys=()):
+        """Add / Edit collection pop-up (tabs General / Tags): changes only on Add collection / Save.
+        A new Report collection gets its statistics logging profile."""
+        cols = self.project.collections
+        new = cid is None
+        cur = None if new else self.collection(cid)
         if not new and cur is None:
             return
         if new:
-            a = asm.new_asset(self._unique_name("Asset", {x["name"] for x in assets if x.get("parent") == parent}),
-                              parent)
-            asm.add_attributes(a, keys)
+            pname = tc.PURPOSE[purpose][1]
+            taken = {x["name"] for x in cols if x.get("parent") == parent and x["purpose"] == purpose}
+            c = tc.new_collection(self._unique_name(f"{pname} {len(tc.of_purpose(cols, purpose)) + 1}", taken),
+                                  purpose, parent)
+            tc.add_attributes(c, keys)
         else:
-            a = copy.deepcopy(cur)
-        dlg = AssetDialog(self, a, assets, self.key_label, self._asset_pick, T["muted"])
-        where = asm.path(assets, parent) if new and parent else (asm.path(assets, aid) if not new else "")
-        dlg.ok_btn, title = popup_form(dlg, "boxes", "New asset" if new else a["name"],
-                                       "Asset" + (f" · {where}" if where else " · top level"),
-                                       "Add asset" if new else "Save", width=560)
-        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or ("New asset" if new else a["name"])))
+            c = copy.deepcopy(cur)
+        dlg = CollectionDialog(self, c, cols, self.key_label, self._collection_pick, T["muted"])
+        where = tc.label(cols, cid) if not new else (tc.path(cols, parent) if parent else tc.PURPOSE[purpose][1])
+        dlg.ok_btn, title = popup_form(dlg, "boxes", "New collection" if new else c["name"],
+                                       f"Collection · {where}", "Add collection" if new else "Save", width=560)
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or ("New collection" if new else c["name"])))
         dlg.resize(dlg.width(), 480)
         dlg._check()
         if not dlg.exec():
             return
         if new:
-            dlg.apply(a)
-            assets.append(a)
+            dlg.apply(c)
+            cols.append(c)
         else:
+            was = cur["purpose"]
             dlg.apply(cur)
-            a = cur
-        self.assets_changed(a["id"])
-        self.set_status(f"Asset '{a['name']}' " + ("added" if new else "saved"), "ok")
+            c = cur
+            new_report = was != "report" and c["purpose"] == "report"
+        if (new and c["purpose"] == "report") or (not new and new_report):
+            self._report_profile(c)
+        self.collections_changed(c["id"])
+        self.set_status(f"Collection '{c['name']}' " + ("added" if new else "saved"), "ok")
 
-    def delete_asset(self, aid: str):
-        a = self.asset(aid)
-        if a is None:
+    def _report_profile(self, c: dict):
+        """A Report collection: its statistics logging profile (unless one already logs it)."""
+        if any(c["id"] in (pr.get("collections") or []) for pr in self.project.logging_profiles):
             return
-        subs = asm.descendants(self.project.assets, aid)
-        n = len(asm.keys(self.project.assets, aid))
-        if not confirm(self, "Delete asset", f"Delete asset '{a['name']}'" +
-                       (f" and its {len(subs)} sub-asset(s)?" if subs else "?"), "Delete asset",
+        pr = report_profile(c)
+        taken = {x["name"] for x in self.project.logging_profiles}
+        pr["name"] = self._unique_name(pr["name"], taken)
+        self.project.logging_profiles.append(pr)
+        self._log_profiles_changed()
+        self._log(f"Logging profile '{pr['name']}' added for the Report collection '{c['name']}'")
+
+    def delete_collection(self, cid: str):
+        c = self.collection(cid)
+        if c is None:
+            return
+        cols = self.project.collections
+        subs = tc.descendants(cols, cid)
+        n = len(tc.keys(cols, cid))
+        if not confirm(self, "Delete collection", f"Delete collection '{c['name']}'" +
+                       (f" and its {len(subs)} sub-collection(s)?" if subs else "?"), "Delete collection",
                        f"{n} tag reference(s) go with it - the tags themselves stay. Logging profiles that use it "
                        "log its tags no longer."):
             return
-        self.project.assets = asm.delete(self.project.assets, aid)
+        self.project.collections = tc.delete(cols, cid)
+        gone = {cid} | {x["id"] for x in subs}
+        for pr in self.project.logging_profiles:
+            if pr.get("collections"):
+                pr["collections"] = [x for x in pr["collections"] if x not in gone]
         self.select_object(None)
-        self.assets_changed(a.get("parent"))
+        self.collections_changed(c.get("parent"))
 
-    def duplicate_asset(self, aid: str):
-        assets = self.project.assets
-        a = self.asset(aid)
-        if a is None:
+    def duplicate_collection(self, cid: str):
+        cols = self.project.collections
+        c = self.collection(cid)
+        if c is None:
             return
         idmap = {}
-        for x in [a] + asm.descendants(assets, aid):           # parents before children
+        for x in [c] + tc.descendants(cols, cid):              # parents before children
             y = copy.deepcopy(x)
-            y["id"] = asm.new_asset()["id"]
+            y["id"] = tc.new_collection()["id"]
             idmap[x["id"]] = y["id"]
             y["parent"] = idmap.get(x.get("parent"), x.get("parent"))
-            if x is a:
-                y["name"] = self._unique_name(f"{a['name']} copy", {z["name"] for z in assets
-                                                                     if z.get("parent") == a.get("parent")})
-            assets.append(y)
-        self.assets_changed(idmap[aid])
+            if x is c:
+                y["name"] = self._unique_name(f"{c['name']} copy", {z["name"] for z in cols if z["purpose"] ==
+                                                                     c["purpose"] and z.get("parent") == c.get("parent")})
+            cols.append(y)
+        self.collections_changed(idmap[cid])
 
-    def move_asset(self, aid: str, parent: str | None):
-        msg = asm.can_move(self.project.assets, aid, parent)
+    def move_collection(self, cid: str, parent: str | None):
+        msg = tc.can_move(self.project.collections, cid, parent)
         if msg:
             self.toast.popup(msg)
             return
-        self.asset(aid)["parent"] = parent
-        self.assets_changed(aid)
+        self.collection(cid)["parent"] = parent
+        self.collections_changed(cid)
 
-    def asset_add_tags(self, aid: str):
-        a = self.asset(aid)
-        if a is None:
+    def collection_add_tags(self, cid: str):
+        c = self.collection(cid)
+        if c is None:
             return
-        keys = self._asset_pick([tuple(x["key"]) for x in a["attributes"]])
+        keys = self._collection_pick([tuple(x["key"]) for x in c["attributes"]])
         if keys is None:
             return
         chosen = {tuple(k) for k in keys}
-        a["attributes"] = [x for x in a["attributes"] if tuple(x["key"]) in chosen]   # unticked: removed
-        asm.add_attributes(a, keys)
-        self.assets_changed(aid)
+        c["attributes"] = [x for x in c["attributes"] if tuple(x["key"]) in chosen]   # unticked: removed
+        tc.add_attributes(c, keys)
+        self.collections_changed(cid)
 
-    def add_to_asset(self, keys, aid: str | None):
-        """Tags > Add to asset ▸: an existing asset, or a new one (its pop-up, with the tags)."""
-        if aid is None:
-            QTimer.singleShot(0, lambda: self._asset_popup(None, None, [tuple(k) for k in keys]))
+    def add_to_collection(self, keys, target: str):
+        """Tags > Add to collection ▸: a collection id, or a purpose = a new one (its pop-up, with the tags)."""
+        if target in tc.PURPOSE:
+            QTimer.singleShot(0, lambda: self._collection_popup(None, target, None, [tuple(k) for k in keys]))
             return
-        a = self.asset(aid)
-        if a is not None:
-            n = asm.add_attributes(a, keys)
-            self.assets_changed()
-            self.toast.popup(f"{n} tag(s) added to {asm.path(self.project.assets, aid)}" if n else
-                             "Already in the asset")
+        c = self.collection(target)
+        if c is not None:
+            n = tc.add_attributes(c, keys)
+            self.collections_changed()
+            self.toast.popup(f"{n} tag(s) added to {tc.label(self.project.collections, target)}" if n else
+                             "Already in the collection")
 
     def remove_attributes(self, rows):
-        """[(asset id, key)] -> out of their assets (the tags stay)."""
-        for aid, key in rows:
-            a = self.asset(aid)
-            if a is not None:
-                a["attributes"] = [x for x in a["attributes"] if tuple(x["key"]) != tuple(key)]
-        self.assets_changed()
+        """[(collection id, key)] -> out of their collections (the tags stay)."""
+        for cid, key in rows:
+            c = self.collection(cid)
+            if c is not None:
+                c["attributes"] = [x for x in c["attributes"] if tuple(x["key"]) != tuple(key)]
+        self.collections_changed()
+
+    def monitor_collection(self, cid: str):
+        """Monitoring in one click: its view (made once, then reused by name) full screen."""
+        c = self.collection(cid)
+        if c is None:
+            return
+        vw = next((v for v in self.project.views if v["name"] == c["name"]), None)
+        if vw is None:
+            self.new_view_from(tc.keys(self.project.collections, cid), c["name"])
+            vw = next((v for v in self.project.views if v["name"] == c["name"]), None)
+            if vw is None:                           # no number tags
+                return
+        QTimer.singleShot(0, lambda: self.enter_monitor(vw["id"]))
+
+    def kpi_values(self, limit: int | None = None) -> list[tuple]:
+        """The KPI collections' tags, once each: [(name, value text, unit, good, key)] (Start Page,
+        Monitor bar). good: True / False / None (no data)."""
+        out, seen = [], set()
+        for c in tc.ordered(self.project.collections, "kpi"):
+            for x in c["attributes"]:
+                k = tuple(x["key"])
+                if k in seen:
+                    continue
+                seen.add(k)
+                text, _q, good, _t = self.tag_live(*k)
+                out.append((x.get("name") or self.key_label(k).split(" · ")[-1], text,
+                            self.last_value(*k)[1], good, k))
+                if limit and len(out) >= limit:
+                    return out
+        return out
 
     def new_view_from(self, keys, name: str | None = None):
         """A view with a trend (number tags, at most 8) and a tag table of the keys."""
@@ -4374,16 +4430,16 @@ class DaqWindow(AppWindow):
         self._rebuild_project_tree()
         self.set_status(f"View '{vw['name']}' made from {len(nums)} tag(s)", "ok")
 
-    def alarms_for_asset(self, aid: str):
-        """One alarm per number attribute: data loss after 10 s (edit the limits afterwards)."""
-        assets = self.project.assets
+    def alarms_for_collection(self, cid: str):
+        """One alarm per number tag: data loss after 10 s (edit the limits afterwards)."""
+        cols = self.project.collections
         numeric = {(c[0], c[1]) for c in self.channel_choices()}
         have = {tuple(a["channel"]) for a in self.project.alarms if a.get("channel")}
-        keys = [k for k in asm.keys(assets, aid) if k in numeric and k not in have]
+        keys = [k for k in tc.keys(cols, cid) if k in numeric and k not in have]
         if not keys:
-            self.toast.popup("Every number attribute already has an alarm")
+            self.toast.popup("Every number tag already has an alarm")
             return
-        path = asm.path(assets, aid)
+        path = tc.path(cols, cid)
         if not confirm(self, "Add alarms", f"Add {len(keys)} alarm(s) for {path}?", f"Add {len(keys)} alarms",
                        "Each starts with a data-loss level (no data for 10 s) - set the limits in each alarm.",
                        danger=False):

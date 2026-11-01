@@ -6,6 +6,7 @@ View > Start Page or a click on the project in the Project tree.
 
   banner            app name, version, one line
   left column       Current project (name, file, status line, buttons) - only with a project
+                    Key values: the KPI collections' tags, live (hidden without KPI collections)
                     Recent projects (click to open) · Browse...
                     New project: template tiles (core/templates.py)
                     Recent sessions (click: open the folder)
@@ -21,6 +22,7 @@ Host API (duck-typed, DaqWindow):
   host.new_from_template(key)
   host.recent_sessions(n) -> [(start unix, project name, folder, bytes)] / host.open_path(path)
   host.start_status() -> {"devices", "online", "tags", "alarms", "recording", "elapsed"}
+  host.kpi_values(limit) -> [(name, value text, unit, good, key)] / host.select_key(key)
   host.show_doc(key) / host.new_view() / host.start_recording()
   host.doc_links() -> [(title, path)] / host.simulators() -> [(title, text, module, ok)]
   host.run_simulator(module)
@@ -41,6 +43,7 @@ from nxlogger.ui.theme.ui_kit import T, label, make_icon, set_prop
 
 SHOW_KEY = "start/show_at_startup"                # QSettings: open the Start Page when the app starts
 NARROW = 980                                      # below: one column
+KPI_MAX, KPI_COLS = 12, 3                         # Key values: at most 12 tags, 3 per row
 RIGHT_W = 340                                     # the right column on a wide page (fixed)
 STEPS = [   # title, text, button, what it does (host action)
     ("Connect a device", "Add a Modbus, MQTT, OPC UA or simulation device in Connectivity, then connect.",
@@ -164,6 +167,13 @@ class StartPage(QWidget):
         self._cur_grid = btns
         cv.addLayout(btns)
 
+        self.kpi_card, kv = _card("Key values")
+        self.kpi_card.setToolTip("The tags of the KPI collections (Project tree > Collections > KPI)")
+        self.kpi_grid = QGridLayout(); self.kpi_grid.setSpacing(8)
+        kv.addLayout(self.kpi_grid)
+        self._kpi_keys: list | None = None
+        self._kpi_cells: list[tuple[QLabel, QLabel]] = []
+
         self.recent_card, rv = _card("Recent projects")
         self.recent = _list(["Name", "Folder", "Changed"])
         self.recent.itemClicked.connect(lambda it, _c: it.data(0, Qt.ItemDataRole.UserRole) and
@@ -191,7 +201,7 @@ class StartPage(QWidget):
         sv.addWidget(self.sessions)
 
         left = QWidget(); lv = QVBoxLayout(left); lv.setContentsMargins(0, 0, 0, 0); lv.setSpacing(12)
-        for w in (self.cur_card, self.recent_card, new_card, self.sess_card):
+        for w in (self.cur_card, self.kpi_card, self.recent_card, new_card, self.sess_card):
             lv.addWidget(w)
         lv.addStretch(1)
 
@@ -277,6 +287,41 @@ class StartPage(QWidget):
         if self.cur_status.text() != text:
             self.cur_status.setText(text)
             set_prop(self.cur_status, "level", "bad" if s["alarms"] else ("ok" if s["online"] else "muted"))
+        self._update_kpis()
+
+    def _update_kpis(self):
+        """Key values: the cells again when the KPI tags changed, else only their values."""
+        rows = self.host.kpi_values(KPI_MAX)
+        keys = [r[4] for r in rows]
+        if keys != self._kpi_keys:
+            self._kpi_keys = keys
+            while self.kpi_grid.count():
+                w = self.kpi_grid.takeAt(0).widget()
+                if w is not None:
+                    w.deleteLater()
+            self._kpi_cells = []
+            for i, (name, _v, _u, _g, key) in enumerate(rows):
+                cell = QFrame(); cell.setObjectName("startKpi")
+                cell.setCursor(Qt.CursorShape.PointingHandCursor)
+                cell.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+                cell.mouseReleaseEvent = lambda _e, k=key: self.host.select_key(k)
+                cv = QVBoxLayout(cell); cv.setContentsMargins(10, 6, 10, 6); cv.setSpacing(0)
+                nm = label(name, muted=True, small=True)
+                val = QLabel(); val.setObjectName("startKpiValue")
+                for w in (nm, val):
+                    w.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+                cv.addWidget(nm); cv.addWidget(val)
+                self.kpi_grid.addWidget(cell, i // KPI_COLS, i % KPI_COLS)
+                self._kpi_cells.append((nm, val))
+            for c in range(KPI_COLS):
+                self.kpi_grid.setColumnStretch(c, 1)
+            self.kpi_card.setVisible(bool(rows))
+        for (nm, val), (name, text, unit, good, _k) in zip(self._kpi_cells, rows):
+            t = f"{text} {unit}".strip() if text else "—"
+            if val.text() != t:
+                val.setText(t)
+                nm.setToolTip(f"{name}: {t}")
+            set_prop(val, "level", "muted" if good is None else ("ok" if good else "bad"))
 
     def _fill_recent(self):
         t = self.recent

@@ -1,6 +1,7 @@
 """
 tags_page.py - the Tags document (tag management, like Genesis64 / FUXA tag lists): what each tag
-is. How tags are used together (areas, equipment, KPI sets) is the Assets document (assets_page.py);
+is. Which tags go together for a purpose (report, KPI, monitoring, equipment) is the Collections
+document (collections_page.py);
 the devices themselves are in Connectivity (connectivity.py).
 
 The categories (CATEGORIES, also the Project tree's Tags nodes); the page shows one at a time:
@@ -22,11 +23,11 @@ The categories (CATEGORIES, also the Project tree's Tags nodes); the page shows 
          Device: All tags, devices (connector icon in the state colour)
          Virtual / Aggregation: All tags, one row per type
          System: All tags, Clock, App, Recording, Alarms, Devices > one row per device
-  right  tag table: name, source, assets, address, type, access, unit, live value, quality,
+  right  tag table: name, source, collections, address, type, access, unit, live value, quality,
          time of the last value, description - search (filter) and sort by any column
 
 Select a row: its properties (read-only); double-click: its pop-up. Right-click rows: the
-category's actions plus Add to asset ▸ and New view from selection (any category).
+category's actions plus Add to collection ▸ and New view from selection (any category).
 
 Host API (duck-typed, DaqWindow):
   host.project, host.reg_icon(target, name, token), host.recording (bool), host.color_of(did, idx)
@@ -44,7 +45,7 @@ Host API (duck-typed, DaqWindow):
   host.project.aggregations / host.agg_engine / host.agg_describe(a) / host.aggregation(aid)
   host.add_aggregation(kind) / host.edit_aggregation(aid) / host.duplicate_aggregation(aid)
   host.delete_aggregations([aid]) / host.set_aggregations_enabled([aid], on) / host.reset_aggregation(aid)
-  host.assets_of(key) -> [path] / host.add_to_asset([key], asset id | None = a new asset)
+  host.collections_of(key) -> [label] / host.add_to_collection([key], collection id | purpose = a new one)
   host.new_view_from([key])
 """
 from __future__ import annotations
@@ -55,7 +56,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderVi
                                QSplitter, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from nxlogger.core import aggregation as ag
-from nxlogger.core import assets as asm
+from nxlogger.core import tag_collections as tc
 from nxlogger.core import system_tags as ss
 from nxlogger.core import virtual_tags as vt
 from nxlogger.core.tags import DRIVERS, describe_address, driver_label
@@ -63,10 +64,10 @@ from nxlogger.ui.icons import swatch
 from nxlogger.ui.theme.ui_kit import T, label, make_icon, vsep
 from nxlogger.ui.widgets.connectivity import STATE_TOKEN, Band
 
-COLS = ["Name", "Source", "Assets", "Address", "Type", "Access", "Unit", "Value", "Quality", "Updated",
+COLS = ["Name", "Source", "Collections", "Address", "Type", "Access", "Unit", "Value", "Quality", "Updated",
         "Description"]
-C_ASSETS, C_VALUE, C_QUAL, C_TIME = (COLS.index(c) for c in ("Assets", "Value", "Quality", "Updated"))
-C_FILTER = [COLS.index(c) for c in ("Name", "Source", "Assets", "Address", "Description")]
+C_COLS, C_VALUE, C_QUAL, C_TIME = (COLS.index(c) for c in ("Collections", "Value", "Quality", "Updated"))
+C_FILTER = [COLS.index(c) for c in ("Name", "Source", "Collections", "Address", "Description")]
 HIDDEN_KEY = "tags/hidden_columns"                # QSettings: column names the user hid
 CATEGORIES = [   # (key, name, icon, what it is, ready)
     ("all", "All tags", "list", "Every tag of every category in one table", True),
@@ -339,8 +340,8 @@ class TagsPage(QWidget):
         m.exec(self.dtree.viewport().mapToGlobal(pos))
 
     # ---------------------------------------------------------------- rows
-    def _assets_text(self, key) -> str:
-        return ", ".join(self.host.assets_of(key))
+    def _cols_text(self, key) -> str:
+        return ", ".join(self.host.collections_of(key))
 
     def _device_rows(self, devices):
         muted = QBrush(QColor(T["muted"]))
@@ -349,7 +350,7 @@ class TagsPage(QWidget):
                 typ = "Array" if t.kind == "array" else (t.address.get("dtype", "Number")
                                                          if d.driver.startswith("modbus") else "Number")
                 key = (d.id, t.index)
-                self._add_row(key, [t.name, d.name, self._assets_text(key), describe_address(d.driver, "", t),
+                self._add_row(key, [t.name, d.name, self._cols_text(key), describe_address(d.driver, "", t),
                                     typ, t.access, t.unit, "", "", "", t.description],
                               self.host.color_of(*key), None if t.enabled and d.enabled else muted)
 
@@ -360,7 +361,7 @@ class TagsPage(QWidget):
                 continue
             typ = vt.TYPES[v["kind"]][0] + ("" if v.get("dtype") == "number" else f" · {vt.DTYPES[v['dtype']]}")
             key = vt.vt_key(v["id"])
-            self._add_row(key, [v["name"], "Virtual", self._assets_text(key), self.host.vt_describe(v), typ, "R",
+            self._add_row(key, [v["name"], "Virtual", self._cols_text(key), self.host.vt_describe(v), typ, "R",
                                 v.get("unit", ""), "", "", "", v.get("description", "")],
                           self.host.color_of(*key), None if v["enabled"] else muted)
             err = self.host.vt_engine.errors.get(v["id"])
@@ -374,7 +375,7 @@ class TagsPage(QWidget):
                 continue
             key = ag.agg_key(a["id"])
             period = ag.describe_period(a)
-            self._add_row(key, [a["name"], "Aggregation", self._assets_text(key),
+            self._add_row(key, [a["name"], "Aggregation", self._cols_text(key),
                                 self.host.agg_describe(a) + (f" · {period}" if period != "-" else ""),
                                 ag.TYPES[a["kind"]][0], "R", a.get("unit", ""), "", "", "", a.get("description", "")],
                           self.host.color_of(*key), None if a["enabled"] else muted)
@@ -391,7 +392,7 @@ class TagsPage(QWidget):
                 continue
             own = devs.get(t.id.split(".")[1]) if t.id.startswith("dev.") else None    # a device's status tag
             self._add_row(t.key, [t.name, f"System · {own}" if own else f"System · {t.group}",
-                                  self._assets_text(t.key), f"System_{t.name}" if t.streamed else "",
+                                  self._cols_text(t.key), f"System_{t.name}" if t.streamed else "",
                                   ss.KINDS[t.kind], "R", t.unit, "", "", "", t.description],
                           self.host.color_of(*t.key))
 
@@ -421,7 +422,7 @@ class TagsPage(QWidget):
             if part in (None, "system"):
                 self._system_rows()
             self.hint.setText(f"{len(self._rows)} tag(s)" + (f" · {CAT[part][1]}" if part else " · every category")
-                              + " · search and sort to find one · right-click: Add to asset, New view from selection")
+                              + " · search and sort to find one · right-click: Add to collection, New view from selection")
         elif self._cat == "device":
             dev = self._device()
             if not p.devices:
@@ -482,10 +483,10 @@ class TagsPage(QWidget):
                 it.setForeground(C_VALUE, QBrush(QColor(T[tok])) if tok else
                                  (QBrush(QColor(T["bad"])) if good is False else QBrush()))
 
-    def refresh_assets(self):
-        """Assets changed: only the Assets column."""
+    def refresh_collections(self):
+        """Collections changed: only the Collections column."""
         for key, it in self._rows.items():
-            it.setText(C_ASSETS, self._assets_text(key))
+            it.setText(C_COLS, self._cols_text(key))
 
     def _apply_filter(self):
         text = self.filter.text().strip().lower()
@@ -556,14 +557,16 @@ class TagsPage(QWidget):
 
     # ---------------------------------------------------------------- row menu
     def _use_menu(self, m: QMenu, keys):
-        """Add to asset ▸ / New view from selection - for rows of any category."""
-        sub = m.addMenu(f"Add to asset{'' if len(keys) == 1 else f' ({len(keys)})'}")
-        assets = self.host.project.assets
-        for a in sorted(assets, key=lambda x: asm.path(assets, x["id"]).lower()):
-            sub.addAction(asm.path(assets, a["id"]), lambda aid=a["id"]: self.host.add_to_asset(keys, aid))
-        if assets:
-            sub.addSeparator()
-        sub.addAction("New asset...", lambda: self.host.add_to_asset(keys, None))
+        """Add to collection ▸ (by purpose) / New view from selection - for rows of any category."""
+        sub = m.addMenu(f"Add to collection{'' if len(keys) == 1 else f' ({len(keys)})'}")
+        cols = self.host.project.collections
+        for key, name, _icon, _what in tc.PURPOSES:
+            pm = sub.addMenu(name)
+            for c in tc.ordered(cols, key):
+                pm.addAction(tc.path(cols, c["id"]), lambda cid=c["id"]: self.host.add_to_collection(keys, cid))
+            if tc.of_purpose(cols, key):
+                pm.addSeparator()
+            pm.addAction(f"New {name} collection...", lambda p=key: self.host.add_to_collection(keys, p))
         m.addAction("New view from selection", lambda: self.host.new_view_from(keys))
 
     def _tag_menu(self, pos):

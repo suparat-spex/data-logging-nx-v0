@@ -14,7 +14,7 @@ import time
 
 from nxlogger.core import aggregation as ag
 from nxlogger.core import analysis as an
-from nxlogger.core import assets as asm
+from nxlogger.core import tag_collections as tc
 from nxlogger.core import channel_math as cm
 from nxlogger.core import system_tags as ss
 from nxlogger.core import view_model as vm
@@ -83,22 +83,27 @@ def device_target(w, did: str) -> PropTarget | None:
                       key=("device", did), readonly=True)
 
 
-def asset_target(w, aid: str) -> PropTarget | None:
-    """Information only - an asset is changed in its pop-up (Edit...)."""
-    assets = w.project.assets
-    a = asm.by_id(assets).get(aid)
-    if a is None:
+def collection_target(w, cid: str) -> PropTarget | None:
+    """Information only - a collection is changed in its pop-up (Edit...)."""
+    cols = w.project.collections
+    c = tc.by_id(cols).get(cid)
+    if c is None:
         return None
-    subs = asm.descendants(assets, aid)
-    rows = {"Name": a["name"], "Path": asm.path(assets, aid), "Description": a.get("description") or "-",
-            "Attributes": f"{len(a['attributes'])} (+ {len(asm.keys(assets, aid)) - len(a['attributes'])} "
-                          "in sub-assets)" if subs else str(len(a["attributes"])),
-            "Sub-assets": str(len(subs)),
-            "Tags": _keys_text(w, [list(k) for k in asm.keys(assets, aid)])}
-    return PropTarget(a["name"], "boxes", f"Asset · {asm.path(assets, aid)}",
-                      [("Asset", [F(k, k, "info", "") for k in rows])], rows, None,
-                      [("Edit...", "pencil", lambda: w.edit_asset(aid)),
-                       ("Add tags...", "tag", lambda: w.asset_add_tags(aid))], key=("asset", aid), readonly=True)
+    subs = tc.descendants(cols, cid)
+    _key, purpose, icon, what = tc.PURPOSE[c["purpose"]]
+    rows = {"Name": c["name"], "Purpose": f"{purpose} - {what}", "Path": tc.path(cols, cid),
+            "Description": c.get("description") or "-",
+            "Tags": f"{len(c['attributes'])} (+ {len(tc.keys(cols, cid)) - len(c['attributes'])} in sub-collections)"
+                    if subs else str(len(c["attributes"])),
+            "List": _keys_text(w, [list(k) for k in tc.keys(cols, cid)])}
+    if c["purpose"] in tc.NESTED:
+        rows["Sub-collections"] = str(len(subs))
+    actions = [("Edit...", "pencil", lambda: w.edit_collection(cid)),
+               ("Add tags...", "tag", lambda: w.collection_add_tags(cid)),
+               ("Monitor", "maximize", lambda: w.monitor_collection(cid))]
+    return PropTarget(c["name"], icon, f"{purpose} collection · {tc.path(cols, cid)}",
+                      [("Collection", [F(k, k, "info", "") for k in rows])], rows, None, actions,
+                      key=("collection", cid), readonly=True)
 
 
 # ====================================================================== tags
@@ -109,7 +114,7 @@ def tag_target(w, did: str, idx: int) -> PropTarget | None:
     if t is None:
         return None
     general = [F("name", "Name", "info", ""), F("enabled", "Enabled", "bool", True),
-               F("assets", "Assets", "info", ""), F("unit", "Unit", "info", ""),
+               F("collections", "Collections", "info", ""), F("unit", "Unit", "info", ""),
                F("description", "Description", "info", ""), F("color", "Colour", "info", "")]
     if t.kind == "number":
         general.append(F("access", "Access", "info", ""))
@@ -120,7 +125,7 @@ def tag_target(w, did: str, idx: int) -> PropTarget | None:
               ("bad" if q in ("Bad", "No data") else "")),
             F("time", "Updated", "info", ""), F("key", "Formula name", "info", "",
                                                   tip="Use this name in variables (formulas)")]
-    vals = {"name": t.name, "enabled": t.enabled, "assets": ", ".join(w.assets_of((did, idx))) or "-",
+    vals = {"name": t.name, "enabled": t.enabled, "collections": ", ".join(w.collections_of((did, idx))) or "-",
             "unit": t.unit or "-",
             "description": t.description or "-", "color": t.color or w.color_of(did, idx),
             "access": "Read / write" if t.access == "RW" else "Read only", "decimals": str(t.decimals),
@@ -144,15 +149,15 @@ def tags_target(w, did: str, idxs: list[int]) -> PropTarget | None:
     if d is None:
         return None
     tags = [t for t in (d.tag(i) for i in idxs) if t is not None]
-    used = sorted({p for t in tags for p in w.assets_of((did, t.index))})
+    used = sorted({p for t in tags for p in w.collections_of((did, t.index))})
     units = sorted({t.unit or "-" for t in tags})
     return PropTarget(f"{len(tags)} tags", "list", f"{d.name} · right-click the table to enable, move or delete",
                       [("Selected tags", [F("device", "Device", "info", ""), F("count", "Tags", "info", ""),
-                                          F("enabled", "Enabled", "info", ""), F("assets", "Assets", "info", ""),
+                                          F("enabled", "Enabled", "info", ""), F("collections", "Collections", "info", ""),
                                           F("units", "Units", "info", "")])],
                       {"device": d.name, "count": str(len(tags)),
                        "enabled": f"{sum(t.enabled for t in tags)} of {len(tags)}",
-                       "assets": (", ".join(used[:6]) + (" ..." if len(used) > 6 else "")) or "-",
+                       "collections": (", ".join(used[:6]) + (" ..." if len(used) > 6 else "")) or "-",
                        "units": ", ".join(units[:6]) + (" ..." if len(units) > 6 else "")},
                       None, [], key=("tags", did, tuple(idxs)), readonly=True)
 
@@ -235,7 +240,7 @@ def virtual_target(w, vid: str) -> PropTarget | None:
         return None
     text = v.get("dtype") == "text"
     rows = {"Name": v["name"], "Type": vt.TYPES[v["kind"]][0], "Data type": vt.DTYPES[v.get("dtype", "number")],
-            "Assets": ", ".join(w.assets_of(vt.vt_key(v["id"]))) or "-", "Unit": v.get("unit") or "-",
+            "Collections": ", ".join(w.collections_of(vt.vt_key(v["id"]))) or "-", "Unit": v.get("unit") or "-",
             "Definition": w.vt_describe(v) or "-",
             "Inputs": ", ".join(f"{i['alias']} = {w.key_label(tuple(i['key']))}" for i in v.get("inputs", [])) or "-",
             "Update": "-" if v["kind"] in vt.NO_INPUT else vt.UPDATES.get(v.get("update"), "-"),
@@ -274,7 +279,7 @@ def aggregation_target(w, aid: str) -> PropTarget | None:
         return None
     period = ag.has_period(a)
     rows = {"Name": a["name"], "Type": ag.TYPES[a["kind"]][0],
-            "Assets": ", ".join(w.assets_of(ag.agg_key(a["id"]))) or "-",
+            "Collections": ", ".join(w.collections_of(ag.agg_key(a["id"]))) or "-",
             "Unit": a.get("unit") or "-", "Definition": w.agg_describe(a), "Period": ag.describe_period(a),
             "Formula name": ag.formula_name(a) + (f", {ag.formula_name(a, True)}" if period and a.get("keep_prev")
                                                    else ""),

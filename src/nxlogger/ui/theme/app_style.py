@@ -124,6 +124,11 @@ QFrame#startTile { background: @panel2@; border: 1px solid @border@; border-radi
 QFrame#startTile:hover { border: 1px solid @accent@; }
 QFrame#startTile QLabel { background: transparent; }
 QLabel#startTileTitle { font-size: 14px; font-weight: 600; }
+QFrame#startKpi { background: @bg@; border: 1px solid @border@; border-radius: 4px; }
+QFrame#startKpi QLabel { background: transparent; }
+QLabel#startKpiValue { font-size: 18px; font-weight: 600; }
+QLabel#startKpiValue[level="muted"] { color: @muted@; }
+QLabel#startKpiValue[level="bad"] { color: @bad@; }
 QTreeWidget#startList { background: transparent; border: none; }
 QTreeWidget#startList::item { padding: 3px 0; }
 QTreeWidget#startList::item:hover { background: @hover@; }

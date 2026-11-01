@@ -271,90 +271,113 @@ def test_aggregation_tags_and_all_tags(win, monkeypatch, tmp_path):
     win.doc_tabs.setCurrentIndex(front)
 
 
-def test_assets_page_picker_and_logging(win, monkeypatch):
+def test_collections_page_picker_and_logging(win, monkeypatch):
     from PySide6.QtCore import Qt
-    from nxlogger.core import assets as asm
-    from nxlogger.ui.dialogs import asset_dialog as ad
+    from nxlogger.core import tag_collections as tc
+    from nxlogger.ui.dialogs import collection_dialog as cd
     from nxlogger.ui.dialogs.common import ChannelPicker
     monkeypatch.setattr("nxlogger.ui.main_window.confirm", lambda *a_, **k_: True)
     front = win.doc_tabs.currentIndex()
     dev = win.project.devices[0]
     k = [(dev.id, t.index) for t in dev.tags]
+    cols0 = list(win.project.collections)
+    profs0 = list(win.project.logging_profiles)
 
-    def make(name, parent=None, keys=(), short=()):
-        def run(dlg):                                    # the pop-up: name, parent, attributes
+    def make(name, purpose="equipment", parent=None, keys=(), short=()):
+        def run(dlg):                                    # the pop-up: name, purpose, parent, tags
             dlg.name.setText(name)
-            dlg.parent_box.setCurrentIndex(dlg.parent_box.findData(parent))
+            dlg.purpose.setCurrentIndex(dlg.purpose.findData(purpose))
+            dlg.parent_box.setCurrentIndex(max(0, dlg.parent_box.findData(parent)))
             for key in keys:
                 dlg._row(list(key), "")
             for i, s_ in enumerate(short):
                 dlg.attrs.topLevelItem(i).setText(0, s_)
             assert dlg.ok_btn.isEnabled(), dlg.err.text()
             return True
-        monkeypatch.setattr(ad.AssetDialog, "exec", run)
-        win._asset_popup(None, parent)
-        return next(a for a in win.project.assets if a["name"] == name and a.get("parent") == parent)
+        monkeypatch.setattr(cd.CollectionDialog, "exec", run)
+        win._collection_popup(None, purpose, parent)
+        return next(c for c in win.project.collections if c["name"] == name and c.get("parent") == parent)
     station = make("Station A")
-    p1 = make("Pump 01", station["id"], k[:2], ("Speed", "Status"))
-    p2 = make("Pump 02", station["id"], k[2:4], ("Speed", "Status"))
-    assert asm.path(win.project.assets, p1["id"]) == "Station A / Pump 01"
+    p1 = make("Pump 01", parent=station["id"], keys=k[:2], short=("Speed", "Status"))
+    p2 = make("Pump 02", parent=station["id"], keys=k[2:4], short=("Speed", "Status"))
+    assert tc.path(win.project.collections, p1["id"]) == "Station A / Pump 01"
     assert p1["attributes"][0] == {"key": list(k[0]), "name": "Speed"}
 
     def dup_exec(dlg):                                   # same name under the same parent: refused
         dlg.name.setText("Pump 01"); dlg.parent_box.setCurrentIndex(dlg.parent_box.findData(station["id"]))
         assert not dlg.ok_btn.isEnabled() and "already" in dlg.err.text()
+        dlg.purpose.setCurrentIndex(dlg.purpose.findData("kpi"))    # KPI: flat, no parent
+        assert not dlg.parent_box.isEnabled() and dlg.collect()["parent"] is None
         return False
-    monkeypatch.setattr(ad.AssetDialog, "exec", dup_exec)
-    win._asset_popup(None, station["id"])
+    monkeypatch.setattr(cd.CollectionDialog, "exec", dup_exec)
+    win._collection_popup(None, "equipment", station["id"])
 
-    win._rebuild_project_tree()                          # Project tree: Assets, one level
+    report = make("Shift report", "report", keys=k[:1])  # a Report collection: its statistics profile
+    rp = [pr for pr in win.project.logging_profiles if report["id"] in (pr.get("collections") or [])]
+    assert len(rp) == 1 and rp[0]["type"] == "statistic" and rp[0]["interval_s"] == tc.REPORT_INTERVAL_S
+    kpi = make("Line KPIs", "kpi", keys=k[:2])
+    vals = win.kpi_values()
+    assert [v[4] for v in vals][-2:] == k[:2]            # KPI values for the Start Page / Monitor bar
+
+    win._rebuild_project_tree()                          # Project tree: Collections > the four purposes
     root = win.ptree.topLevelItem(0)
-    node = next(root.child(i) for i in range(root.childCount()) if root.child(i).text(0) == "Assets")
-    assert node.childCount() == 1 and node.child(0).childCount() == 0
-    assert node.child(0).data(0, Qt.ItemDataRole.UserRole) == ("asset", station["id"])
-    assert node.child(0).text(0) == "Station A  (4)"
+    node = next(root.child(i) for i in range(root.childCount()) if root.child(i).text(0) == "Collections")
+    assert [node.child(i).data(0, Qt.ItemDataRole.UserRole) for i in range(node.childCount())] == \
+        [("colpurpose", p_[0]) for p_ in tc.PURPOSES]
+    assert all(node.child(i).childCount() == 0 for i in range(node.childCount()))
 
-    page = win.assets_page                               # the Assets document: the whole tree
-    win._show_doc("assets"); page.refresh(station["id"])
+    page = win.collections_page                          # the Collections document: one purpose, flat
+    win._show_doc("collections"); page.show_purpose("equipment")
+    rows = [page.tree.topLevelItem(i) for i in range(page.tree.topLevelItemCount())]
+    assert all(r.childCount() == 0 for r in rows)
+    names = [r.text(0).split("  (")[0] for r in rows]
+    assert names[0].startswith("All Equipment") and \
+        names[-3:] == ["Station A", "Station A / Pump 01", "Station A / Pump 02"]
+    page.refresh(station["id"])
     assert len(page._rows) == 4 and {it.text(0) for it in page._rows.values()} == {"Speed", "Status"}
     page.refresh(p1["id"])
     assert len(page._rows) == 2
+    page.refresh(kpi["id"])                              # a KPI collection: its purpose comes along
+    assert page.purpose == "kpi" and len(page._rows) == 2
 
-    win.add_to_asset([k[0]], station["id"])              # Tags > Add to asset (a tag in several assets)
-    assert len(asm.keys(win.project.assets, station["id"])) == 4 and len(win.assets_of(k[0])) == 2
+    win.add_to_collection([k[0]], station["id"])         # Tags > Add to collection (a tag in several)
+    assert len(tc.keys(win.project.collections, station["id"])) == 4 and len(win.collections_of(k[0])) >= 4
     win.tags_page.refresh(("device", dev.id))
-    assert "Station A" in win.tags_page._rows[k[0]].text(2)          # the Assets column
+    assert "Equipment: Station A" in win.tags_page._rows[k[0]].text(2)    # the Collections column
 
-    pick = ChannelPicker(win.channel_choices(), [], assets=True)     # the picker: By asset, same attribute
-    assert pick.by_asset.isVisible() or not pick.isVisible()
+    pick = ChannelPicker(win.channel_choices(), [], collections=True)    # By collection, same name
     pick._mode(True)
     pick.atree.setCurrentItem(pick.anodes[station["id"]])
     pick._fill_same()
     pick.same_attr.setCurrentText("Speed"); pick._select_same()
     assert {tuple(x) for x in pick.checked()} == {k[0], k[2]}        # Speed of both pumps
-    pick.anodes[p2["id"]].setCheckState(0, Qt.CheckState.Checked)   # a whole asset (kept live)
-    assert pick.checked_assets() == [p2["id"]] and [tuple(x) for x in pick.checked_outside_assets()] == [k[0]]
+    pick.anodes[p2["id"]].setCheckState(0, Qt.CheckState.Checked)   # a whole collection (kept live)
+    assert p2["id"] in pick.checked_collections()
 
-    pr = {"channels": [list(k[0])], "assets": [p2["id"]]}           # logging by asset: its tags, live
-    asm.add_attributes(p2, [k[1]])                       # added to the asset later: logged too
+    pr = {"channels": [list(k[0])], "collections": [p2["id"]]}      # logging by collection: its tags, live
+    tc.add_attributes(p2, [k[1]])                        # added to the collection later: logged too
     logged = {(d["id"], c[0]) for d in win._profile_topics(pr) for c in d["channels"]}
     assert logged == {k[0], k[1], k[2], k[3]}
 
     n_views = len(win.project.views)
-    win.new_view_from(asm.keys(win.project.assets, p1["id"]), "Pump 01")
+    win.new_view_from(tc.keys(win.project.collections, p1["id"]), "Pump 01")
     vw = win.project.views[-1]
     assert len(win.project.views) == n_views + 1 and vw["name"] == "Pump 01"
     assert [t["kind"] for t in vw["tiles"]] == ["text", "plot", "tags"]
     n_alarms = len(win.project.alarms)
-    win.alarms_for_asset(p1["id"])
+    win.alarms_for_collection(p1["id"])
     new = win.project.alarms[n_alarms:]
-    assert {tuple(a["channel"]) for a in new} <= set(asm.keys(win.project.assets, p1["id"]))
+    assert {tuple(a["channel"]) for a in new} <= set(tc.keys(win.project.collections, p1["id"]))
     assert new and all(a["levels"][0]["type"] == "D" for a in new)
 
-    win.move_asset(station["id"], p1["id"])              # a cycle: refused
+    win.move_collection(station["id"], p1["id"])         # a cycle: refused
     assert station.get("parent") is None
-    win.delete_asset(station["id"])                      # with its sub-assets; the tags stay
-    assert win.project.assets == [] and len(dev.tags) == len(k)
+    win.delete_collection(station["id"])                 # with its subs; the tags stay
+    win.delete_collection(report["id"])                  # its profile stays, without the collection
+    assert all(report["id"] not in (pr_.get("collections") or []) for pr_ in win.project.logging_profiles)
+    win.delete_collection(kpi["id"])
+    assert win.project.collections == cols0 and len(dev.tags) == len(k)
+    win.project.logging_profiles[:] = profs0
     win.project.alarms[n_alarms:] = []
     win.delete_view(win.view_pages[vw["id"]])
     win.doc_tabs.setCurrentIndex(front)

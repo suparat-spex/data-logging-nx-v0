@@ -41,25 +41,25 @@ def group_of(label: str) -> str:
 
 class ChannelPicker(QWidget):
     """
-    The tag picker of every dialog: filter box + [By tag | By asset].
-      By tag    the choices grouped by their source ("<device> · <tag>", Virtual, Aggregation ...)
-      By asset  the asset tree (core/assets.py) with each asset's attributes; "Select <attribute>
-                in all" picks the same attribute in every sub-asset (compare pumps, feeders ...);
-                where whole assets are allowed (`assets=True`, logging) a fully ticked asset is
-                kept live: checked_assets()
-    multi=True: check boxes (groups / assets are tri-state); multi=False: pick one row.
-    choices = [(topic_id, index, label, colour, unit)]. The window sets ChannelPicker.asset_source
-    (-> the project's assets) once, so every dialog gets the By asset tab without new arguments.
+    The tag picker of every dialog: filter box + [By tag | By collection].
+      By tag         the choices grouped by their source ("<device> · <tag>", Virtual, Aggregation ...)
+      By collection  the collections by purpose (core/tag_collections.py; Equipment nested) with their
+                     tags; "Select <name> in all" picks the same name in every sub-collection (compare
+                     pumps, feeders ...); where whole collections are allowed (`collections=True`,
+                     logging) a fully ticked collection is kept live: checked_collections()
+    multi=True: check boxes (groups / collections are tri-state); multi=False: pick one row.
+    choices = [(topic_id, index, label, colour, unit)]. The window sets ChannelPicker.collection_source
+    (-> the project's collections) once, so every dialog gets By collection without new arguments.
     """
     changed = Signal()
-    asset_source = None                              # callable -> [asset dicts]; None = no By asset tab
+    collection_source = None                         # callable -> [collection dicts]; None = no By collection
 
-    def __init__(self, choices, chosen=(), multi: bool = True, parent=None, assets: bool = False,
-                 chosen_assets=()):
+    def __init__(self, choices, chosen=(), multi: bool = True, parent=None, collections: bool = False,
+                 chosen_collections=()):
         super().__init__(parent)
-        from nxlogger.core import assets as asm
-        self._asm = asm
-        self.multi, self.allow_assets = multi, assets
+        from nxlogger.core import tag_collections as tc
+        self._tc = tc
+        self.multi, self.allow_cols = multi, collections
         self.labels = {(c[0], c[1]): c[2] for c in choices}
         self.colors = {(c[0], c[1]): c[3] for c in choices}
         self.filter = QLineEdit(); self.filter.setPlaceholderText("Search tags")
@@ -67,18 +67,18 @@ class ChannelPicker(QWidget):
         self.tree = QTreeWidget(); self.tree.setHeaderHidden(True)
         self.tree.setUniformRowHeights(True)
         self.tree.setMinimumHeight(150)
-        self.assets = list(ChannelPicker.asset_source() or []) if ChannelPicker.asset_source else []
+        self.cols = list(ChannelPicker.collection_source() or []) if ChannelPicker.collection_source else []
         v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(4)
         top = QHBoxLayout(); top.setSpacing(4)
-        self.by_tag, self.by_asset = QToolButton(), QToolButton()
-        for b, text in ((self.by_tag, "By tag"), (self.by_asset, "By asset")):
+        self.by_tag, self.by_col = QToolButton(), QToolButton()
+        for b, text in ((self.by_tag, "By tag"), (self.by_col, "By collection")):
             b.setText(text); b.setCheckable(True); b.setAutoRaise(True)
             top.addWidget(b)
         self.by_tag.setChecked(True)
         self.by_tag.clicked.connect(lambda: self._mode(False))
-        self.by_asset.clicked.connect(lambda: self._mode(True))
-        for b in (self.by_tag, self.by_asset):
-            b.setVisible(bool(self.assets))
+        self.by_col.clicked.connect(lambda: self._mode(True))
+        for b in (self.by_tag, self.by_col):
+            b.setVisible(bool(self.cols))
         top.addWidget(self.filter, 1)
         v.addLayout(top)
         v.addWidget(self.tree, 1)
@@ -88,10 +88,10 @@ class ChannelPicker(QWidget):
         same = QHBoxLayout(); same.setSpacing(4)
         self.same_attr = QComboBox(); self.same_attr.setMinimumWidth(120)
         self.same_btn = QPushButton("Select in all")
-        self.same_btn.setToolTip("Tick this attribute in every asset under the selected one (compare equipment)")
+        self.same_btn.setToolTip("Tick this name in every collection under the selected one (compare equipment)")
         self.same_btn.clicked.connect(self._select_same)
         self.same_row = QWidget(); sr = QHBoxLayout(self.same_row); sr.setContentsMargins(0, 0, 0, 0)
-        sr.addWidget(label("Same attribute", muted=True, small=True)); sr.addWidget(self.same_attr, 1)
+        sr.addWidget(label("Same name", muted=True, small=True)); sr.addWidget(self.same_attr, 1)
         sr.addWidget(self.same_btn)
         self.same_row.hide()
         v.addWidget(self.same_row)
@@ -121,7 +121,7 @@ class ChannelPicker(QWidget):
                 self.tree.setCurrentItem(it)
         self.tree.blockSignals(False)
         self.tree.expandAll()
-        self._build_assets(chosen, set(chosen_assets or ()))
+        self._build_collections(chosen, set(chosen_collections or ()))
         self.filter.textChanged.connect(self._filter)
         self.tree.itemChanged.connect(lambda it, _c: self._sync(it, self.atree))
         self.atree.itemChanged.connect(lambda it, _c: self._sync(it, self.tree))
@@ -134,50 +134,61 @@ class ChannelPicker(QWidget):
         else:
             it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsSelectable)
 
-    def _build_assets(self, chosen, chosen_assets):
-        asm, assets = self._asm, self.assets
+    def _build_collections(self, chosen, chosen_cols):
+        tc, cols = self._tc, self.cols
         self.atree.blockSignals(True)
 
-        def build(parent_item, parent_id):
-            for a in asm.children(assets, parent_id):
-                node = QTreeWidgetItem([a["name"]])
-                node.setData(0, Qt.ItemDataRole.UserRole, ("asset", a["id"]))
-                node.setToolTip(0, asm.path(assets, a["id"]))
-                node.setIcon(0, make_icon("boxes", T["muted"]))
+        def node_for(c, parent_item):
+            node = QTreeWidgetItem([c["name"]])
+            node.setData(0, Qt.ItemDataRole.UserRole, ("col", c["id"]))
+            node.setToolTip(0, tc.label(cols, c["id"]))
+            node.setIcon(0, make_icon(tc.PURPOSE[c["purpose"]][2], T["muted"]))
+            if self.multi:
+                node.setFlags(node.flags() | Qt.ItemFlag.ItemIsAutoTristate | Qt.ItemFlag.ItemIsUserCheckable)
+            parent_item.addChild(node)
+            self.anodes[c["id"]] = node
+            for kid in tc.children(cols, c["id"]):
+                node_for(kid, node)
+            for x in c["attributes"]:
+                k = tuple(x["key"])
+                if k not in self.labels:                    # not a choice here (text tags, other kind)
+                    continue
+                lbl = self.labels[k]
+                leaf = QTreeWidgetItem([x.get("name") or lbl.split(" · ", 1)[-1]])
+                leaf.setIcon(0, swatch(self.colors.get(k, "#808080")))
+                leaf.setToolTip(0, f"{tc.label(cols, c['id'])} · {lbl}")
+                leaf.setData(0, Qt.ItemDataRole.UserRole, list(k))
                 if self.multi:
-                    node.setFlags(node.flags() | Qt.ItemFlag.ItemIsAutoTristate | Qt.ItemFlag.ItemIsUserCheckable)
-                (parent_item.addChild if parent_item is not None else self.atree.addTopLevelItem)(node)
-                self.anodes[a["id"]] = node
-                build(node, a["id"])
-                for x in a["attributes"]:
-                    k = tuple(x["key"])
-                    if k not in self.labels:                # not a choice here (text tags, other kind)
-                        continue
-                    lbl = self.labels[k]
-                    leaf = QTreeWidgetItem([x.get("name") or lbl.split(" · ", 1)[-1]])
-                    leaf.setIcon(0, swatch(self.colors.get(k, "#808080")))
-                    leaf.setToolTip(0, f"{asm.path(assets, a['id'])} · {lbl}")
-                    leaf.setData(0, Qt.ItemDataRole.UserRole, list(k))
-                    if self.multi:
-                        leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                        leaf.setCheckState(0, Qt.CheckState.Checked if k in chosen else Qt.CheckState.Unchecked)
-                    node.addChild(leaf)
-                    self.aleaves.append(leaf)
-        build(None, None)
+                    leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    leaf.setCheckState(0, Qt.CheckState.Checked if k in chosen else Qt.CheckState.Unchecked)
+                node.addChild(leaf)
+                self.aleaves.append(leaf)
+        for key, name, icon, _what in tc.PURPOSES:           # the purposes, then their collections
+            tops = tc.children(cols, None, key)
+            if not tops:
+                continue
+            head = QTreeWidgetItem([name])
+            head.setData(0, Qt.ItemDataRole.UserRole, ("purpose", key))
+            head.setIcon(0, make_icon(icon, T["text"]))
+            if self.multi:
+                head.setFlags(head.flags() | Qt.ItemFlag.ItemIsAutoTristate | Qt.ItemFlag.ItemIsUserCheckable)
+            self.atree.addTopLevelItem(head)
+            for c in tops:
+                node_for(c, head)
         if self.multi:
-            for aid in chosen_assets:                        # live assets (logging): ticked as a whole
-                node = self.anodes.get(aid)
+            for cid in chosen_cols:                          # live collections (logging): ticked as a whole
+                node = self.anodes.get(cid)
                 if node is not None:
                     node.setCheckState(0, Qt.CheckState.Checked)
         self.atree.expandAll()
         self.atree.blockSignals(False)
-        if self.multi and chosen_assets:                     # their tags ticked on the By tag side too
+        if self.multi and chosen_cols:                       # their tags ticked on the By tag side too
             self._sync_all(self.atree, self.tree)
 
-    def _mode(self, assets: bool):
-        self.by_tag.setChecked(not assets); self.by_asset.setChecked(assets)
-        self.tree.setVisible(not assets); self.atree.setVisible(assets)
-        self.same_row.setVisible(assets and self.multi)
+    def _mode(self, cols: bool):
+        self.by_tag.setChecked(not cols); self.by_col.setChecked(cols)
+        self.tree.setVisible(not cols); self.atree.setVisible(cols)
+        self.same_row.setVisible(cols and self.multi)
         self._fill_same()
 
     def _sync(self, it, other):
@@ -185,7 +196,7 @@ class ChannelPicker(QWidget):
         if not self.multi:
             return
         data = it.data(0, Qt.ItemDataRole.UserRole)
-        if not isinstance(data, list):                       # a group / asset node: its leaves follow
+        if not isinstance(data, list):                       # a group / collection node: its leaves follow
             self._sync_all(self.tree if other is self.atree else self.atree, other)
             self.changed.emit()
             return
@@ -195,7 +206,7 @@ class ChannelPicker(QWidget):
             if leaf.data(0, Qt.ItemDataRole.UserRole) == data and leaf.checkState(0) != state:
                 leaf.setCheckState(0, state)
         other.blockSignals(False)
-        if other is self.tree:                               # the same tag twice in the asset tree
+        if other is self.tree:                               # the same tag twice in the collection tree
             self.atree.blockSignals(True)
             for leaf in self.aleaves:
                 if leaf is not it and leaf.data(0, Qt.ItemDataRole.UserRole) == data:
@@ -206,9 +217,9 @@ class ChannelPicker(QWidget):
     def _sync_all(self, src, dst):
         on = {tuple(x.data(0, Qt.ItemDataRole.UserRole)) for x in (self.aleaves if src is self.atree else self.leaves)
               if x.checkState(0) == Qt.CheckState.Checked}
-        if src is self.atree:                                # ticks only add from the asset side
+        if src is self.atree:                                # ticks only add from the collection side
             on |= {tuple(x.data(0, Qt.ItemDataRole.UserRole)) for x in self.leaves
-                   if x.checkState(0) == Qt.CheckState.Checked and not self._in_assets(x)}
+                   if x.checkState(0) == Qt.CheckState.Checked and not self._in_cols(x)}
         dst.blockSignals(True)
         for leaf in (self.aleaves if dst is self.atree else self.leaves):
             want = Qt.CheckState.Checked if tuple(leaf.data(0, Qt.ItemDataRole.UserRole)) in on else \
@@ -217,12 +228,12 @@ class ChannelPicker(QWidget):
                 leaf.setCheckState(0, want)
         dst.blockSignals(False)
 
-    def _in_assets(self, leaf) -> bool:
+    def _in_cols(self, leaf) -> bool:
         d = leaf.data(0, Qt.ItemDataRole.UserRole)
         return any(x.data(0, Qt.ItemDataRole.UserRole) == d for x in self.aleaves)
 
     def _fill_same(self):
-        """The attribute names under the selected asset (for Select in all)."""
+        """The tag names under the selected collection (for Select in all)."""
         node = self.atree.currentItem()
         while node is not None and not isinstance(node.data(0, Qt.ItemDataRole.UserRole), tuple):
             node = node.parent()
@@ -271,15 +282,15 @@ class ChannelPicker(QWidget):
         return [it.data(0, Qt.ItemDataRole.UserRole) for it in self.leaves
                 if it.checkState(0) == Qt.CheckState.Checked]
 
-    def checked_assets(self) -> list[str]:
-        """Assets ticked as a whole, top-most only (allowed where assets=True: kept live)."""
-        if not (self.allow_assets and self.multi):
+    def checked_collections(self) -> list[str]:
+        """Collections ticked as a whole, top-most only (allowed where collections=True: kept live)."""
+        if not (self.allow_cols and self.multi):
             return []
         out = []
 
         def walk(node):
             data = node.data(0, Qt.ItemDataRole.UserRole)
-            if isinstance(data, tuple) and node.checkState(0) == Qt.CheckState.Checked and \
+            if isinstance(data, tuple) and data[0] == "col" and node.checkState(0) == Qt.CheckState.Checked and \
                     self._leaves_under(node):
                 out.append(data[1])
                 return
@@ -289,11 +300,11 @@ class ChannelPicker(QWidget):
             walk(self.atree.topLevelItem(i))
         return out
 
-    def checked_outside_assets(self) -> list[list]:
-        """Ticked tags that are not in one of checked_assets() (those follow their asset)."""
+    def checked_outside_collections(self) -> list[list]:
+        """Ticked tags that are not in one of checked_collections() (those follow their collection)."""
         live = set()
-        for aid in self.checked_assets():
-            live |= set(self._asm.keys(self.assets, aid))
+        for cid in self.checked_collections():
+            live |= set(self._tc.keys(self.cols, cid))
         return [k for k in self.checked() if tuple(k) not in live]
 
     def current(self):

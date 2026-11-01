@@ -14,9 +14,9 @@ def test_round_trip():
     p.devices.append(dev)
     d = json.loads(json.dumps(p.to_dict()))
     assert d["format"] == "nxlogger" and d["version"] == 2 and PROJECT_EXT == ".nxl"
-    q = Project.from_dict(d)                         # the tag's group becomes an asset with it
+    q = Project.from_dict(d)                         # the tag's group becomes an Equipment collection
     assert q.tag(dev.id, 0).address["addr"] == 3 and q.tag(dev.id, 0).group == ""
-    assert [(x["name"], x["attributes"]) for x in q.assets] == [("Boiler", [{"key": [dev.id, 0], "name": ""}])]
+    assert [(x["name"], x["attributes"]) for x in q.collections] == [("Boiler", [{"key": [dev.id, 0], "name": ""}])]
     r = Project.from_dict(json.loads(json.dumps(q.to_dict())))
     assert r.to_dict() == q.to_dict()                # stable once migrated
 

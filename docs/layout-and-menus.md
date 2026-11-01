@@ -38,17 +38,19 @@ menus exist and what the pop-ups look like. **When to use** an editor tab or a p
       Aggregation    (6)
       Memory                    planned (muted)
       System        (33)
-  ▾ Assets
-      Pumping stations  (7)     top-level assets only - the Assets document shows the tree
-      Energy KPIs       (8)
+  ▾ Collections
+      Report         (1)        the four purposes, flat - the Collections document lists
+      KPI            (1)        the collections of the one clicked
+      Monitoring     (2)
+      Equipment      (7)
   ▸ Logging
   ▸ Alarms
   ▸ Variables
   ▸ Views
 ```
 
-Section headers (the project, Connectivity, Tags, Assets, Logging, Alarms, Variables, Views),
-the category nodes and the asset nodes have **no right-click menu**.
+Section headers (the project, Connectivity, Tags, Collections, Logging, Alarms, Variables, Views)
+and the category / purpose nodes have **no right-click menu**.
 
 ## 3. Connectivity document
 
@@ -181,39 +183,52 @@ While recording, everything except *Add alarm...* (and *Reset now...*) is disabl
 
 The first Tags node: every tag of every category in one table; the left list filters it by
 Device / Virtual / Aggregation / System. Tags have **no groups** - search and sort find a tag,
-the **Assets** column shows where it is used. Right-click any tag rows: *Add to asset ▸*
-(an existing asset or *New asset...*) and *New view from selection*.
+the **Collections** column shows where it is used ("KPI: Plant KPIs, Equipment: Main").
+Right-click any tag rows: *Add to collection ▸* (Report / KPI / Monitoring / Equipment ▸ an
+existing collection or *New … collection...*) and *New view from selection*.
 
-### Assets (Project tree > Assets)
+### Collections (Project tree > Collections)
 
-How tags are used together - like AWS SiteWise, Cognite, Seeq asset trees. The Project tree shows
-the top-level assets only; the Assets document shows the whole tree (up to 4 levels).
+Sets of tags **for a purpose** - like the asset / KPI / report sets of AWS SiteWise, Cognite or
+Seeq, but grouped by what they are for. Four fixed purposes; the Project tree shows them flat
+(like the Tags categories), the Collections document shows the collections of one purpose
+**flat, like Tags and Connectivity**:
+
+| Purpose | What it does |
+|---|---|
+| Report | A new Report collection gets a **statistics logging profile** (15 min: mean / min / max, its tags kept live) |
+| KPI | Its values are on the **Start Page** (*Key values* card) and in the **Monitor bar** (chips) |
+| Monitoring | **New view** / **Monitor** show it in one click (Monitor: its view, full screen) |
+| Equipment | The only purpose with **sub-collections**: site > area > unit > equipment, up to 4 levels |
 
 ```
 ┌────────────────────────────┬────────────────────────────────────────────────────────────┐
-│▌◈ Assets                   │ Attribute  Tag                 Source  Asset        Value │
-│ All assets            (90) │ Speed      PLC-A · P1_Speed    PLC-A   Station A /…  48.2 │
-│ ▾ Pumping stations     (7) │ Status     PLC-A · P1_Status   PLC-A   Station A /…  1    │
-│   ▾ Station A          (5) │                                                            │
-│     ▸ Pump 01          (3) │                                                            │
-│   ▸ Station B          (2) │                                                            │
-│ ▸ Energy KPIs          (8) │                                                            │
+│▌◈ Equipment                │ Attribute  Tag                 Source  Collection   Value │
+│ All Equipment          (7) │ Speed      PLC-A · P1_Speed    PLC-A   Station A /…  48.2 │
+│ Pumping stations       (7) │ Status     PLC-A · P1_Status   PLC-A   Station A /…  1    │
+│ Pumping stations / Sta…(5) │                                                            │
+│ … / Pump 01            (3) │                                                            │
+│ … / Station B          (2) │                                                            │
 └────────────────────────────┴────────────────────────────────────────────────────────────┘
- toolbar: [+ Add ▾ (Asset... · Sub-asset...)] [Edit] [🗑] | [Add tags...] [Remove] | [New view]
+ toolbar: [+ Add ▾ (Collection... · Sub-collection...)] [Edit] [🗑] | [Add tags...] [Remove]
+          | [New view] [Monitor] | search      (Sub-collection: Equipment only, else disabled)
 ```
 
-- An asset's **attributes** reference tags of any category by key (a tag can be in several
-  assets; deleting an asset never deletes a tag). An attribute can have a short name
-  ("Speed" for `StationA_P1_Speed`).
-- **Asset pop-up** (tabs): *General* (name, parent, description, colour) · *Attributes*
-  (tags + short names, *Add tags...*, *Remove*).
-- **Asset row menu:** Edit... · Add sub-asset... · Add tags... · Move to ▸ · Duplicate · New view ·
-  Add alarms for its attributes... (data loss 10 s, edit the limits after) · Delete...
-- **Attribute row menu:** Open tag... · New view from selection · Remove from asset.
-- **Every tag picker** (views, alarms, logging, pop-ups) has *By tag* / *By asset*; under an asset,
-  *Same attribute ▾ - Select in all* ticks e.g. Speed of every pump (compare equipment).
-- **Logging profiles** can tick whole assets: kept live - tags added to the asset later are logged.
-- Groups of older projects (and a `group` column of a tag CSV) become assets with the same tags.
+- A collection's tags reference tags of any category by key - **many-to-many**: a tag can be in
+  several collections (a KPI set, a report and its pump); deleting a collection never deletes
+  a tag. A tag can have a short name in the collection ("Speed" for `StationA_P1_Speed`).
+- **Collection pop-up** (tabs): *General* (name, purpose + what it does, parent - Equipment only,
+  description, colour) · *Tags* (tags + short names, *Add tags...*, *Remove*).
+- **Collection row menu:** Edit... · Add sub-collection... (Equipment) · Add tags... · Move to ▸
+  (Equipment) · Duplicate · New view · Monitor · Add alarms for its tags... (data loss 10 s, edit
+  the limits after) · Delete...
+- **Tag row menu:** Open tag... · New view from selection · Remove from collection.
+- **Every tag picker** (views, alarms, logging, pop-ups) has *By tag* / *By collection* (purposes,
+  then their collections); under a collection, *Same name ▾ - Select in all* ticks e.g. Speed of
+  every pump (compare equipment).
+- **Logging profiles** can tick whole collections: kept live - tags added later are logged.
+- Assets and groups of older projects (and a `group` column of a tag CSV) become Equipment
+  collections with the same tags.
 
 ## 5. Settings pop-ups
 

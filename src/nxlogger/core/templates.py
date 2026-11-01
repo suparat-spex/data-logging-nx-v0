@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from nxlogger.core import aggregation as ag
 from nxlogger.core import alarm_rules as ar
-from nxlogger.core import assets
+from nxlogger.core import tag_collections as tc
 from nxlogger.core import system_tags as ss
 from nxlogger.core import virtual_tags as vt
-from nxlogger.core.project import Project, new_log_profile
+from nxlogger.core.project import Project, new_log_profile, report_profile
 from nxlogger.core.tags import new_device, new_tag
 from nxlogger.core.view_model import default_view, new_tile, new_view
 
@@ -49,10 +49,21 @@ def _with_view(p: Project, max_tags: int = 8) -> Project:
 
 def make(key: str, broker: dict | None = None) -> Project:
     """A new project from a template (KeyError for an unknown key). The areas of the demos
-    (written as groups by the simulators) become assets."""
+    (written as groups by the simulators) become Equipment collections."""
     p = _make(key, broker)
-    assets.migrate_groups(p)
+    tc.migrate(p)
     return p
+
+
+def _collection(p: Project, purpose: str, name: str, keys, description: str = "") -> dict:
+    """A default collection of a demo (a Report one gets its statistics logging profile)."""
+    c = tc.new_collection(name, purpose)
+    c["description"] = description
+    tc.add_attributes(c, [tuple(k) for k in keys])
+    p.collections.append(c)
+    if purpose == "report":
+        p.logging_profiles.append(report_profile(c))
+    return c
 
 
 def _make(key: str, broker: dict | None = None) -> Project:
@@ -217,7 +228,16 @@ def _factory_energy() -> Project:
           "Production runs but air compressor 1 is off")
     alarm("Incomer overload", main_kw, [("H", 950, 30)], "Incomer above 950 kW for 30 s")
 
-    p.logging_profiles = [new_log_profile("signal", "Data 1 s"),
-                          {**new_log_profile("statistic", "Energy 15 min"), "interval_s": 900.0,
-                           "stats": ["mean", "min", "max"]}]
+    p.logging_profiles = [new_log_profile("signal", "Data 1 s")]
+    # default collections: KPI (Start Page, Monitor bar), Report (15-min statistics), Monitoring
+    vk = lambda x: list(vt.vt_key(x["id"]))                              # noqa: E731
+    ak = lambda x, i=0: list(ag.agg_key(x["id"], i))                     # noqa: E731
+    _collection(p, "kpi", "Plant KPIs", [main_kw, main_pf, vk(cost), ak(energy), ak(cost_day), ak(peak)],
+                "Power, power factor, cost and today's energy, cost and peak demand")
+    _collection(p, "report", "Daily energy", [main_kw, main_pf, solar_kw, vk(total), ak(demand)] +
+                [k(m, "kw") for m in feeders], "Every feeder, the incomer and solar - 15-minute statistics")
+    _collection(p, "monitoring", "Utilities", [k(m, f) for m in ("comp1", "comp2", "chiller", "tower")
+                                               for f in ("kw", "pf")], "Compressors, chiller and cooling tower")
+    _collection(p, "monitoring", "Production", [k(m, f) for m in ("line1", "line2", "molding")
+                                                for f in ("kw", "pf")], "Line 1, line 2, injection moulding")
     return p
