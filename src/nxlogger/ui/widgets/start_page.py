@@ -6,7 +6,7 @@ View > Start Page or a click on the project in the Project tree.
 
   banner            app name, version, one line
   left column       Current project (name, file, status line, buttons) - only with a project
-                    Key values: the KPI collections' tags, live (hidden without KPI collections)
+                    Key values: the assets' KPI tags, live (hidden without KPIs)
                     Recent projects (click to open) · Browse...
                     New project: template tiles (core/templates.py)
                     Recent sessions (click: open the folder)
@@ -168,7 +168,7 @@ class StartPage(QWidget):
         cv.addLayout(btns)
 
         self.kpi_card, kv = _card("Key values")
-        self.kpi_card.setToolTip("The tags of the KPI collections (Project tree > Collections > KPI)")
+        self.kpi_card.setToolTip("The KPI tags of the assets (Assets: tick KPI on an attribute)")
         self.kpi_grid = QGridLayout(); self.kpi_grid.setSpacing(8)
         kv.addLayout(self.kpi_grid)
         self._kpi_keys: list | None = None
@@ -291,7 +291,7 @@ class StartPage(QWidget):
 
     def _update_kpis(self):
         """Key values: the cells again when the KPI tags changed, else only their values."""
-        rows = self.host.kpi_values(KPI_MAX)
+        rows = self.host.kpi_values(KPI_MAX, "start")
         keys = [r[4] for r in rows]
         if keys != self._kpi_keys:
             self._kpi_keys = keys

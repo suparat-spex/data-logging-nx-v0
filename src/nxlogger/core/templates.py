@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from nxlogger.core import aggregation as ag
 from nxlogger.core import alarm_rules as ar
-from nxlogger.core import tag_collections as tc
+from nxlogger.core import assets as am
 from nxlogger.core import system_tags as ss
 from nxlogger.core import virtual_tags as vt
-from nxlogger.core.project import Project, new_log_profile, report_profile
+from nxlogger.core.project import Project, new_log_profile
 from nxlogger.core.tags import new_device, new_tag
 from nxlogger.core.view_model import default_view, new_tile, new_view
 
@@ -49,21 +49,10 @@ def _with_view(p: Project, max_tags: int = 8) -> Project:
 
 def make(key: str, broker: dict | None = None) -> Project:
     """A new project from a template (KeyError for an unknown key). The areas of the demos
-    (written as groups by the simulators) become Equipment collections."""
+    (written as groups by the simulators) become assets (core/assets.py)."""
     p = _make(key, broker)
-    tc.migrate(p)
+    am.migrate(p)
     return p
-
-
-def _collection(p: Project, purpose: str, name: str, keys, description: str = "") -> dict:
-    """A default collection of a demo (a Report one gets its statistics logging profile)."""
-    c = tc.new_collection(name, purpose)
-    c["description"] = description
-    tc.add_attributes(c, [tuple(k) for k in keys])
-    p.collections.append(c)
-    if purpose == "report":
-        p.logging_profiles.append(report_profile(c))
-    return c
 
 
 def _make(key: str, broker: dict | None = None) -> Project:
@@ -120,9 +109,9 @@ def _factory_energy() -> Project:
     k = lambda meter, field: list(tag[fe.tag_name(meter, field)])          # noqa: E731
     vts, aggs = p.virtual_tags, p.aggregations
 
-    def v(kind, name, group="Energy", **kw):
+    def v(kind, name, _group="", **kw):
         x = vt.new_virtual(kind, name)
-        x.update(group=group, **kw)
+        x.update(**kw)
         vts.append(x)
         return x
 
@@ -157,9 +146,9 @@ def _factory_energy() -> Project:
     comp_trip = v("logic", "Comp1_trip", "Utilities", description="Production runs but compressor 1 is off",
                   inputs=inp(("T", vt.vt_key(total["id"])), ("A", k("comp1", "kw"))), expr="T > 300 and A < 5")
 
-    def a(kind, name, group="Energy", **kw):
+    def a(kind, name, _group="", **kw):
         x = ag.new_aggregation(kind, name)
-        x.update(group=group, **kw)
+        x.update(**kw)
         aggs.append(x)
         return x
     demand = a("statistic", "Demand_15min", source=k("main", "kw"), stat="mean", win_n=15, win_unit="min",
@@ -228,16 +217,45 @@ def _factory_energy() -> Project:
           "Production runs but air compressor 1 is off")
     alarm("Incomer overload", main_kw, [("H", 950, 30)], "Incomer above 950 kW for 30 s")
 
-    p.logging_profiles = [new_log_profile("signal", "Data 1 s")]
-    # default collections: KPI (Start Page, Monitor bar), Report (15-min statistics), Monitoring
-    vk = lambda x: list(vt.vt_key(x["id"]))                              # noqa: E731
-    ak = lambda x, i=0: list(ag.agg_key(x["id"], i))                     # noqa: E731
-    _collection(p, "kpi", "Plant KPIs", [main_kw, main_pf, vk(cost), ak(energy), ak(cost_day), ak(peak)],
-                "Power, power factor, cost and today's energy, cost and peak demand")
-    _collection(p, "report", "Daily energy", [main_kw, main_pf, solar_kw, vk(total), ak(demand)] +
-                [k(m, "kw") for m in feeders], "Every feeder, the incomer and solar - 15-minute statistics")
-    _collection(p, "monitoring", "Utilities", [k(m, f) for m in ("comp1", "comp2", "chiller", "tower")
-                                               for f in ("kw", "pf")], "Compressors, chiller and cooling tower")
-    _collection(p, "monitoring", "Production", [k(m, f) for m in ("line1", "line2", "molding")
-                                                for f in ("kw", "pf")], "Line 1, line 2, injection moulding")
+    report = [main_kw, main_pf, solar_kw, list(vt.vt_key(total["id"])), list(ag.agg_key(demand["id"]))] + \
+        [k(m, "kw") for m in feeders]
+    p.logging_profiles = [new_log_profile("signal", "Data 1 s"),
+                          {**new_log_profile("statistic", "Energy report 15 min"), "interval_s": 900.0,
+                           "channels": report}]
+    _factory_assets(p, dev, k, [list(vt.vt_key(cost["id"])), list(ag.agg_key(energy["id"])),
+                                list(ag.agg_key(cost_day["id"])), list(ag.agg_key(peak["id"]))])
     return p
+
+
+def _factory_assets(p: Project, dev, k, plant_kpis):
+    """The demo's assets: an area per meter group, a machine per meter (template "Power meter":
+    every value of a meter, Power = the KPI), the plant's key values on the Main area."""
+    from nxlogger.sim import factory_energy as fe
+    for t in dev.tags:
+        t.group = ""
+    meter = am.new_template("Power meter", "unit")
+    meter["icon"] = "gauge"
+    meter["description"] = "One power meter: voltage, current, power, energy, THD"
+    meter["attributes"] = [am.new_slot("Power" if f == "kw" else desc.split(" (")[0], unit, f == "kw", f"*_{suffix}")
+                           for f, suffix, unit, _d, _o, desc in fe.FIELDS]
+    p.asset_templates = [meter]
+    types = {"Main": "area", "Production": "production", "Utilities": "area", "Building": "zone", "Solar": "area"}
+    made = {}
+    for _u, key, name, group, *_r in fe.METERS:
+        area = made.get(group)
+        if area is None:
+            area = made[group] = am.new_asset(group, types.get(group, "area"))
+            p.assets.append(area)
+        m = am.new_asset(name, "unit" if key in ("main", "solar") else "machine", area["id"])
+        am.apply_template(m, meter)
+        am.apply_mapping(m, [(s["name"], tuple(k(key, f[0]))) for s, f in zip(meter["attributes"], fe.FIELDS)])
+        if key in ("main", "solar"):                     # not a load: not in the rollups
+            for x in m["attributes"]:
+                x["kpi"] = False
+        p.assets.append(m)
+    main = made["Main"]
+    main["description"] = "The incomer and the plant's key values"
+    main["attributes"] = [{"key": key, "name": nm, "kpi": True} for key, nm in
+                          zip([k("main", "kw"), k("main", "pf")] + plant_kpis,
+                              ["Incomer", "Power factor", "Cost", "Energy today", "Cost today", "Peak today"])]
+    p.enterprise = "Demo factory"

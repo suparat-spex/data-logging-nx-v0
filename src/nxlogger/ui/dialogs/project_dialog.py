@@ -1,5 +1,5 @@
 """Project settings pop-up (Properties > Edit... on the project, like the device and tag pop-ups):
-name, operator, description; the project file and the log folder. Tabs style via
+name, operator, enterprise (the top of Assets), description; the project file and the log folder. Tabs style via
 common.popup_form. The project changes only on Save (apply)."""
 from __future__ import annotations
 
@@ -22,10 +22,13 @@ class ProjectDialog(QDialog):
         w, f = form_page()
         self.name = QLineEdit(project.name); self.name.setPlaceholderText("e.g. Water Plant A")
         self.operator = QLineEdit(project.operator); self.operator.setPlaceholderText("optional")
+        self.enterprise = QLineEdit(getattr(project, "enterprise", ""))
+        self.enterprise.setPlaceholderText(f"the project name ({project.name})")
         self.desc = QPlainTextEdit(project.description); self.desc.setMaximumHeight(90)
         self.desc.setPlaceholderText("What is tested or logged (saved in the session files)")
         f.addRow("Name", self.name)
         f.addRow("Operator", self.operator)
+        f.addRow("Enterprise", self.enterprise)
         f.addRow("Description", self.desc)
         f.addRow("", label("Name, operator and description are written into every recording (project.json).",
                            muted=True, small=True))
@@ -55,6 +58,7 @@ class ProjectDialog(QDialog):
 
     def result(self) -> dict:
         return {"name": self.name.text().strip(), "operator": self.operator.text().strip(),
+                "enterprise": self.enterprise.text().strip(),
                 "description": self.desc.toPlainText().strip(), "folder": self.folder.text().strip()}
 
     def _ok(self):

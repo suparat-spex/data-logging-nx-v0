@@ -271,115 +271,147 @@ def test_aggregation_tags_and_all_tags(win, monkeypatch, tmp_path):
     win.doc_tabs.setCurrentIndex(front)
 
 
-def test_collections_page_picker_and_logging(win, monkeypatch):
+def test_assets_page_picker_and_logging(win, monkeypatch):
     from PySide6.QtCore import Qt
-    from nxlogger.core import tag_collections as tc
-    from nxlogger.ui.dialogs import collection_dialog as cd
+    from nxlogger.core import assets as am
+    from nxlogger.ui.dialogs import asset_dialog as ad
+    from nxlogger.ui.dialogs import map_tags_dialog as md
+    from nxlogger.ui.dialogs import template_dialog as td
     from nxlogger.ui.dialogs.common import ChannelPicker
     monkeypatch.setattr("nxlogger.ui.main_window.confirm", lambda *a_, **k_: True)
     front = win.doc_tabs.currentIndex()
     dev = win.project.devices[0]
     k = [(dev.id, t.index) for t in dev.tags]
-    cols0 = list(win.project.collections)
+    assets0, temps0 = list(win.project.assets), list(win.project.asset_templates)
     profs0 = list(win.project.logging_profiles)
+    page = win.assets_page
+    win.project.assets[:] = []
+    win._show_doc("assets"); page.show_enterprise()
+    assert page.stack.currentWidget() is page.empty and page.empty.title.text() == "No areas yet"
+    assert [b.text() for b in page.empty.buttons] == ["Add area", "Use a starter"]
+    assert page.btn_edit.isEnabled() and not page.btn_del.isEnabled()    # Edit = the Enterprise
 
-    def make(name, purpose="equipment", parent=None, keys=(), short=()):
-        def run(dlg):                                    # the pop-up: name, purpose, parent, tags
+    def make(name, typ="area", parent=None, keys=(), short=(), kpi=(), template=None):
+        def run(dlg):                                    # the pop-up: name, area, tags
             dlg.name.setText(name)
-            dlg.purpose.setCurrentIndex(dlg.purpose.findData(purpose))
-            dlg.parent_box.setCurrentIndex(max(0, dlg.parent_box.findData(parent)))
             for key in keys:
-                dlg._row(list(key), "")
+                dlg._row(list(key), "", False)
             for i, s_ in enumerate(short):
                 dlg.attrs.topLevelItem(i).setText(0, s_)
+            for i in kpi:
+                dlg.attrs.topLevelItem(i).setCheckState(2, Qt.CheckState.Checked)
             assert dlg.ok_btn.isEnabled(), dlg.err.text()
             return True
-        monkeypatch.setattr(cd.CollectionDialog, "exec", run)
-        win._collection_popup(None, purpose, parent)
-        return next(c for c in win.project.collections if c["name"] == name and c.get("parent") == parent)
-    station = make("Station A")
-    p1 = make("Pump 01", parent=station["id"], keys=k[:2], short=("Speed", "Status"))
-    p2 = make("Pump 02", parent=station["id"], keys=k[2:4], short=("Speed", "Status"))
-    assert tc.path(win.project.collections, p1["id"]) == "Station A / Pump 01"
-    assert p1["attributes"][0] == {"key": list(k[0]), "name": "Speed"}
+        monkeypatch.setattr(ad.AssetDialog, "exec", run)
+        win.add_asset(typ, parent, template); _pump(0.05)
+        return next(a for a in win.project.assets if a["name"] == name and a.get("parent") == parent)
+    ut = make("Utilities")
+    assert page.empty.title.text() == "No machines in Utilities"        # the new area selected
+    c1 = make("Compressor 1", "machine", ut["id"], keys=k[:2], short=("Power", "Status"), kpi=(0,))
+    c2 = make("Compressor 2", "machine", ut["id"], keys=k[2:4], short=("Power", "Status"), kpi=(0,))
+    assert am.path(win.project.assets, c1["id"]) == "Utilities / Compressor 1"
+    assert c1["attributes"][0] == {"key": list(k[0]), "name": "Power", "kpi": True}
 
-    def dup_exec(dlg):                                   # same name under the same parent: refused
-        dlg.name.setText("Pump 01"); dlg.parent_box.setCurrentIndex(dlg.parent_box.findData(station["id"]))
+    def dup_exec(dlg):                                   # same name in the same area: refused
+        dlg.name.setText("Compressor 1")
         assert not dlg.ok_btn.isEnabled() and "already" in dlg.err.text()
-        dlg.purpose.setCurrentIndex(dlg.purpose.findData("kpi"))    # KPI: flat, no parent
-        assert not dlg.parent_box.isEnabled() and dlg.collect()["parent"] is None
+        assert dlg.area.currentData() == ut["id"] and dlg.template.count() == 1
         return False
-    monkeypatch.setattr(cd.CollectionDialog, "exec", dup_exec)
-    win._collection_popup(None, "equipment", station["id"])
+    monkeypatch.setattr(ad.AssetDialog, "exec", dup_exec)
+    win._asset_popup(None, "machine", ut["id"])
+    assert [(v[0], v[4]) for v in win.kpi_values()] == [("Power", k[0]), ("Power", k[2])]   # Start Page / Monitor bar
 
-    report = make("Shift report", "report", keys=k[:1])  # a Report collection: its statistics profile
-    rp = [pr for pr in win.project.logging_profiles if report["id"] in (pr.get("collections") or [])]
-    assert len(rp) == 1 and rp[0]["type"] == "statistic" and rp[0]["interval_s"] == tc.REPORT_INTERVAL_S
-    kpi = make("Line KPIs", "kpi", keys=k[:2])
-    vals = win.kpi_values()
-    assert [v[4] for v in vals][-2:] == k[:2]            # KPI values for the Start Page / Monitor bar
-
-    win._rebuild_project_tree()                          # Project tree: Collections > the four purposes
+    win._rebuild_project_tree()                          # Project tree: Assets > the areas, Templates last
     root = win.ptree.topLevelItem(0)
-    node = next(root.child(i) for i in range(root.childCount()) if root.child(i).text(0) == "Collections")
+    node = next(root.child(i) for i in range(root.childCount()) if root.child(i).text(0).startswith("Assets · "))
     assert [node.child(i).data(0, Qt.ItemDataRole.UserRole) for i in range(node.childCount())] == \
-        [("colpurpose", p_[0]) for p_ in tc.PURPOSES]
+        [("asset", ut["id"]), ("templates", None)]
     assert all(node.child(i).childCount() == 0 for i in range(node.childCount()))
 
-    page = win.collections_page                          # the Collections document: one purpose, flat
-    win._show_doc("collections"); page.show_purpose("equipment")
-    rows = [page.tree.topLevelItem(i) for i in range(page.tree.topLevelItemCount())]
-    assert all(r.childCount() == 0 for r in rows)
-    names = [r.text(0).split("  (")[0] for r in rows]
-    assert names[0].startswith("All Equipment") and \
-        names[-3:] == ["Station A", "Station A / Pump 01", "Station A / Pump 02"]
-    page.refresh(station["id"])
-    assert len(page._rows) == 4 and {it.text(0) for it in page._rows.values()} == {"Speed", "Status"}
-    page.refresh(p1["id"])
-    assert len(page._rows) == 2
-    page.refresh(kpi["id"])                              # a KPI collection: its purpose comes along
-    assert page.purpose == "kpi" and len(page._rows) == 2
+    page.show_enterprise()                               # the Enterprise: areas left, machines right
 
-    win.add_to_collection([k[0]], station["id"])         # Tags > Add to collection (a tag in several)
-    assert len(tc.keys(win.project.collections, station["id"])) == 4 and len(win.collections_of(k[0])) >= 4
+    def names():
+        return [page.tree.topLevelItem(i).text(0).split("  (")[0].split("   ")[0]
+                for i in range(page.tree.topLevelItemCount())]
+    assert names() == ["All areas", "Utilities"] and page.stack.currentWidget() is page.mtable
+    assert {it.text(0) for it in page._rows.values()} == {"Compressor 1", "Compressor 2"}
+    page._rows[(c1["id"],)].setSelected(True)            # a machine row: it is the target
+    assert page._target() == c1["id"] and page.btn_map.isEnabled() and page.btn_mon.isEnabled()
+    page.open(c1["id"])                                  # a machine: its area, that row selected
+    assert page.mode == "area" and page.area == ut["id"] and page.current == c1["id"] and len(page._rows) == 2
+    page.open(ut["id"])
+    assert names() == ["All Utilities", "Compressor 1", "Compressor 2"] and len(page._rows) == 4
+    assert {it.text(3) for it in page._rows.values()} == {"Compressor 1", "Compressor 2"}
+
+    def tpl_exec(dlg):                                   # a template from a machine: its attributes
+        assert [dlg.attrs.topLevelItem(i).text(0) for i in range(dlg.attrs.topLevelItemCount())] == ["Power", "Status"]
+        dlg.name.setText("Compressor")
+        dlg._row({"name": "Pressure", "unit": "bar", "kpi": False, "match": "*" + dev.tags[3].name})
+        return True
+    monkeypatch.setattr(td.TemplateDialog, "exec", tpl_exec)
+    win.add_template(c1["id"]); _pump(0.05)
+    t = win.project.asset_templates[-1]
+    assert t["name"] == "Compressor" and c1["template"] == t["id"] and [s_["name"] for s_ in t["attributes"]] == \
+        ["Power", "Status", "Pressure"]
+    c3 = make("Compressor 3", "machine", ut["id"], template=t["id"])     # from the template: its slots
+    assert [(x["name"], x["key"]) for x in c3["attributes"]] == [("Power", None), ("Status", None), ("Pressure", None)]
+    page.open(c3["id"])
+    assert {it.text(1) for it in page._rows.values()} == {"Not mapped"}
+    monkeypatch.setattr(md.MapTagsDialog, "exec", lambda dlg: True)      # Map tags: Pressure by its pattern
+    win.map_asset_tags(c3["id"])
+    assert [x["name"] for x in c3["attributes"] if x["key"]] == ["Pressure"]
+    assert c3["attributes"][2]["key"] == list(k[3])
+
+    win.duplicate_asset(c2["id"])                        # Compressor 2 -> Compressor 4 (3 is taken)
+    c4 = next(a for a in win.project.assets if a["name"] == "Compressor 4")
+    assert c4["parent"] == ut["id"] and c4["attributes"] == c2["attributes"]
+
+    win.add_to_asset([k[0]], c2["id"])                   # Tags > Add to asset (a tag in several)
+    assert len(win.assets_of(k[0])) == 2
     win.tags_page.refresh(("device", dev.id))
-    assert "Equipment: Station A" in win.tags_page._rows[k[0]].text(2)    # the Collections column
+    assert "Compressor 1" in win.tags_page._rows[k[0]].text(2)              # the Assets column
 
-    pick = ChannelPicker(win.channel_choices(), [], collections=True)    # By collection, same name
+    pick = ChannelPicker(win.channel_choices(), [], assets=True)        # By asset, same name
     pick._mode(True)
-    pick.atree.setCurrentItem(pick.anodes[station["id"]])
+    pick.atree.setCurrentItem(pick.anodes[ut["id"]])
     pick._fill_same()
-    pick.same_attr.setCurrentText("Speed"); pick._select_same()
-    assert {tuple(x) for x in pick.checked()} == {k[0], k[2]}        # Speed of both pumps
-    pick.anodes[p2["id"]].setCheckState(0, Qt.CheckState.Checked)   # a whole collection (kept live)
-    assert p2["id"] in pick.checked_collections()
+    pick.same_attr.setCurrentText("Power"); pick._select_same()
+    assert {tuple(x) for x in pick.checked()} == {k[0], k[2]}           # Power of every compressor
+    pick.anodes[c3["id"]].setCheckState(0, Qt.CheckState.Checked)       # a whole asset (kept live)
+    assert c3["id"] in pick.checked_assets()
 
-    pr = {"channels": [list(k[0])], "collections": [p2["id"]]}      # logging by collection: its tags, live
-    tc.add_attributes(p2, [k[1]])                        # added to the collection later: logged too
+    pr = {"channels": [list(k[0])], "assets": [c2["id"]]}               # logging by asset: its tags, live
+    am.add_attributes(c2, [k[1]])                        # added to the asset later: logged too
     logged = {(d["id"], c[0]) for d in win._profile_topics(pr) for c in d["channels"]}
     assert logged == {k[0], k[1], k[2], k[3]}
 
     n_views = len(win.project.views)
-    win.new_view_from(tc.keys(win.project.collections, p1["id"]), "Pump 01")
+    win.new_view_from(am.keys(win.project.assets, c1["id"]), "Compressor 1")
     vw = win.project.views[-1]
-    assert len(win.project.views) == n_views + 1 and vw["name"] == "Pump 01"
-    assert [t["kind"] for t in vw["tiles"]] == ["text", "plot", "tags"]
+    assert len(win.project.views) == n_views + 1 and vw["name"] == "Compressor 1"
     n_alarms = len(win.project.alarms)
-    win.alarms_for_collection(p1["id"])
+    win.alarms_for_asset(c1["id"])
     new = win.project.alarms[n_alarms:]
-    assert {tuple(a["channel"]) for a in new} <= set(tc.keys(win.project.collections, p1["id"]))
-    assert new and all(a["levels"][0]["type"] == "D" for a in new)
+    assert {tuple(a["channel"]) for a in new} <= set(am.keys(win.project.assets, c1["id"]))
+    win.alarm_engine.states.clear()
+    assert win.asset_state(k[0]) in ("ok", "none")
 
-    win.move_collection(station["id"], p1["id"])         # a cycle: refused
-    assert station.get("parent") is None
-    win.delete_collection(station["id"])                 # with its subs; the tags stay
-    win.delete_collection(report["id"])                  # its profile stays, without the collection
-    assert all(report["id"] not in (pr_.get("collections") or []) for pr_ in win.project.logging_profiles)
-    win.delete_collection(kpi["id"])
-    assert win.project.collections == cols0 and len(dev.tags) == len(k)
+    win.add_starter("building")                          # Use a starter: an area and its templates
+    assert win.project.assets[-1]["name"] == "Building" and win.project.asset_templates[-1]["name"] == "Power meter"
+    page.show_templates()
+    assert names()[0] == "All templates" and page.stack.currentWidget() is page.atable
+    win.delete_template(t["id"])                         # machines keep their tags
+    assert not c1["template"] and c1["attributes"]
+    win.move_asset(c1["id"], c2["id"])                   # into a machine: refused
+    assert c1["parent"] == ut["id"]
+    win.delete_asset(ut["id"])                           # with its machines; the tags stay
+    assert [a["name"] for a in win.project.assets] == ["Building"] and len(dev.tags) == len(k)
+    win.project.assets[:] = assets0
+    win.project.asset_templates[:] = temps0
     win.project.logging_profiles[:] = profs0
     win.project.alarms[n_alarms:] = []
     win.delete_view(win.view_pages[vw["id"]])
+    win.assets_changed(None)
     win.doc_tabs.setCurrentIndex(front)
 
 

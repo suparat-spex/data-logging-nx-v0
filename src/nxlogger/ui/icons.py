@@ -9,6 +9,7 @@ They are tinted per theme token and cached, so theme switches stay fast.
   check_icon_file / grip_icon_file      file paths for QSS (stylesheets only load files)
   swatch(color)                         channel colour chip
   level_icon(level), level_color(level) alarm level dot / colour
+  status_icon(name, state)              Assets: status dot (alarm / ok / none) + icon, STATUS_SIZE
   app_icon()                            window, taskbar (resources/icons/app/nxlogger.ico)
 """
 from __future__ import annotations
@@ -102,6 +103,34 @@ def level_icon(level: int, size: int = 10) -> QIcon:
     p.drawEllipse(6, 6, 2 * size, 2 * size); p.end()
     pm.setDevicePixelRatio(2)
     return QIcon(pm)
+
+
+STATUS_TOKEN = {"alarm": "bad", "ok": "ok", "none": "muted"}
+STATUS_SIZE = (30, 16)                         # the tree's iconSize for status_icon
+
+
+@lru_cache(maxsize=256)
+def _status(name: str, state: str, dot: str, color: str) -> QIcon:
+    w, h = STATUS_SIZE
+    pm = QPixmap(2 * w, 2 * h); pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    if state == "none":                          # no data: a ring
+        p.setPen(QColor(dot)); p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(3, h - 7, 13, 13)
+    else:
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(dot))
+        p.drawEllipse(2, h - 8, 16, 16)
+    if name:
+        icon(name, color, 16).paint(p, 24, 0, 2 * h, 2 * h)
+    p.end()
+    pm.setDevicePixelRatio(2)
+    return QIcon(pm)
+
+
+def status_icon(name: str, state: str, color: str | None = None) -> QIcon:
+    """Assets: a status dot (alarm / ok / none = no data, a ring) + an icon, STATUS_SIZE."""
+    from nxlogger.ui.theme.ui_kit import T
+    return _status(name, state, QColor(T[STATUS_TOKEN.get(state, "muted")]).name(), QColor(color or T["text"]).name())
 
 
 def app_icon() -> QIcon:

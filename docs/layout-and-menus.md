@@ -38,19 +38,19 @@ menus exist and what the pop-ups look like. **When to use** an editor tab or a p
       Aggregation    (6)
       Memory                    planned (muted)
       System        (33)
-  ▾ Collections
-      Report         (1)        the four purposes, flat - the Collections document lists
-      KPI            (1)        the collections of the one clicked
-      Monitoring     (2)
-      Equipment      (7)
+  ▾ Assets · Demo factory       the Enterprise (click: its areas and machines)
+      Main            (1)       the areas, one level (click: its machines and tags;
+      Production      (3)       the icon turns red on an alarm)
+      Utilities       (4)
+      Templates       (1)       muted, always last (click: the templates)
   ▸ Logging
   ▸ Alarms
   ▸ Variables
   ▸ Views
 ```
 
-Section headers (the project, Connectivity, Tags, Collections, Logging, Alarms, Variables, Views)
-and the category / purpose nodes have **no right-click menu**.
+Section headers (the project, Connectivity, Tags, Assets, Logging, Alarms, Variables, Views)
+and the category / area nodes have **no right-click menu** (double-click an area: its pop-up).
 
 ## 3. Connectivity document
 
@@ -183,52 +183,68 @@ While recording, everything except *Add alarm...* (and *Reset now...*) is disabl
 
 The first Tags node: every tag of every category in one table; the left list filters it by
 Device / Virtual / Aggregation / System. Tags have **no groups** - search and sort find a tag,
-the **Collections** column shows where it is used ("KPI: Plant KPIs, Equipment: Main").
-Right-click any tag rows: *Add to collection ▸* (Report / KPI / Monitoring / Equipment ▸ an
-existing collection or *New … collection...*) and *New view from selection*.
+the **Assets** column shows where it is used ("Utilities / Air compressor 1").
+Right-click any tag rows: *Add to asset ▸* (every area and machine with its icon, or *New
+area...*) and *New view from selection*.
 
-### Collections (Project tree > Collections)
+### Assets (Project tree > Assets)
 
-Sets of tags **for a purpose** - like the asset / KPI / report sets of AWS SiteWise, Cognite or
-Seeq, but grouped by what they are for. Four fixed purposes; the Project tree shows them flat
-(like the Tags categories), the Collections document shows the collections of one purpose
-**flat, like Tags and Connectivity**:
+The plant in three levels, like an ISA-95 equipment model kept short:
+**Enterprise** (the project - its name in the Project pop-up) > **Area / Zone / Production** >
+**Machine / Station / Unit** > tags. Types are labels and icons only. An asset references tags
+of any category by key - a tag can be in several assets; deleting an asset never deletes a tag.
+An area can hold tags of its own (a meter of the area, the plant's key values).
 
-| Purpose | What it does |
-|---|---|
-| Report | A new Report collection gets a **statistics logging profile** (15 min: mean / min / max, its tags kept live) |
-| KPI | Its values are on the **Start Page** (*Key values* card) and in the **Monitor bar** (chips) |
-| Monitoring | **New view** / **Monitor** show it in one click (Monitor: its view, full screen) |
-| Equipment | The only purpose with **sub-collections**: site > area > unit > equipment, up to 4 levels |
+The left list is always **one level** - a band, an *All ...* row, the items - like Tags and
+Connectivity. Selecting a row filters the table; double-clicking goes one level down. One toolbar
+on every level: `[+ Add ▾][Edit][⧉][🗑] | [Map tags...][Remove] | [New view][Monitor]  [Search]`.
 
 ```
-┌────────────────────────────┬────────────────────────────────────────────────────────────┐
-│▌◈ Equipment                │ Attribute  Tag                 Source  Collection   Value │
-│ All Equipment          (7) │ Speed      PLC-A · P1_Speed    PLC-A   Station A /…  48.2 │
-│ Pumping stations       (7) │ Status     PLC-A · P1_Status   PLC-A   Station A /…  1    │
-│ Pumping stations / Sta…(5) │                                                            │
-│ … / Pump 01            (3) │                                                            │
-│ … / Station B          (2) │                                                            │
-└────────────────────────────┴────────────────────────────────────────────────────────────┘
- toolbar: [+ Add ▾ (Collection... · Sub-collection...)] [Edit] [🗑] | [Add tags...] [Remove]
-          | [New view] [Monitor] | search      (Sub-collection: Equipment only, else disabled)
+Project tree > Assets: the areas left, their machines right
+┌──────────────────────────────┬───────────────────────────────────────────────────────┐
+│▌⌂ Demo factory   621 kW      │ Name            Type     Area        Template  Tags  │
+│ All areas                (5) │ ● Air comp. 1   Machine  Utilities   Power m.     9  │
+│ ● ▦ Utilities  186 kW    (4) │ ▲ Line 1        Machine  Production  Power m.     9  │
+│ ▲ 🏭 Production 412 kW    (3) │                                                       │
+└──────────────────────────────┴───────────────────────────────────────────────────────┘
+ Add ▾: Area... · Zone... · Production... · Machine... (in the selected area) · From template ▸ · Use a starter ▸
+
+Project tree > Utilities: its machines left, their tags right (+ the area's own)
+│▌▦ Utilities · Area           │ Name      Tag                   Source   Machine      │
+│ All Utilities           (36) │ Power     Energy meters · …_kW  Modbus   Air comp. 1  │
+│ ● ⚙ Air compressor 1 [Power meter] (9)                                               │
+ Add ▾: Machine... · Station... · Unit... · From template ▸ · Tags... · Area...
+
+Project tree > Templates: the templates left, their attributes right
+│▌⧉ Templates                  │ Attribute  Template     Unit  KPI  Match   Used      │
+│ ◔ Power meter     (11 used)  │ Power      Power meter  kW    ✓    *_kW      11      │
+ Add ▾: Template... · From machine ▸
 ```
 
-- A collection's tags reference tags of any category by key - **many-to-many**: a tag can be in
-  several collections (a KPI set, a report and its pump); deleting a collection never deletes
-  a tag. A tag can have a short name in the collection ("Speed" for `StationA_P1_Speed`).
-- **Collection pop-up** (tabs): *General* (name, purpose + what it does, parent - Equipment only,
-  description, colour) · *Tags* (tags + short names, *Add tags...*, *Remove*).
-- **Collection row menu:** Edit... · Add sub-collection... (Equipment) · Add tags... · Move to ▸
-  (Equipment) · Duplicate · New view · Monitor · Add alarms for its tags... (data loss 10 s, edit
-  the limits after) · Delete...
-- **Tag row menu:** Open tag... · New view from selection · Remove from collection.
-- **Every tag picker** (views, alarms, logging, pop-ups) has *By tag* / *By collection* (purposes,
-  then their collections); under a collection, *Same name ▾ - Select in all* ticks e.g. Speed of
-  every pump (compare equipment).
-- **Logging profiles** can tick whole collections: kept live - tags added later are logged.
-- Assets and groups of older projects (and a `group` column of a tag CSV) become Equipment
-  collections with the same tags.
+- **Status dots:** ● ok · ▲ alarm (an active alarm level on one of its tags) · ○ no data.
+  **Rollups** (areas, the Enterprise): the sum of each machine's first KPI value, in its unit.
+- **KPI** (a tick on an attribute, bold in the table): the Start Page *Key values* and the
+  Monitor bar chips.
+- **Templates:** what a kind of machine has (attributes with unit, KPI and a *match* pattern,
+  `*_kW`, `*speed*|*Hz*`). A machine made from one, or given one (*Apply template ▸*), gets its
+  attributes as slots (*Not mapped*); **Map tags...** fills them with the tags of one source by the
+  patterns (preview, untick to skip). Saving a template adds new attributes to its machines.
+- **Empty levels** show one centred message with its buttons (*Add area* / *Use a starter ▾*,
+  *Add machine* / *From template ▾*, *Add tags...* / *Map tags...*) - never a pop-up.
+- **Edit** acts on the selected machine row, else the selected area, else (Enterprise) the
+  Project pop-up. **Duplicate** numbers on (Compressor 2 -> Compressor 3); an area with its machines.
+- **Asset pop-up** (tabs): *General* (name, type, area + template for machines, icon grid +
+  Default = the type's, description) · *Tags* (short name, tag, KPI). **Template pop-up**:
+  *General* (name, type, icon, description, used by) · *Attributes*.
+- **Area / machine menu:** Edit... · Open · Add machine ▸ · Add tags... · Map tags... · Apply
+  template ▸ · Move to ▸ (another area) · Make a template from it · Duplicate · New view · Monitor ·
+  Add alarms for its tags... · Delete...
+- **Tag row menu:** Open tag... · Map tags... · New view from selection · Remove from asset.
+- **Every tag picker** (views, alarms, logging, pop-ups) has *By tag* / *By asset*; under an
+  area, *Same name ▾ - Select in all* ticks e.g. Power of every compressor (compare machines).
+- **Logging profiles** can tick whole assets: kept live - tags added later are logged.
+- Collections, the Assets of 2.x and Tags groups of older projects become areas and machines with
+  the same tags ("A / B / C": area A, machine "B / C").
 
 ## 5. Settings pop-ups
 

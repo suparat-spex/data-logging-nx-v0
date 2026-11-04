@@ -6,7 +6,7 @@ plant on a big screen; a data-logger display, not a control HMI).
                                                                            10:42:05  [⛶] [Cycle: Off ▾] [✕ Exit]
 
 View ▾ / ‹ › (Page Up / Page Down) switch views; the status chips follow the logger (twice a
-second) - KPI chips: the first KPI_CHIPS tags of the KPI collections; ⛶ full screen; Cycle switches to the next view every N seconds; Exit (F11 / Esc)
+second) - KPI chips: the first KPI_CHIPS KPI tags of the assets; ⛶ full screen; Cycle switches to the next view every N seconds; Exit (F11 / Esc)
 brings the previous layout back. Clicking the alarm chip leaves Monitor mode on the Alarms page.
 
 Host API (duck-typed, DaqWindow):
@@ -128,7 +128,7 @@ class MonitorBar(QFrame):
         self.rec.set(f"● REC {s['elapsed']}" if s["recording"] else "Not recording",
                      "bad" if s["recording"] else "muted")
         self.clock.setText(time.strftime("%H:%M:%S"))
-        rows = self.host.kpi_values(KPI_CHIPS)
+        rows = self.host.kpi_values(KPI_CHIPS, "monitor")
         for i, chip in enumerate(self.kpis):
             if i < len(rows):
                 name, text, unit, good, _k = rows[i]

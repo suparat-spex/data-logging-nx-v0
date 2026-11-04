@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 
 from nxlogger import paths
 from nxlogger.core import aggregation as agg
-from nxlogger.core import tag_collections as tc
+from nxlogger.core import assets as am
 from nxlogger.core import alarm_rules as ar
 from nxlogger.core import ml_log as mlg
 from nxlogger.core import variables as vr
@@ -60,14 +60,8 @@ def new_log_profile(kind: str = "signal", name: str = "") -> dict:
     return {"id": uuid.uuid4().hex[:8], "name": name or ("Data" if kind == "signal" else "Statistics"),
             "enabled": True, "type": kind, "format": "CSV", "keep_raw": False,
             "channels": None,                   # None = all enabled tags, else [[device_id, index]]
-            "collections": [],                  # + whole collections, kept live (their tags as they change)
+            "assets": [],                       # + whole assets (ids), kept live (their tags as they change)
             "interval_s": 1.0 if kind == "signal" else 60.0, "stats": ["mean", "min", "max"]}
-
-
-def report_profile(col: dict) -> dict:
-    """The statistics logging profile of a Report collection (its tags, kept live)."""
-    return {**new_log_profile("statistic", f"Report {col['name']}"), "interval_s": tc.REPORT_INTERVAL_S,
-            "channels": [], "collections": [col["id"]], "stats": ["mean", "min", "max"]}
 
 
 def fmt_interval(s: float) -> str:
@@ -94,8 +88,10 @@ class Project:
     variables: list[dict] = field(default_factory=list)         # calculated channels (variables.py)
     virtual_tags: list[dict] = field(default_factory=list)      # Tags > Virtual (virtual_tags.py)
     aggregations: list[dict] = field(default_factory=list)      # Tags > Aggregation (aggregation.py)
-    groups: list[str] = field(default_factory=list)             # older files only: become Equipment collections on load
-    collections: list[dict] = field(default_factory=list)       # Project tree > Collections (core/tag_collections.py)
+    groups: list[str] = field(default_factory=list)             # older files only: become assets on load
+    enterprise: str = ""                                        # Assets: the top level ("" = the project name)
+    assets: list[dict] = field(default_factory=list)            # Project tree > Assets (core/assets.py)
+    asset_templates: list[dict] = field(default_factory=list)   # Assets > Templates
     quick_hidden: list = field(default_factory=list)            # [[device_id, index]] not in Quick View
     ml_log: dict = field(default_factory=mlg.new_settings)   # AI/ML data log (core/ml_log.py)
     migrated_from: str = ""                                  # "" or the old format (not saved)
@@ -135,7 +131,9 @@ class Project:
                 alarm_profiles=d.get("alarm_profiles", []),
                 alarm_settings={**cls().alarm_settings, **d.get("alarm_settings", {})},
                 variables=d.get("variables", []), virtual_tags=d.get("virtual_tags", []),
-                aggregations=d.get("aggregations", []), groups=list(d.get("groups", [])), collections=list(d.get("collections", [])), quick_hidden=d.get("quick_hidden", []),
+                aggregations=d.get("aggregations", []), groups=list(d.get("groups", [])), enterprise=str(d.get("enterprise", "")),
+                assets=[x for x in d.get("assets", []) if isinstance(x, dict) and "type" in x],
+                asset_templates=list(d.get("asset_templates", [])), quick_hidden=d.get("quick_hidden", []),
                 ml_log={**mlg.new_settings(), **d.get("ml_log", {})}, migrated_from=migrated)
         if "logging_profiles" not in d:          # v5 file: its one format becomes a profile
             p.logging_profiles = [{**new_log_profile("signal", "Waveform"), "format": p.logging.format,
@@ -160,9 +158,11 @@ class Project:
             vt.normalize_virtual(x)
         for x in p.aggregations:                 # files before Aggregation tags: none
             agg.normalize_aggregation(x)
-        for x in p.collections:
-            tc.normalize_collection(x)
-        tc.migrate(p, d.get("assets"))           # Assets / Tags groups of older files -> Equipment collections
+        for x in p.assets:
+            am.normalize_asset(x)
+        for x in p.asset_templates:
+            am.normalize_template(x)
+        am.migrate(p, d)                         # Collections / 2.x Assets / Tags groups of older files -> assets
         p.views = [y for x in p.views for y in split_tabs(x)]   # early v7 tabs -> separate views
         for x in p.views:                        # free-form views -> grid, new tile properties
             normalize_view(x)
