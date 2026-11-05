@@ -77,10 +77,10 @@ class ChannelPicker(QWidget):
         self.by_tag.setChecked(True)
         self.by_tag.clicked.connect(lambda: self._mode(False))
         self.by_col.clicked.connect(lambda: self._mode(True))
-        for b in (self.by_tag, self.by_col):
-            b.setVisible(bool(self.cols))
         top.addWidget(self.filter, 1)
-        v.addLayout(top)
+        v.addLayout(top)                                 # parented first: a parentless widget made
+        for b in (self.by_tag, self.by_col):             # visible opens as its own little window
+            b.setVisible(bool(self.cols))
         v.addWidget(self.tree, 1)
         self.atree = QTreeWidget(); self.atree.setHeaderHidden(True); self.atree.setUniformRowHeights(True)
         self.atree.setMinimumHeight(150); self.atree.hide()

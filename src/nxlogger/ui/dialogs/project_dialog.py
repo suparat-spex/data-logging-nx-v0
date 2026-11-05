@@ -38,11 +38,14 @@ class ProjectDialog(QDialog):
         self.folder = QLineEdit(project.logging.folder)
         browse = QPushButton("Browse..."); browse.clicked.connect(self._browse)
         row = QHBoxLayout(); row.addWidget(self.folder, 1); row.addWidget(browse)
-        f2.addRow("Log folder", row)
+        f2.addRow("Default log folder", row)
+        used = [pr["name"] for pr in project.logging_profiles
+                if not (pr.get("output") or {}).get("folder")]
+        f2.addRow("", label(f"Used by {len(used)} logging profile(s)" + (f": {', '.join(used[:4])}" if used else "")
+                            + " - a profile can have its own folder (its pop-up > Output).", muted=True, small=True))
         if folder_locked:
             self.folder.setEnabled(False); browse.setEnabled(False)
             f2.addRow("", label("Stop recording to change the log folder.", muted=True, small=True))
-        f2.addRow("", label("Each recording is a new session folder inside the log folder.", muted=True, small=True))
         for k, n in counts.items():
             f2.addRow(k, label(str(n), muted=True))
         tabs.addTab(w2, "Files")

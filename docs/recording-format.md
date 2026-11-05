@@ -9,11 +9,35 @@ between NX Logger (writer) and the NX Viewer (reader).
 ```
 <log folder>/<project>_<yyyymmdd_hhmmss>/
   project.json                 session index (below) - read this first
-  <profile>_<device>.csv       data profile, number-tag or waveform device
-  <profile>_<device>.wpk       data profile, raw waveform packets (WPK format / keep raw)
-  <profile>_<device>.csv       statistic profile (one row per interval)
-  <profile>_Variables_<device>[ stats].csv   calculated tags (variables)
+  <profile>_<device>.csv       interval profile, number-tag or waveform device
+  <profile>_<device>.wpk       interval profile, raw waveform packets (WPK format / keep raw)
+  <profile>_<device>.csv       on change / trigger / batch / statistic profile
+  <profile>_<device>_summary.csv   batch profile: one row per batch
+  <profile>.csv                event profile: one row per event
+  <profile>_Variables_<device>[ stats].csv   calculated tags (variables of older projects)
 ```
+
+Each logging profile chooses its own folder ("" = the project's default) and layout
+(core/log_files.py): the session folder above (older profiles, and the default for none), or
+date folders (`{yyyy}`, `{yyyy}/{MM}`, `{yyyy}/{MM}/{dd}`, `{yyyy}-{MM}-{dd}` or a custom pattern)
+with a new file per hour / day / week / month / N MB / run or batch:
+
+```
+<profile folder>/2026/11/05/
+  Data_1_s_Energy_meters_20261105.csv     one file a day (periods are local time, [start, end))
+  Data_1_s_Energy_meters_20261105_2.csv   the same name with other columns
+  index.json                              the files written here (merged over sessions)
+```
+
+- A file of the same name and the same columns gets the rows **appended** (Record stopped and
+  started on the same day); other columns: `_2`, `_3` ... Every N MB: `_001`, `_002` ...
+- A statistics row belongs to its interval start (the 23:45 row of a daily file stays in that day).
+- `index.json`: `{"app", "index_format": 1, "files": [{file, profile, type, device, format,
+  interval_s, period_start, session_id}]}`.
+- The session folder `<default folder>/<project>_<yyyymmdd_hhmmss>/project.json` is always
+  written: `session_id`, every profile with its `folder`, and every file of the run (`file`:
+  relative to the session folder, or an absolute path for files elsewhere).
+- Closed files can be compressed (`.zst`, or `.gz` without zstd): read with `recording.open_any`.
 
 Names go through `recording.safe_name` (letters, digits, `_`, `-`).
 
@@ -26,14 +50,14 @@ Names go through `recording.safe_name` (letters, digits, `_`, `-`).
 | `start`, `start_unix`, `end`, `duration_s` | session time (local ISO / Unix seconds) |
 | `running` | `true` while recording - a crashed session stays `true` |
 | `devices` | `[{id, name, topic, driver, virtual, channels: [{index, name, unit}]}]`; `virtual` = no raw packets (number tags, variables) |
-| `files` | `[{file, profile, type, device_id, device, format, interval_s}]` - which file holds what (`type`: `signal` or `statistic`; `format`: `csv` or `wpk`) |
-| `profiles` | the logging profiles of the run |
+| `files` | `[{file, profile, type, device_id, device, format, interval_s}]` - which file holds what (`type`: `interval`, `change`, `trigger`, `batch`, `event` or `statistic` - `signal` in sessions before 2.3 = `interval`; `format`: `csv` or `wpk`) |
+| `profiles` | the logging profiles of the run (`type`, `when`: core/log_types.py) |
 | `packets`, `samples_per_channel`, `dropped`, `error` | written at Stop |
 
 `topics` holds the same list as `devices` (name used by MQDAQ / SX Logger sessions,
 `session_format` 1).
 
-### Data CSV (`type: signal`)
+### Data CSV (`type: interval`, `change`)
 
 ```
 # project: Plant A
@@ -50,6 +74,32 @@ time_unix_s,t_rel_s,Temperature [°C],Pressure [bar],Setpoint
   Values are **scaled engineering values**.
 - Number-tag devices: one row per scan. Waveform devices: one row per sample.
 - `nan` = bad quality (read error, not received, not a number).
+
+Interval with `every_s`: the first value of each N-second period. On change: a row when any
+column moved more than the deadband (absolute or % of the last written value), at least
+every heartbeat - every column is written in that row.
+
+### Trigger / batch CSV (`type: trigger`, `batch`)
+
+```
+time_unix_s,t_rel_s,run,Comp1_kW [kW],Comp1_PF
+1792838887.000000,0.000000,Run 1,54.2,0.86
+```
+
+Rows only while the trigger / batch is on (`run`: Run 1, 2 ... / `batch`: the batch name, the
+batch-name tag's value or the shift start "2026-11-05 06:00"). Trigger: the pre-trigger seconds
+before the start and the post-trigger seconds after the stop. Batch: `<file>_summary.csv` with
+`batch,start,end,duration_s,samples,<tag> Mean [unit],...` - one row per batch.
+
+### Event CSV (`type: event`)
+
+```
+time,time_unix_s,event,Energy meters · Main_kW [kW],Virtual · Cost_THB_h [THB/h]
+2026-11-05T09:14:02.120,1793873642.120,L1 H Peak demand (Demand_15min),812.4,3398.1
+```
+
+One row per event (an alarm coming in, a condition becoming true, a time of day, a Marker);
+the values as shown in the app (text tags as text).
 
 ### Statistic CSV (`type: statistic`)
 

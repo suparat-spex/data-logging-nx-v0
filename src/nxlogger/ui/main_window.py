@@ -23,8 +23,8 @@ NX Logger (tag-based data logger, Yokogawa GA10 / Genesis64 / FUXA style):
 
 Layout:
   * Left:   "Project" dock (navigator tree) and "Data" dock (recorded sessions)
-  * Centre: closable document tabs - Start Page, Connectivity, Tags, Logging, Alarms, (Quick View),
-            Variables, Views
+  * Centre: closable document tabs - Start Page, Connectivity, Tags, Assets, Logging, Alarms,
+            (Quick View), Views
   * Right:  "Properties" dock; bottom: "Log" dock
 Responsive (by window width): wide >= 1500 px, medium 1180-1500, compact < 1180 (the
 Properties panel auto-hides, icon-only toolbar, short tab names).
@@ -55,9 +55,9 @@ import numpy as np
 from PySide6.QtCore import QEvent, QObject, QSettings, QSize, QTimer, QUrl, Qt
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDockWidget,
-                               QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
+                               QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox,
-                               QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
+                               QPlainTextEdit, QSizePolicy, QStackedWidget,
                                QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 import pyqtgraph as pg
 
@@ -65,6 +65,8 @@ from nxlogger import APP_NAME, __version__, config, paths
 from nxlogger.comms.manager import DriverManager
 from nxlogger.core import aggregation as ag
 from nxlogger.core import assets as am
+from nxlogger.core import log_files as lf
+from nxlogger.core import log_types as lt
 from nxlogger.core import alarm_rules as ar
 from nxlogger.core import analysis as an
 from nxlogger.core import channel_math as cm
@@ -106,7 +108,6 @@ from nxlogger.ui.dialogs.pick_dialog import PickDialog
 from nxlogger.ui.dialogs.project_dialog import ProjectDialog
 from nxlogger.ui.dialogs.tag_dialog import TagDialog
 from nxlogger.ui.dialogs.tile_dialog import TileDialog
-from nxlogger.ui.dialogs.variable_dialog import VariableDialog
 from nxlogger.ui.dialogs.virtual_tag_dialog import VirtualTagDialog
 from nxlogger.ui.dialogs.view_dialog import ViewDialog
 from nxlogger.ui.dialogs.write_value_dialog import WriteValueDialog
@@ -125,7 +126,7 @@ from nxlogger.ui.widgets.start_page import StartPage, show_at_startup
 from nxlogger.ui.widgets.form_tab import FormTab
 from nxlogger.ui.widgets.property_grid import PropertiesPanel
 from nxlogger.ui.widgets.tags_page import CATEGORIES as TAG_CATEGORIES, TagsPage
-from nxlogger.ui.widgets.variables_panel import VariablesPage
+from nxlogger.ui.widgets.logging_page import LoggingPage
 
 
 # AI/ML data log event markers: (events.csv type, menu text)
@@ -148,7 +149,7 @@ CHIP_W = 132                    # status chips keep one width whatever the text
 
 
 # ======================================================================= window
-HEADER_NODES = ("project", "doc", "conncat", "asset", "templates", "tagsroot", "alarms", "vars", "views")   # Project tree sections: no right-click menu
+HEADER_NODES = ("project", "doc", "conncat", "asset", "templates", "tagsroot", "logtype", "alarms", "views")   # Project tree sections: no right-click menu
 
 
 class _NoFlash(QObject):
@@ -272,7 +273,7 @@ class DaqWindow(AppWindow):
         self._ml_update_ui()
         self.theme_listeners.append(lambda: (setattr(self, "_alarm_level", None),
                                              self._update_alarm_indicator(), self.alarm_page.refresh(),
-                                             self.var_page.refresh(), self.tags_page.refresh(),
+                                             self.logging_page.refresh(), self.tags_page.refresh(),
                                              self.conn_page.refresh(),
                                              self.props.refresh_icons()))
         QApplication.instance().installEventFilter(self._noflash)   # dialogs: no white flash
@@ -421,7 +422,6 @@ class DaqWindow(AppWindow):
         self.act_stop.setEnabled(False)
         self.act_alarms = self.act("Alarms", lambda: self._show_doc("alarms"), "Ctrl+4", None)
         self.act_alarms.setIcon(make_icon("bell", T["text"]))
-        self.act_vars = self.act("Variables", lambda: self._show_doc("variables"), "Ctrl+5", "variable")
         self.act_ml = self.act("AI/ML data log", self._ml_toggle, "Ctrl+Shift+A", "brain-circuit")
         self.act_ml.setCheckable(True)
         self.act_ml_settings = self.act("AI/ML data log settings...", self._ml_settings, None, "sliders")
@@ -444,13 +444,11 @@ class DaqWindow(AppWindow):
                   self.act("Tags", lambda: self._show_doc("tags"), "Ctrl+6", "tag"),
                   self.act("Logging", lambda: self._show_doc("logging"), "Ctrl+3", "file-text"),
                   self.act_alarms,
-                  self.act_vars,
                   None,
                   add_dev,
                   self.act("Add tag", self._add_tag_current, "Ctrl+T", "tag"),
-                  self.act("Add variable...", lambda: self._var_action("add"), None, "function-square"),
                   self.act("Add alarm...", lambda: self._alarm_action("add"), "Ctrl+Shift+M", "bell"),
-                  self.act("Add logging profile...", lambda: self._add_log_profile("signal"), None, "file-plus"),
+                  self.act("Add logging profile...", lambda: self.add_log_profile("interval"), None, "file-plus"),
                   self.act("New view...", self._new_view, "Ctrl+Shift+N", "layout"),
                   None,
                   self.act("Open recordings folder", self._open_log_folder, None, "folder-open")):
@@ -574,9 +572,8 @@ class DaqWindow(AppWindow):
                 ("connectivity", self._build_connectivity(), "Connectivity", "Devices", "network"),
                 ("tags", self._build_tags(), "Tags", "Tags", "tag"),
                 ("assets", self._build_assets(), "Assets", "Assets", "boxes"),
-                ("logging", self._build_logging_spec(), "Logging", "Logging", "file-text"),
-                ("alarms", self._build_alarms(), "Alarms", "Alarms", "bell"),
-                ("variables", self._build_variables(), "Variables", "Vars", "variable")):
+                ("logging", self._build_logging(), "Logging", "Logging", "file-text"),
+                ("alarms", self._build_alarms(), "Alarms", "Alarms", "bell")):
             self.docs[key] = (w, title, short, icon)
         # at startup only one tab: the Start Page (or Connectivity when it is switched off) - the
         # other documents open when used (Project tree, menus, buttons: _show_doc adds the tab)
@@ -656,104 +653,13 @@ class DaqWindow(AppWindow):
         self.tags_page = TagsPage(self)
         return self.tags_page
 
-    def _build_logging_spec(self):
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(16, 14, 16, 14); v.setSpacing(10)
-        v.addWidget(label("Logging", name="h1"))
-        intro = label("Each Record run creates a new session folder inside the log folder, "
-                      "containing the data files and project.json (configuration, start/end "
-                      "time, value counts). Only enabled devices and tags are logged.",
-                      muted=True)
-        intro.setWordWrap(True)
-        v.addWidget(intro)
-        v.addWidget(label("Test properties", name="sectionTitle"))
-        pf = QFormLayout(); pf.setSpacing(8)
-        self.p_name = QLineEdit()
-        self.p_operator = QLineEdit(); self.p_operator.setPlaceholderText("optional")
-        self.p_desc = QPlainTextEdit(); self.p_desc.setPlaceholderText("Test description (saved in the files)")
-        self.p_desc.setMaximumHeight(70)
-        self.p_file = label("Not saved yet", muted=True, small=True)
-        self.p_file.setWordWrap(True)
-        pf.addRow("Project name", self.p_name)
-        pf.addRow("Operator", self.p_operator)
-        pf.addRow("Description", self.p_desc)
-        pf.addRow("Project file", self.p_file)
-        v.addLayout(pf)
-        self.p_name.textEdited.connect(lambda s: self._edit_project("name", s))
-        self.p_operator.textEdited.connect(lambda s: self._edit_project("operator", s))
-        self.p_desc.textChanged.connect(lambda: self._edit_project("description", self.p_desc.toPlainText()))
-        v.addSpacing(6)
-        v.addWidget(label("Files", name="sectionTitle"))
-        f = QFormLayout(); f.setSpacing(8)
-        self.log_folder = QLineEdit()
-        browse = QPushButton("Browse..."); browse.clicked.connect(self._browse_log_folder)
-        row = QHBoxLayout(); row.addWidget(self.log_folder, 1); row.addWidget(browse)
-        f.addRow("Log folder", row)
-        v.addLayout(f)
-        v.addSpacing(6)
-        v.addWidget(label("Logging profiles", name="sectionTitle"))
-        bar = QFrame(); bar.setObjectName("subBar")
-        bl = QHBoxLayout(bar); bl.setContentsMargins(6, 3, 6, 3); bl.setSpacing(4)
-        self.lp_btns = []
-        for text, icon, slot in (("Add data", "activity", lambda: self._add_log_profile("signal")),
-                                 ("Add statistic", "sigma", lambda: self._add_log_profile("statistic")),
-                                 ("Add variable", "function-square", None),
-                                 ("Edit", "pencil", lambda: self._edit_log_profile()),
-                                 ("Duplicate", "copy", lambda: self._dup_log_profile()),
-                                 ("Delete", "trash", lambda: self._delete_log_profile())):
-            b = QToolButton(); b.setText(text)
-            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            self.reg_icon(b, icon)
-            if slot:
-                b.clicked.connect(slot)
-            else:                                    # Add variable: logged by "All tags" profiles
-                b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-                b.setToolTip("Add a calculated tag (variable) - it is logged by profiles set to "
-                             "'All enabled tags', or tick it in a profile")
-                vm_ = QMenu(b)
-                for k, txt in vr.KINDS.items():
-                    vm_.addAction(txt + "...", lambda kk=k: self.var_page.add_variable(kk))
-                b.setMenu(vm_)
-            bl.addWidget(b); self.lp_btns.append(b)
-        bl.addStretch(1)
-        bl.addWidget(label("tick = enabled · double-click to edit", muted=True, small=True))
-        self.lp_tree = QTreeWidget()
-        self.lp_tree.setHeaderLabels(["Profile", "Type", "Format", "Tags", "Details"])
-        self.lp_tree.setRootIsDecorated(False)
-        self.lp_tree.setAlternatingRowColors(True)
-        self.lp_tree.setMinimumHeight(120)
-        for c, wd in enumerate((180, 90, 70, 150)):
-            self.lp_tree.header().resizeSection(c, wd)
-        self.lp_tree.itemDoubleClicked.connect(lambda *_: QTimer.singleShot(0, self._edit_log_profile))
-        self.lp_tree.itemChanged.connect(self._lp_toggled)
-        self.lp_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.lp_tree.customContextMenuRequested.connect(self._lp_menu)
-        box = QVBoxLayout(); box.setSpacing(0)
-        box.addWidget(bar); box.addWidget(self.lp_tree, 1)
-        v.addLayout(box, 1)
-        f2 = QFormLayout(); f2.setSpacing(8)
-        self.session_preview = label("", muted=True, small=True)
-        self.session_preview.setWordWrap(True)
-        self.session_preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        f2.addRow("Session files", self.session_preview)
-        v.addLayout(f2)
-        self.fmt_help = label("", muted=True, small=True)
-        self.fmt_help.setWordWrap(True)
-        v.addWidget(self.fmt_help)
-        self.log_folder.textEdited.connect(lambda s: self._edit_logging("folder", s))
-        sc = QScrollArea(); sc.setWidgetResizable(True); sc.setWidget(w)   # short laptop screens
-        sc.setFrameShape(QFrame.Shape.NoFrame)
-        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        return sc
+    def _build_logging(self):
+        self.logging_page = LoggingPage(self)
+        return self.logging_page
 
     def _build_alarms(self):
         self.alarm_page = ap.AlarmPage(self)
         return self.alarm_page
-
-    def _build_variables(self):
-        self.var_page = VariablesPage(self)
-        return self.var_page
 
     # ---------------------------------------------------------------- right docks: Properties, Runtime
     def build_docks(self):
@@ -825,6 +731,10 @@ class DaqWindow(AppWindow):
             kind = ref[0]
             if kind == "device":
                 t = props.device_target(self, ref[1])
+            elif kind == "lprof":
+                t = props.log_profile_target(self, ref[1])
+            elif kind == "logtype":
+                t = props.log_type_target(self, ref[1])
             elif kind == "asset":
                 t = props.asset_target(self, ref[1])
             elif kind == "template":
@@ -865,7 +775,8 @@ class DaqWindow(AppWindow):
         k = self._prop_key
         if not k:
             return
-        if k[0] in ("device", "asset", "template", "enterprise", "tag", "tags", "project", "vt", "agg"):
+        if k[0] in ("device", "asset", "template", "enterprise", "lprof", "logtype", "tag", "tags", "project",
+                    "vt", "agg"):
             ref = k if k[0] != "tags" else ("tags", k[1], list(k[2]))
             self.select_object(ref)
         elif k[0] in ("view", "tile"):
@@ -902,11 +813,6 @@ class DaqWindow(AppWindow):
             self._close_editors()                # editors of the old project
         self.project, self.project_path = p, path
         self._loading = True
-        self.p_name.setText(p.name)
-        self.p_operator.setText(p.operator)
-        self.p_desc.setPlainText(p.description)
-        self.p_file.setText(_brk(path) if path else "Not saved yet")
-        self.log_folder.setText(p.logging.folder)
         self._loading = False
         self.streams.clear(); self.t_ref = None; self._scan_seq.clear()
         self.variable_engine.reset()
@@ -921,7 +827,7 @@ class DaqWindow(AppWindow):
         self._update_title()
         self._refresh_sessions()
         self._load_views()
-        self.var_page.refresh()
+        self.logging_page.show_type(None)
         self.tags_page.refresh(())
         self.conn_page.refresh([])
         if hasattr(self, "assets_page"):
@@ -951,15 +857,6 @@ class DaqWindow(AppWindow):
         if root is not None:
             root.setText(0, root.text(0).removesuffix(" *") + (" *" if self.dirty else ""))
 
-    def _edit_project(self, key, value):
-        if self._loading:
-            return
-        setattr(self.project, key, value)
-        self._mark_dirty()
-        self._update_logging_help()
-        if key == "name":
-            self._rebuild_project_tree()
-
     def project_counts(self) -> dict:
         p = self.project
         return {"Devices": len(p.devices), "Tags": sum(len(d.tags) for d in p.devices),
@@ -987,7 +884,6 @@ class DaqWindow(AppWindow):
                     self._rebuild_project_tree()
                     self.assets_page.refresh()
         if r["folder"] != p.logging.folder and not self.recording:
-            self.log_folder.setText(r["folder"])
             self._edit_logging("folder", r["folder"])
             changed = True
         if changed:
@@ -1000,12 +896,7 @@ class DaqWindow(AppWindow):
         self.show_properties(props.project_target(self))
 
     def project_props_changed(self, key):
-        """Edited in the Properties panel: mirror into the Logging page."""
-        self._loading = True
-        self.p_name.setText(self.project.name); self.p_operator.setText(self.project.operator)
-        if key == "description":
-            self.p_desc.setPlainText(self.project.description)
-        self._loading = False
+        """The project's name / description changed: the title, the tree, the session file names."""
         self._update_logging_help()
         self._update_title()
         self._rebuild_project_tree()
@@ -1234,7 +1125,6 @@ class DaqWindow(AppWindow):
         self.project.migrated_from = ""
         self.banners.dismiss("proj")
         self._update_title()
-        self.p_file.setText(_brk(self.project_path))
         self._rebuild_project_tree()
         self.toast.popup("Project saved")
         return True
@@ -1533,40 +1423,6 @@ class DaqWindow(AppWindow):
                            self._delete_action(spec, delete, exists)]
         return spec
 
-    # ---- variables
-    def _spec_variable(self, vid, kind: str = "formula", source=None):
-        new = vid is None
-        if new:
-            base = {"formula": "Calc", "statistic": "Stat", "process": "Proc"}[kind]
-            v = vr.new_variable(kind, self.var_page._unique_name(base))
-            ch = self.channel_choices()
-            if kind != "formula" and ch:
-                v["source"] = list(source or ch[0][:2])
-        else:
-            v = next((x for x in self.project.variables if x["id"] == vid), None)
-            if v is None:
-                return None
-        spec = {"key": f"edit:variable:{v['id']}", "title": v["name"], "icon": "variable",
-                "path": f"Project / Variables / {v['name']}", "kind": f"{vr.KINDS.get(v['kind'], '')} variable",
-                "is_new": new, "locked": self._locked_reason}
-        spec["build"] = lambda: VariableDialog(self, v, self.variable_engine, self.channel_choices())
-
-        def apply(dlg):
-            res = dlg.result_variable()
-            v.clear(); v.update(res)
-            if spec["is_new"]:
-                self.project.variables.append(v)
-            self.variables_changed()
-            spec["tab"].set_identity(f"edit:variable:{v['id']}", v["name"], f"Project / Variables / {v['name']}")
-            return True
-        spec["apply"] = apply
-        spec["new"] = lambda: self.open_editor("variable", None, kind=v["kind"])
-        exists = lambda: any(x is v for x in self.project.variables)               # noqa: E731
-        spec["actions"] = [("Add alarm", "bell", lambda: self.add_alarm_for(vr.var_key(v["id"])) if exists() else None),
-                           self._delete_action(spec, lambda: (self.var_page.select(v["id"]),
-                                                              self.var_page.delete_variable()), exists)]
-        return spec
-
     # ---- views and their components
     def _spec_mllog(self, _ident):
         spec = {"key": "edit:mllog", "title": "AI/ML data log", "icon": "brain-circuit",
@@ -1584,43 +1440,6 @@ class DaqWindow(AppWindow):
         spec["apply"] = apply
         spec["actions"] = [("Start / stop log", "brain-circuit", lambda: self._ml_toggle(self.ml_logger is None)),
                            ("Open data folder", "folder-open", self._ml_open_folder)]
-        return spec
-
-    # ---- logging profiles
-    def _spec_lprofile(self, pid, kind: str = "signal"):
-        new = pid is None
-        if new:
-            base = "Data" if kind == "signal" else "Statistics"
-            taken = {x["name"] for x in self.project.logging_profiles}
-            pr = new_log_profile(kind, next(n for n in [base] + [f"{base} {i}" for i in range(2, 99)]
-                                            if n not in taken))
-        else:
-            pr = self._log_profile(pid)
-            if pr is None:
-                return None
-        spec = {"key": f"edit:lprofile:{pr['id']}", "title": pr["name"], "icon": "file-text",
-                "path": f"Project / Logging / {pr['name']}",
-                "kind": "statistic logging profile" if pr["type"] == "statistic" else "data logging profile",
-                "is_new": new, "locked": self._locked_reason, "section": "Logging profile"}
-
-        def build():
-            taken = {dl.safe_name(x["name"]).lower() for x in self.project.logging_profiles if x["id"] != pr["id"]}
-            return LogProfileDialog(self, pr, self.channel_choices(), taken, add_variable=self._new_variable_key)
-        spec["build"] = build
-
-        def apply(dlg):
-            res = dlg.result_profile()
-            pr.clear(); pr.update(res)
-            if spec["is_new"]:
-                self.project.logging_profiles.append(pr)
-            self._log_profiles_changed()
-            self._select_log_profile(pr["id"])
-            spec["tab"].set_identity(f"edit:lprofile:{pr['id']}", pr["name"], f"Project / Logging / {pr['name']}")
-            return True
-        spec["apply"] = apply
-        spec["new"] = lambda: self.open_editor("lprofile", None, kind=pr["type"])
-        exists = lambda: any(x is pr for x in self.project.logging_profiles)      # noqa: E731
-        spec["actions"] = [self._delete_action(spec, lambda: self._delete_log_profile(pr["id"]), exists)]
         return spec
 
     # ================================================================ devices + tags (host API)
@@ -2217,14 +2036,17 @@ class DaqWindow(AppWindow):
                   ("templates", None), "What a kind of machine has: attributes, units, KPIs")
         ti.setForeground(0, muted)
         logn = node(root, "Logging", make_icon("file-text", T["text"]), ("doc", "logging"),
-                    "Test properties, log folder and logging profiles")
+                    "Logging profiles by type and the log folder")
+        counts = {k: 0 for k in lt.TYPE}
         for pr in self.project.logging_profiles:
-            stat = pr["type"] == "statistic"
-            li = node(logn, pr["name"], make_icon("sigma" if stat else "activity", T["muted"]), ("lprof", pr["id"]),
-                      (f"Statistic · every {fmt_interval(pr['interval_s'])}" if stat else "Data")
-                      + f" · {pr['format']}" + ("" if pr["enabled"] else " · disabled"))
-            if not pr["enabled"]:
+            counts[lt.type_of(pr)] += 1
+        self.nav_logtypes = {}
+        for k, name, icon, what in lt.TYPES:            # the types, one level - profiles in the document
+            li = node(logn, f"{name}  ({counts[k]})", make_icon(icon, T["text" if counts[k] else "muted"]),
+                      ("logtype", k), what)
+            if not counts[k]:
                 li.setForeground(0, muted)
+            self.nav_logtypes[k] = li
         self.nav_alarms = node(root, "Alarms", make_icon("bell", T["text"]), ("alarms",),
                                "4-level alarms, active list, alarm log - right-click to add")
         self.ptree_alarms = {}
@@ -2243,16 +2065,6 @@ class DaqWindow(AppWindow):
                       + ("" if pf["enabled"] else "  ·  disabled"))
             if not pf["enabled"]:
                 pi.setForeground(0, muted)
-        varn = node(root, "Variables", make_icon("variable", T["text"]), ("vars",),
-                    "Calculated tags: formulas, statistics, signal processing - right-click to add")
-        for v in self.project.variables:
-            err = self.variable_engine.errors.get(v["id"])
-            vi = node(varn, v["name"], swatch(self.var_color(v)), ("var", v["id"]),
-                      vr.describe(v) + (f"\n{err}" if err else "") + ("" if v["enabled"] else "  ·  disabled"))
-            if not v["enabled"]:
-                vi.setForeground(0, muted)
-            elif err:
-                vi.setForeground(0, QBrush(QColor(T["bad"])))
         views = node(root, "Views", make_icon("layout", T["text"]), ("views",),
                      "Screens: headers, trends, numbers, gauges, tables on a snap grid - right-click for New view")
         for vw in self.project.views:
@@ -2260,7 +2072,7 @@ class DaqWindow(AppWindow):
 
         def expand(it):
             d = tuple(it.data(0, Qt.ItemDataRole.UserRole) or ())
-            if d in expanded or (first and d and d[0] in ("project", "doc", "tagsroot", "alarms", "vars",
+            if d in expanded or (first and d and d[0] in ("project", "doc", "tagsroot", "alarms",
                                                           "views")):
                 it.setExpanded(True)
             for i in range(it.childCount()):
@@ -2327,6 +2139,9 @@ class DaqWindow(AppWindow):
             return
         if d[0] == "doc":
             self._show_doc(d[1])
+            if d[1] == "logging":                    # the node itself: every profile
+                self.logging_page.show_type(None)
+                self.logging_page.activate()
             if d[1] == "assets":                     # the node itself: the Enterprise
                 self.assets_page.show_enterprise()
                 self.assets_page.activate()
@@ -2361,15 +2176,10 @@ class DaqWindow(AppWindow):
         elif d[0] == "tag":
             self.tags_page.select_tag(d[1], d[2])
             self.select_object(("tag", d[1], d[2]))
-        elif d[0] == "lprof":
-            self._select_log_profile(d[1])
-            pr = self._log_profile(d[1])
-            if pr:
-                self.show_properties(props.simple_target(
-                    pr["name"], "file-text", "Logging profile - double-click to edit",
-                    {"Type": "Statistic" if pr["type"] == "statistic" else "Data", "Format": pr["format"],
-                     "Enabled": "Yes" if pr["enabled"] else "No"},
-                    [("Edit...", "pencil", lambda: self._edit_log_profile(d[1]))], key=("lprof", d[1])))
+        elif d[0] == "logtype":                      # one logging type: its profiles
+            self._show_doc("logging")
+            self.logging_page.show_type(d[1])
+            self.logging_page.activate()
         elif d[0] == "alarms":
             self._show_doc("alarms")
             self.alarm_page.tabs.setCurrentIndex(0)
@@ -2380,10 +2190,6 @@ class DaqWindow(AppWindow):
                 self.alarm_page.select_profile(d[1])
             else:
                 self._show_doc("alarms"); self.alarm_page.tabs.setCurrentIndex(3)
-        elif d[0] == "vars":
-            self._show_doc("variables")
-        elif d[0] == "var":
-            self.var_page.select(d[1])
 
     def _nav_double_clicked(self, it, _col):
         """Double-click opens the item's editor tab (no pop-up)."""
@@ -2393,10 +2199,8 @@ class DaqWindow(AppWindow):
         go = {"device": lambda: self.edit_device(d[1]),
               "tag": lambda: self.edit_tag(d[1], d[2]),
               "asset": lambda: self.edit_asset(d[1]),
-              "lprof": lambda: self.open_editor("lprofile", d[1]),
               "alarm": lambda: self.open_editor("alarm", d[1]),
-              "aprof": lambda: self.open_editor("aprofile", d[1]),
-              "var": lambda: self.open_editor("variable", d[1])}.get(d[0])
+              "aprof": lambda: self.open_editor("aprofile", d[1])}.get(d[0])
         if go:
             QTimer.singleShot(0, go)             # editors rebuild trees: not inside the click
 
@@ -2435,7 +2239,6 @@ class DaqWindow(AppWindow):
                     if t.access == "RW":
                         m.addAction("Write value...", lambda: self.write_tag(d[1], d[2]))
                 m.addAction("Add alarm for this tag...", lambda: self.add_alarm_for((d[1], d[2])))
-                m.addAction("Add statistic variable of this tag...", lambda: self._var_action("add", [d[1], d[2]]))
                 m.addAction("Delete tag", lambda: self.delete_tags(d[1], [d[2]]))
                 m.addSeparator()
             if did is not None:
@@ -2455,17 +2258,6 @@ class DaqWindow(AppWindow):
                 m.addAction("Delete view", lambda: self.delete_view(page))
                 m.addSeparator()
             m.addAction("New view...", self._new_view)
-        elif d[0] == "lprof" or tuple(d[:2]) == ("doc", "logging"):
-            if d[0] == "lprof":
-                pr = self._log_profile(d[1])
-                m.addAction("Edit profile...", later(lambda: self.open_editor("lprofile", d[1])))
-                if pr:
-                    m.addAction("Disable" if pr["enabled"] else "Enable", lambda: self._toggle_log_profile(d[1]))
-                m.addAction("Duplicate", lambda: self._dup_log_profile(d[1]))
-                m.addAction("Delete profile", lambda: self._delete_log_profile(d[1]))
-                m.addSeparator()
-            m.addAction("New data profile...", lambda: self._add_log_profile("signal"))
-            m.addAction("New statistic profile...", lambda: self._add_log_profile("statistic"))
         elif d[0] in ("alarms", "alarm", "aprofs", "aprof"):
             pg_ = self.alarm_page
             if d[0] == "alarm":
@@ -2487,19 +2279,6 @@ class DaqWindow(AppWindow):
                     add.addAction(text, lambda kk=k: self.open_editor("aprofile", None, kind=kk))
             else:
                 m.addAction("New alarm...", later(lambda: self.open_editor("alarm", None)))
-        elif d[0] in ("vars", "var"):
-            vp = self.var_page
-            if d[0] == "var":
-                v = next((x for x in self.project.variables if x["id"] == d[1]), None)
-                m.addAction("Edit variable...", later(lambda: self.open_editor("variable", d[1])))
-                m.addAction("Disable" if v and v["enabled"] else "Enable", lambda: vp.toggle(d[1]))
-                m.addAction("Delete variable", lambda: (vp.select(d[1]), vp.delete_variable()))
-                m.addAction("Add alarm for this variable...",
-                            lambda: self._alarm_action("add", list(vr.var_key(d[1]))))
-                m.addSeparator()
-            add = m.addMenu("New variable")
-            for k, text in vr.KINDS.items():
-                add.addAction(text + "...", lambda kk=k: self.open_editor("variable", None, kind=kk))
         else:
             add = m.addMenu("Add device")
             for k, dd in DRIVERS.items():
@@ -2511,28 +2290,37 @@ class DaqWindow(AppWindow):
                 ("Add alarm", "Connect", "Disconnect", "Write", "Export", "Edit"))))
         m.exec(self.ptree.viewport().mapToGlobal(pos))
 
+    def _log_bases(self) -> list[str]:
+        """Every folder the profiles write to (the default first)."""
+        out = [self.project.logging.folder]
+        for pr in self.project.logging_profiles:
+            f = lf.normalize_output(copy.deepcopy(pr))["folder"]
+            if f and f not in out:
+                out.append(f)
+        return out
+
     def _refresh_sessions(self):
         tree = getattr(self, "stree", None)
         if tree is None:
             return
         tree.clear()
-        folder = self.project.logging.folder
         rows = []
-        try:
-            entries = [e for e in os.scandir(folder) if e.is_dir()]
-        except OSError:
-            entries = []
-        for e in entries:
-            pj = os.path.join(e.path, "project.json")
-            if not os.path.isfile(pj):
-                continue
+        for folder in self._log_bases():
             try:
-                with open(pj, encoding="utf-8") as f:
-                    info = json.load(f)
-            except (OSError, ValueError):
-                continue
-            rows.append((info.get("start_unix", 0), e, info))
-        for start, e, info in sorted(rows, key=lambda r: r[0], reverse=True):
+                entries = [e for e in os.scandir(folder) if e.is_dir()]
+            except OSError:
+                entries = []
+            for e in entries:
+                pj = os.path.join(e.path, "project.json")
+                if not os.path.isfile(pj):
+                    continue
+                try:
+                    with open(pj, encoding="utf-8") as f:
+                        info = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                rows.append((info.get("start_unix", 0), e, info))
+        for start, e, info in sorted(rows, key=lambda r: r[0], reverse=True)[:200]:
             running = info.get("running")
             dur = "recording..." if running else time.strftime("%H:%M:%S", time.gmtime(info.get("duration_s", 0)))
             it = QTreeWidgetItem([info.get("project", {}).get("name", e.name),
@@ -2546,11 +2334,24 @@ class DaqWindow(AppWindow):
             if running:
                 it.setIcon(0, self._dot("bad"))
             tree.addTopLevelItem(it)
-        if not rows:
+        dated = 0
+        for pr in self.project.logging_profiles:     # profiles writing into date folders: per profile
+            out = lf.normalize_output(copy.deepcopy(pr))
+            if out["folders"] == "session":
+                continue
+            d = self.profile_folder(pr)
+            base = out["folder"] or self.project.logging.folder
+            it = QTreeWidgetItem([pr["name"], "today" if os.path.isdir(d) else "-", lf.describe(out)])
+            it.setData(0, Qt.ItemDataRole.UserRole, d if os.path.isdir(d) else base)
+            it.setToolTip(0, f"{d}\n{lt.TYPE[lt.type_of(pr)][1]} · {lf.describe(out)} - double-click: today's folder")
+            it.setIcon(0, make_icon("folder", T["muted"]))
+            tree.addTopLevelItem(it)
+            dated += 1
+        if not rows and not dated:
             it = QTreeWidgetItem(["No recordings yet", "", ""])
             it.setForeground(0, QBrush(QColor(T["muted"])))
             it.setFlags(Qt.ItemFlag.NoItemFlags)
-            it.setToolTip(0, folder)
+            it.setToolTip(0, self.project.logging.folder)
             tree.addTopLevelItem(it)
 
     def _session_menu(self, pos):
@@ -2566,7 +2367,6 @@ class DaqWindow(AppWindow):
     def _browse_log_folder(self):
         d = QFileDialog.getExistingDirectory(self, "Log folder", self.project.logging.folder)
         if d:
-            self.log_folder.setText(d)
             self._edit_logging("folder", d)
 
     def _open_log_folder(self):
@@ -2608,108 +2408,115 @@ class DaqWindow(AppWindow):
                             "channels": chans, "virtual": True})
         return out
 
+    def session_files_text(self) -> str:
+        """The Logging footer: what the next Record run writes, and where."""
+        on = [pr for pr in self.project.logging_profiles if pr["enabled"]]
+        if not on:
+            return "No enabled logging profile - Record is not possible"
+        bases = {lf.normalize_output(copy.deepcopy(pr))["folder"] or self.project.logging.folder for pr in on}
+        return (f"Record writes {len(on)} profile(s) into {len(bases)} folder(s) · default folder "
+                f"{self.project.logging.folder} (Project > Edit...) · each profile's folder, date folders and new "
+                "files: its pop-up > Output")
+
     def _update_logging_help(self):
-        lg = self.project.logging
-        name = dl.safe_name(self.project.name)
-        files = ["project.json"]
-        for pr in self.project.logging_profiles:
-            if not pr["enabled"]:
-                continue
-            pn, fmt = dl.safe_name(pr["name"]), pr["format"]
-            topics = self._profile_topics(pr)
-            if not topics:
-                files.append(f"({pr['name']}: no enabled tags)")
-                continue
-            for t in topics:
-                wpk = fmt == "WPK" and not t["virtual"] and pr["type"] == "signal"
-                files.append(f"{pn}_{dl.safe_name(t['name'])}{'.wpk' if wpk else '.csv'}")
-                if pr["type"] == "signal" and pr.get("keep_raw") and fmt != "WPK" and not t["virtual"]:
-                    files.append(f"{pn}_{dl.safe_name(t['name'])}.wpk")
-        if len(files) == 1:
-            files.append("(no enabled logging profile - Record is not possible)")
-        self.session_preview.setText(
-            _brk(f"{os.path.join(lg.folder, name + '_<yyyymmdd_hhmmss>')}{os.sep}") + "\n    " +
-            "\n    ".join(files))
-        self.fmt_help.setText(
-            "Data profiles log every value: CSV with one row per scan for number tags (Excel, pandas, "
-            "NX Viewer), one row per sample for waveforms - or raw .wpk packets for waveform devices "
-            "(smallest, lossless). Statistic profiles log one row per interval with the chosen statistics "
-            "per tag - small files for long-term trends and reports. All enabled profiles run together on "
-            "Record and write into the same session folder; each can use its own tags. The layout is "
-            "described in docs/recording-format.md.")
-        self._fill_log_profiles()
+        if hasattr(self, "logging_page"):
+            self.logging_page.refresh()
 
-    def _fill_log_profiles(self):
-        tree = getattr(self, "lp_tree", None)
-        if tree is None:
-            return
-        names = {(d.id, t.index): t.name for d in self.project.devices for t in d.tags}
-        cur = tree.currentItem().data(0, Qt.ItemDataRole.UserRole) if tree.currentItem() else None
-        locked = self.recorder is not None
-        tree.blockSignals(True); tree.clear()
-        for pr in self.project.logging_profiles:
-            stat = pr["type"] == "statistic"
-            if pr.get("channels") is None:
-                chans = "All enabled"
-            else:
-                ch = [names.get(tuple(x), "?") for x in pr["channels"]]
-                chans = ", ".join(ch[:3]) + (f" +{len(ch) - 3}" if len(ch) > 3 else "")
-            details = (f"every {fmt_interval(pr['interval_s'])} · "
-                       + ", ".join(dl.STAT_LABELS[k] for k in pr.get("stats", [])) if stat
-                       else ("+ raw .wpk" if pr.get("keep_raw") and pr["format"] != "WPK" else ""))
-            it = QTreeWidgetItem([pr["name"], "Statistic" if stat else "Data", pr["format"], chans, details])
-            it.setIcon(0, make_icon("sigma" if stat else "activity", T["text" if pr["enabled"] else "muted"]))
-            it.setData(0, Qt.ItemDataRole.UserRole, pr["id"])
-            flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-            if not locked:
-                flags |= Qt.ItemFlag.ItemIsUserCheckable
-            it.setFlags(flags)
-            it.setCheckState(0, Qt.CheckState.Checked if pr["enabled"] else Qt.CheckState.Unchecked)
-            if not pr["enabled"]:
-                for c in range(5):
-                    it.setForeground(c, QBrush(QColor(T["muted"])))
-            tree.addTopLevelItem(it)
-            if pr["id"] == cur:
-                tree.setCurrentItem(it)
-        tree.blockSignals(False)
-
-    def _log_profile(self, pid: str | None = None) -> dict | None:
-        if pid is None:
-            it = self.lp_tree.currentItem()
-            pid = it.data(0, Qt.ItemDataRole.UserRole) if it else None
+    def _log_profile(self, pid: str | None) -> dict | None:
         return next((x for x in self.project.logging_profiles if x["id"] == pid), None)
 
-    def _log_profiles_changed(self):
+    def _log_profiles_changed(self, select: str | None = None):
         self._mark_dirty()
-        self._update_logging_help()
+        if hasattr(self, "logging_page"):
+            self.logging_page.refresh(select)
         self._rebuild_project_tree()
+        self._refresh_properties()
 
-    def _profile_dialog(self, pr: dict) -> dict | None:
-        """Pop-up form of a logging profile (used by actions; the tree opens an editor tab)."""
-        taken = {dl.safe_name(x["name"]).lower() for x in self.project.logging_profiles if x["id"] != pr["id"]}
-        dlg = LogProfileDialog(self, pr, self.channel_choices(), taken, add_variable=self._new_variable_key)
-        return dlg.result_profile() if dlg.exec() else None
+    def key_name(self, key) -> str:
+        """A tag's short name (Logging: conditions)."""
+        return self.key_label(tuple(key)).split(" · ")[-1]
 
-    def _add_log_profile(self, kind: str):
+    def alarm_name(self, aid: str) -> str:
+        return next((a["name"] for a in self.project.alarms if a["id"] == aid), "(deleted alarm)")
+
+    def profile_tags_text(self, pr: dict) -> str:
+        if pr.get("channels") is None:
+            return "All enabled"
+        n, m = len(pr["channels"]), len(pr.get("assets") or [])
+        return f"{n} tag(s)" + (f" + {m} asset(s)" if m else "")
+
+    def log_status(self, pr: dict) -> tuple[str, str]:
+        """(writing / armed / off, a count: '3 runs', '12 events') of a profile."""
+        kind = lt.type_of(pr)
+        unit = {"trigger": "run", "event": "event", "batch": "batch"}.get(kind, "")
+        g = getattr(self, "_gates", {}).get(pr["id"])
+        rec = self.recorder
+        runs = g[1].runs if g else getattr(self, "_gates_done", {}).get(pr["id"], 0)
+        count = f"{runs} {unit}{'' if runs == 1 else ('es' if unit == 'batch' else 's')}" if unit and runs else ""
+        if rec is None or not pr["enabled"]:
+            return "off", count
+        i = self._rec_index(pr)
+        if i is not None and rec.errors.get(i):
+            return "error", count
+        if g is not None:
+            return ("writing" if g[1].active else "armed"), count
+        if i is None:
+            return "off", count
+        return ("stalled" if self.profile_live(pr)["stalled"] else "writing"), count
+
+    def add_log_profile(self, kind: str = "interval"):
         if self._recording_guard():
-            self.open_editor("lprofile", None, kind=kind)
+            QTimer.singleShot(0, lambda: self._log_profile_popup(None, kind))
 
-    def _edit_log_profile(self, pid: str | None = None):
-        pr = self._log_profile(pid)
-        if pr is not None:
-            self.open_editor("lprofile", pr["id"])
+    def edit_log_profile(self, pid: str):
+        if self._recording_guard():
+            QTimer.singleShot(0, lambda: self._log_profile_popup(pid))
 
-    def _dup_log_profile(self, pid: str | None = None):
+    def _log_profile_popup(self, pid: str | None = None, kind: str = "interval"):
+        """Add / edit a logging profile: the settings pop-up (tabs General / When / Tags / Output)."""
+        profs = self.project.logging_profiles
+        new = pid is None
+        cur = None if new else self._log_profile(pid)
+        if not new and cur is None:
+            return
+        if new:
+            base = "Data" if kind == "interval" else lt.TYPE[lt.type_of({"type": kind})][1].replace(" / ", " ")
+            pr = new_log_profile(kind, self._unique_name(base, {x["name"] for x in profs}))
+        else:
+            pr = cur
+        taken = {dl.safe_name(x["name"]).lower() for x in profs if x["id"] != pr["id"]}
+        kind = lt.type_of(pr)
+        choices = self.vt_choices() if kind == "event" else self.channel_choices()
+        dev = next((d.name for d in self.project.devices if d.enabled), "Device")
+        dlg = LogProfileDialog(self, pr, choices, taken, [(a["id"], a["name"]) for a in self.project.alarms],
+                               self.project.logging.folder, self.project.name, dev)
+        dlg.ok_btn, title = popup_form(dlg, lt.TYPE[kind][2], f"New {lt.TYPE[kind][1].lower()} profile" if new
+                                       else pr["name"], f"Logging profile · {lt.TYPE[kind][1]}",
+                                       "Add profile" if new else "Save", width=640)
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or pr["name"]))
+        dlg.resize(dlg.width(), 560)
+        dlg._check()
+        if not dlg.exec():
+            return
+        res = dlg.result_profile()
+        if new:
+            profs.append(res)
+        else:
+            cur.clear(); cur.update(res)
+        self._log_profiles_changed(res["id"])
+        self.set_status(f"Logging profile '{res['name']}' " + ("added" if new else "saved"), "ok")
+
+    def dup_log_profile(self, pid: str):
         pr = self._log_profile(pid)
         if pr is None or not self._recording_guard():
             return
-        taken = {x["name"] for x in self.project.logging_profiles}
         b = {**copy.deepcopy(pr), "id": uuid.uuid4().hex[:8]}
-        b["name"] = next(n for n in (f"{pr['name']} {i}" for i in range(2, 99)) if n not in taken)
+        b["name"] = self._next_name(pr["name"] if pr["name"][-1:].isdigit() else pr["name"] + " 1",
+                                    {x["name"] for x in self.project.logging_profiles})
         self.project.logging_profiles.insert(self.project.logging_profiles.index(pr) + 1, b)
-        self._log_profiles_changed()
+        self._log_profiles_changed(b["id"])
 
-    def _delete_log_profile(self, pid: str | None = None):
+    def delete_log_profile(self, pid: str):
         pr = self._log_profile(pid)
         if pr is None or not self._recording_guard():
             return
@@ -2717,58 +2524,368 @@ class DaqWindow(AppWindow):
                        "Delete profile", "Recordings already made are not touched."):
             return
         self.project.logging_profiles.remove(pr)
+        self.select_object(None)
         self._log_profiles_changed()
-        self._refresh_properties()
 
-    def _toggle_log_profile(self, pid: str):
+    def toggle_log_profile(self, pid: str):
         pr = self._log_profile(pid)
         if pr is not None and self._recording_guard():
             pr["enabled"] = not pr["enabled"]
-            self._log_profiles_changed()
+            self._log_profiles_changed(pid)
 
-    def _lp_toggled(self, it, col):
-        pr = self._log_profile(it.data(0, Qt.ItemDataRole.UserRole))
-        if pr is None or col != 0 or self.recorder is not None:
+    def test_log_profile(self, pid: str):
+        """Trigger: a 5 s run now; event: one row now (while recording)."""
+        g = getattr(self, "_gates", {}).get(pid)
+        rec = self.recorder
+        if g is None or rec is None:
+            self.toast.popup("Record first - a test writes into the running session")
             return
-        on = it.checkState(0) == Qt.CheckState.Checked
-        if on != pr["enabled"]:
-            pr["enabled"] = on
-            QTimer.singleShot(0, self._log_profiles_changed)     # not inside itemChanged
+        idx, gate, keys = g
+        now = time.time()
+        if gate.kind == "event":
+            gate.runs += 1
+            rec.event(idx, now, "Test", [self.tag_live(*k)[0] for k in keys])
+            self.toast.popup("Test event written")
+        elif gate.kind == "trigger" and not gate.active:
+            gate.active = True; gate.runs += 1
+            self.__dict__.setdefault("_runs", {}).setdefault(pid, []).append({"label": "Test", "start": now, "end": None})
+            rec.gate(idx, True, now, "Test")
 
-    def _select_log_profile(self, pid: str):
-        for i in range(self.lp_tree.topLevelItemCount()):
-            it = self.lp_tree.topLevelItem(i)
-            if it.data(0, Qt.ItemDataRole.UserRole) == pid:
-                self.lp_tree.setCurrentItem(it)
+            def off():
+                if self.recorder is rec and gate.active:
+                    gate.active = False
+                    rec.gate(idx, False, time.time(), "")
+                    runs = self.__dict__.get("_runs", {}).get(pid) or []
+                    if runs and runs[-1]["end"] is None:
+                        runs[-1]["end"] = time.time()
+            QTimer.singleShot(5000, off)
+            self.toast.popup("Test run: 5 s")
+        self.logging_page.update_live()
 
-    def _log_profile_menu(self, m: QMenu, pr: dict | None):
-        if pr is not None:
-            m.addAction("Edit profile...", lambda: QTimer.singleShot(0, lambda: self._edit_log_profile(pr["id"])))
-            m.addAction("Disable" if pr["enabled"] else "Enable", lambda: self._toggle_log_profile(pr["id"]))
-            m.addAction("Duplicate", lambda: self._dup_log_profile(pr["id"]))
-            m.addAction("Delete profile", lambda: self._delete_log_profile(pr["id"]))
-            m.addSeparator()
-        m.addAction("Add data profile...", lambda: self._add_log_profile("signal"))
-        m.addAction("Add statistic profile...", lambda: self._add_log_profile("statistic"))
+    # ---- where a profile writes (core/log_files.py) and its tags
+    def _reachable(self, path: str) -> bool:
+        """The folder exists, or the nearest existing parent can be written (cached 10 s - shares)."""
+        cache = self.__dict__.setdefault("_reach_cache", {})
+        hit = cache.get(path)
+        if hit and time.time() - hit[1] < 10:
+            return hit[0]
+        p = os.path.abspath(path or ".")
+        while p and not os.path.isdir(p):
+            parent = os.path.dirname(p)
+            if parent == p:
+                break
+            p = parent
+        ok = bool(p) and os.path.isdir(p) and os.access(p, os.W_OK)
+        cache[path] = (ok, time.time())
+        return ok
 
-    def _lp_menu(self, pos):
-        it = self.lp_tree.itemAt(pos)
-        if it is not None:
-            self.lp_tree.setCurrentItem(it)
-        m = QMenu(self)
-        self._log_profile_menu(m, self._log_profile() if it else None)
-        for a in m.actions():
-            a.setEnabled(self.recorder is None)
-        m.exec(self.lp_tree.viewport().mapToGlobal(pos))
+    def profile_folder(self, pr: dict) -> str:
+        """Today's folder of a profile (its base folder + the date folders; session: the base)."""
+        out = lf.normalize_output(copy.deepcopy(pr))
+        base = out["folder"] or self.project.logging.folder
+        if out["folders"] == "session":
+            return base
+        ctx = {"project": dl.safe_name(self.project.name), "profile": dl.safe_name(pr["name"])}
+        return os.path.join(base, *lf.folder_parts(out, time.time(), ctx))
+
+    def profile_live(self, pr: dict) -> dict:
+        """The card of a profile: folder (+ note, bad), the file written now, files, bytes, rows,
+        seconds to the next file."""
+        out = lf.normalize_output(copy.deepcopy(pr))
+        base = out["folder"] or self.project.logging.folder
+        rec = self.recorder
+        i = next((k for k, x in enumerate(rec.profiles) if x.get("id") == pr["id"]), None) if rec else None
+        rate, per_day = self.profile_estimate(pr)
+        info = {"folder": self.profile_folder(pr), "folder_note": "" if out["folder"] else "(default)",
+                "folder_bad": False, "now": "", "files": 0, "bytes": 0, "rows": None, "next": None,
+                "last": None, "rate": rate, "per_day": per_day, "measured": False, "stalled": False}
+        if i is not None:
+            now, files, size = rec.profile_files(i)
+            info.update(now=now, files=files, bytes=size, rows=rec.written(i))
+            lw = rec.last_write.get(i)
+            info["last"] = time.time() - lw if lw else None
+            if rec.elapsed > 60:                     # measured, once there is a minute of it
+                info.update(rate=info["rows"] / rec.elapsed, per_day=size / rec.elapsed * 86400, measured=True)
+            limit = self._stall_limit(pr) if pr["enabled"] else None
+            quiet = info["last"] if info["last"] is not None else rec.elapsed
+            info["stalled"] = bool(limit and quiet > limit and lt.type_of(pr) not in ("trigger", "batch", "event"))
+            if now:
+                info["folder"] = os.path.dirname(now)
+            err = rec.errors.get(i)
+            if err:
+                info.update(folder_note=f"⚠ {err}", folder_bad=True)
+        elif not self._reachable(base):
+            info.update(folder_note="⚠ not reachable", folder_bad=True)
+        nxt = lf.next_start(out, time.time())
+        if nxt:
+            info["next"] = nxt - time.time()
+        return info
+
+    def open_profile_folder(self, pid: str):
+        pr = self._log_profile(pid)
+        if pr is None:
+            return
+        d = self.profile_live(pr)["folder"]
+        base = lf.normalize_output(copy.deepcopy(pr))["folder"] or self.project.logging.folder
+        try:
+            os.makedirs(d if os.path.isdir(os.path.dirname(d)) or d == base else base, exist_ok=True)
+        except OSError:
+            pass
+        self._open_path(d if os.path.isdir(d) else base)
+
+    def profile_tag_rows(self, pr: dict) -> list[tuple]:
+        """The Logging card's tags: [("tag", key, its assets)] and [("asset", id, path, [keys])]."""
+        A = self.project.assets
+        if pr.get("channels") is None:
+            keys = self._event_keys(pr) if lt.type_of(pr) == "event" else \
+                [(d.id, t.index) for d in self.project.devices if d.enabled for t in d.tags if t.enabled]
+            return [("tag", k, ", ".join(am.assets_of(A, k))) for k in keys]
+        rows = [("tag", tuple(k), ", ".join(am.assets_of(A, k))) for k in pr["channels"]]
+        for aid in pr.get("assets") or []:
+            rows.append(("asset", aid, am.label(A, aid), am.keys(A, aid)))
+        return rows
+
+    def log_profile_add_tags(self, pid: str):
+        """Add tags... of a profile: the picker with By tag / By asset (whole assets kept live)."""
+        pr = self._log_profile(pid)
+        if pr is None or not self._recording_guard():
+            return
+        kind = lt.type_of(pr)
+        choices = self.vt_choices() if kind == "event" else self.channel_choices()
+        chosen = [list(r[1]) for r in self.profile_tag_rows(pr) if r[0] == "tag"]
+        dlg = PickDialog(self, choices, chosen, True, f"Tags of {pr['name']}", assets=True,
+                         chosen_assets=pr.get("assets") or [])
+        if not dlg.exec():
+            return
+        keys, aids = dlg.result_assets()
+        if not keys and not aids:
+            self.toast.popup("A profile needs at least one tag")
+            return
+        pr["channels"], pr["assets"] = [list(k) for k in keys], list(aids)
+        self._log_profiles_changed(pid)
+
+    def log_profile_remove(self, pid: str, keys, aids):
+        """Remove tags / whole assets from a profile ("All enabled" becomes the list without them)."""
+        pr = self._log_profile(pid)
+        if pr is None or not self._recording_guard():
+            return
+        gone = {tuple(k) for k in keys}
+        left = [list(r[1]) for r in self.profile_tag_rows(pr) if r[0] == "tag" and tuple(r[1]) not in gone]
+        assets = [a for a in pr.get("assets") or [] if a not in set(aids)]
+        if not left and not assets:
+            self.toast.popup("A profile needs at least one tag - delete the profile instead")
+            return
+        pr["channels"], pr["assets"] = left, assets
+        self._log_profiles_changed(pid)
+
+    # ---- Logging health: rates, sizes, last write / stalled, files, runs, events
+    def _rec_index(self, pr: dict):
+        rec = self.recorder
+        return next((k for k, x in enumerate(rec.profiles) if x.get("id") == pr["id"]), None) if rec else None
+
+    def profile_estimate(self, pr: dict) -> tuple:
+        """(rows / s, bytes / day) a profile is expected to write - None where it depends on the
+        process (on change, trigger, event, batch)."""
+        kind, w = lt.type_of(pr), pr.get("when") or {}
+        topics = self._profile_topics(pr) if kind != "event" else []
+        if kind == "interval":
+            rows = 0.0
+            for tp in topics:
+                d = self.project.device(tp["id"])
+                scan = 1000.0 / max(1, d.scan_ms) if d is not None else 1.0
+                rows += 1.0 / w["every_s"] if w.get("every_s") else scan
+            size = sum((24 + 10 * len(tp["channels"])) * (1.0 / w["every_s"] if w.get("every_s") else
+                                                          1000.0 / max(1, getattr(self.project.device(tp["id"]),
+                                                                                  "scan_ms", 1000)))
+                       for tp in topics)
+            return rows, size * 86400
+        if kind == "statistic":
+            iv = max(0.1, float(pr.get("interval_s") or 60))
+            size = sum(40 + 10 * len(tp["channels"]) * len(pr.get("stats") or [1]) for tp in topics)
+            return len(topics) / iv, size * 86400 / iv
+        return None, None
+
+    def _stall_limit(self, pr: dict) -> float | None:
+        """Seconds without a row after which a writing profile is Stalled (None: may be silent)."""
+        kind, w = lt.type_of(pr), pr.get("when") or {}
+        if kind == "interval":
+            scans = [self.project.device(tp["id"]).scan_ms / 1000.0 for tp in self._profile_topics(pr)
+                     if self.project.device(tp["id"]) is not None]
+            return max(10.0, 3 * (w.get("every_s") or max(scans or [1.0])))
+        if kind == "statistic":
+            return max(10.0, 3 * float(pr.get("interval_s") or 60))
+        if kind == "change" and w.get("heartbeat_s"):
+            return max(10.0, 3 * float(w["heartbeat_s"]))
+        return None
+
+    def log_health(self) -> dict:
+        """The Logging health strip: recording, states, issues, disk, rows / s, dropped."""
+        rec = self.recorder
+        states, issues, per_day, rate = {}, [], 0.0, 0.0
+        default = self.project.logging.folder
+        drive = os.path.splitdrive(os.path.abspath(default))[0].lower()
+        for pr in self.project.logging_profiles:
+            st, _c = self.log_status(pr)
+            states[st] = states.get(st, 0) + 1
+            live = self.profile_live(pr)
+            if st in ("stalled", "error") or (live["folder_bad"] and pr["enabled"]):
+                issues.append((pr["id"], f"{pr['name']}: " + (live["folder_note"].lstrip("⚠ ") if live["folder_bad"]
+                                                               else f"no row for {lt.fmt_s(live['last'] or 0)}")))
+            if pr["enabled"]:
+                base = lf.normalize_output(copy.deepcopy(pr))["folder"] or default
+                if os.path.splitdrive(os.path.abspath(base))[0].lower() == drive and live["per_day"]:
+                    per_day += live["per_day"]
+                if rec is not None:
+                    rate += live["rate"] or 0.0
+        p = os.path.abspath(default)
+        while p and not os.path.isdir(p) and os.path.dirname(p) != p:
+            p = os.path.dirname(p)
+        try:
+            free = shutil.disk_usage(p).free
+        except OSError:
+            free = None
+        return {"recording": rec is not None, "elapsed": rec.elapsed if rec else 0.0, "states": states,
+                "issues": issues, "free": free, "drive": drive.upper() or p, "per_day": per_day,
+                "days": (free / per_day) if free and per_day else None, "rate": rate,
+                "dropped": rec.dropped if rec else 0, "profiles": len(self.project.logging_profiles)}
+
+    def profile_files_list(self, pr: dict, days: int | None = 7) -> list[dict]:
+        """This profile's files (its folder, newest first, at most 500): path, rel, mtime, size,
+        state writing / complete (cached 10 s)."""
+        cache = self.__dict__.setdefault("_files_cache", {})
+        key = (pr["id"], days, json.dumps(pr.get("output"), sort_keys=True))
+        hit = cache.get(key)
+        if hit and time.time() - hit[0] < 10 and self.recorder is None:
+            return hit[1]
+        out = lf.normalize_output(copy.deepcopy(pr))
+        base = out["folder"] or self.project.logging.folder
+        ctx = {"project": dl.safe_name(self.project.name), "profile": dl.safe_name(pr["name"])}
+        name = lf.name_pattern(out, lt.type_of(pr))[0]
+        prefix = lf.keep_prefix(out, ctx) if "{profile}" in name else dl.safe_name(pr["name"])
+        since = time.time() - days * 86400 if days else 0
+        busy = self.recorder.open_paths if self.recorder else set()
+        rows = []
+        for root, dirs, files in os.walk(base):
+            if root[len(base):].count(os.sep) >= 4:
+                dirs[:] = []
+            for fn in files:
+                if not fn.startswith(prefix) or not fn.endswith((".csv", ".wpk", ".zst", ".gz")):
+                    continue
+                pth = os.path.join(root, fn)
+                try:
+                    st = os.stat(pth)
+                except OSError:
+                    continue
+                if st.st_mtime >= since:
+                    rows.append({"path": pth, "rel": os.path.relpath(pth, base), "mtime": st.st_mtime,
+                                 "size": st.st_size, "state": "writing" if pth in busy else "complete"})
+        rows.sort(key=lambda r: r["mtime"], reverse=True)
+        rows = rows[:500]
+        cache[key] = (time.time(), rows)
+        return rows
+
+    def profile_runs(self, pr: dict) -> list[dict]:
+        """Trigger runs / batches of this app session: label, start, end (None = running), newest first."""
+        return list(reversed(self.__dict__.get("_runs", {}).get(pr["id"], [])))
+
+    def profile_events(self, pr: dict, limit: int = 200) -> tuple[list[str], list[list[str]]]:
+        """(columns, the newest event rows) of an event profile's newest file."""
+        files = [f for f in self.profile_files_list(pr, None) if f["path"].endswith(".csv")]
+        if not files:
+            return [], []
+        try:
+            with open(files[0]["path"], encoding="utf-8-sig") as f:
+                lines = [ln for ln in f if not ln.startswith("#")]
+        except OSError:
+            return [], []
+        rows = list(csv.reader(lines))
+        return (rows[0], list(reversed(rows[1:]))[:limit]) if rows else ([], [])
+
+    def profile_problems(self, pr: dict) -> list[tuple]:
+        return list(reversed(self.__dict__.get("_log_problems", {}).get(pr["id"], [])))[:20]
+
+    def _check_log_problems(self):
+        """A profile that became stalled / failed: remembered for its Overview (newest 50)."""
+        probs = self.__dict__.setdefault("_log_problems", {})
+        last = self.__dict__.setdefault("_log_state", {})
+        for pr in self.project.logging_profiles:
+            st, _c = self.log_status(pr)
+            if st in ("stalled", "error") and last.get(pr["id"]) != st:
+                live = self.profile_live(pr)
+                probs.setdefault(pr["id"], []).append(
+                    (time.time(), live["folder_note"].lstrip("⚠ ") if st == "error" else
+                     f"stalled - no row for {lt.fmt_s(live['last'] or 0)}"))
+                del probs[pr["id"]][:-50]
+            last[pr["id"]] = st
+
+    def browse_log_folder(self):
+        self._browse_log_folder()
+
+    def open_log_folder(self):
+        self._open_log_folder()
+
+    # ---- trigger / batch / event gates (core/log_types.Gate) while recording
+    def _event_keys(self, pr: dict) -> list[tuple]:
+        """The tags an event profile snapshots: its tags and assets, or every enabled device tag."""
+        if pr.get("channels") is None:
+            return [(d.id, t.index) for d in self.project.devices if d.enabled for t in d.tags if t.enabled]
+        keys = [tuple(k) for k in pr["channels"]]
+        for aid in pr.get("assets") or []:
+            keys += [k for k in am.keys(self.project.assets, aid) if k not in keys]
+        return keys
+
+    def _key_text(self, key) -> str:
+        return self.tag_live(*key)[0] or ""
+
+    def _update_gates(self):
+        """Every stats tick while recording: trigger / batch windows, event conditions and times."""
+        rec = self.recorder
+        if rec is None:
+            return
+        now = time.time()
+        value_of = lambda k: self.last_value(*k)[0]                      # noqa: E731
+        for pid, (idx, gate, keys) in getattr(self, "_gates", {}).items():
+            for ev in gate.update(now, value_of):
+                self._gate_out(rec, idx, keys, ev)
+        self._check_log_problems()
+
+    def _gate_out(self, rec, idx: int, keys, ev):
+        what, t, label_ = ev
+        pid = rec.profiles[idx].get("id")
+        runs = self.__dict__.setdefault("_runs", {}).setdefault(pid, [])
+        if what == "on":
+            runs.append({"label": label_, "start": t, "end": None})
+        elif what == "off" and runs and runs[-1]["end"] is None:
+            runs[-1]["end"] = t
+        del runs[:-500]
+        if what == "fire":
+            rec.event(idx, t, label_, [self.tag_live(*k)[0] for k in keys])
+        else:
+            rec.gate(idx, what == "on", t, label_)
+            self._log(f"Logging {'started' if what == 'on' else 'stopped'}: "
+                      f"{rec.profiles[idx]['name']}" + (f" ({label_})" if label_ else ""))
+
+    def _gate_events(self, source: str, ident: str, text: str, t: float):
+        """An alarm came in / a Marker: the event profiles listening to it write a row."""
+        rec = self.recorder
+        if rec is None:
+            return
+        for pid, (idx, gate, keys) in getattr(self, "_gates", {}).items():
+            evs = gate.alarm(ident, text, t) if source == "alarm" else gate.marker(text, t)
+            for ev in evs:
+                self._gate_out(rec, idx, keys, ev)
+
+    def _marker_profiles(self) -> list[str]:
+        return [pid for pid, (_i, g, _k) in getattr(self, "_gates", {}).items()
+                if g.kind == "event" and g.w.get("source") == "marker"]
 
     def _update_lock(self):
         rec = self.recorder is not None
-        for w in (self.log_folder, self.p_name, self.p_operator, self.p_desc, *self.lp_btns):
-            w.setEnabled(not rec)
         self.act_rec.setEnabled(not rec)
         self.act_stop.setEnabled(rec)
-        if hasattr(self, "var_page"):                 # variables are locked while recording too
-            self.var_page.refresh()
+        self.act_marker.setEnabled(self.ml_logger is not None or bool(self._marker_profiles()))
+        if hasattr(self, "logging_page"):
+            self.logging_page.refresh()
         if hasattr(self, "tags_page"):
             self.tags_page.update_states()
             self.conn_page.update_states()
@@ -2777,10 +2894,21 @@ class DaqWindow(AppWindow):
     def _start_recording(self):
         if self.recorder is not None:
             return
-        profiles = []
+        profiles, self._gates = [], {}
         for pr in self.project.logging_profiles:
-            tps = self._profile_topics(pr) if pr["enabled"] else []
+            if not pr["enabled"] or lt.problem(pr):
+                continue
+            if lt.type_of(pr) == "event":
+                keys = self._event_keys(pr)
+                if keys:
+                    self._gates[pr["id"]] = (len(profiles), lt.Gate(pr, self._key_text), keys)
+                    profiles.append({**copy.deepcopy(pr), "topics": [],
+                                     "tags": [(self.key_label(k), self.last_value(*k)[1]) for k in keys]})
+                continue
+            tps = self._profile_topics(pr)
             if tps:
+                if lt.type_of(pr) in ("trigger", "batch"):
+                    self._gates[pr["id"]] = (len(profiles), lt.Gate(pr, self._key_text), [])
                 profiles.append({**copy.deepcopy(pr), "topics": tps})
         if not profiles:
             self.banners.post("rec", "Nothing to record: enable a logging profile and at least one "
@@ -2797,10 +2925,14 @@ class DaqWindow(AppWindow):
             self.banners.post("rec", f"Could not start recording: {e}", "bad")
             return
         self.recorder = rec
+        if rec.errors:                               # a folder that cannot be made: that profile only
+            self.banners.post("rec", "Not logged: " + "; ".join(f"{rec.profiles[i]['name']} ({e})"
+                                                              for i, e in rec.errors.items()), "warn")
+        self._update_gates()                         # a trigger already true / the running shift
         self.banners.dismiss("rec")
         if self.ml_logger is not None:
             self.ml_logger.event("record_start", "Record", rec.dir)
-        self._update_lock(); self._fill_log_profiles()
+        self._update_lock(); self.logging_page.refresh()
         self._refresh_sessions()
         self._log(f"Recording started -> {rec.dir}  ({len(profiles)} profile(s): " +
                   ", ".join(f"{p['name']} [{p['type']}, {p['format']}]" for p in profiles) + ")")
@@ -2814,13 +2946,15 @@ class DaqWindow(AppWindow):
         rec, self.recorder = self.recorder, None
         if rec is None:
             return
+        self._gates_done = {pid: g.runs for pid, (_i, g, _k) in self._gates.items()}   # the counts stay
+        self._gates = {}
         self.busy(True)
         with self._waiting():
             rec.stop()
         self.busy(False)
         if self.ml_logger is not None:
             self.ml_logger.event("record_stop", "Record", rec.dir)
-        self._update_lock(); self._fill_log_profiles()
+        self._update_lock(); self.logging_page.refresh()
         dur = time.strftime("%H:%M:%S", time.gmtime(rec.elapsed))
         msg = (f"Saved {rec.packets:,} blocks / scans in {dur} ({_fmt_bytes(rec.disk_bytes())})")
         self._log(f"Recording stopped. {msg} -> {rec.dir}")
@@ -2896,23 +3030,26 @@ class DaqWindow(AppWindow):
         self.act_ml.setIcon(make_icon("brain-circuit", T["ok" if on else "text"]))
         self.act_ml.setToolTip(("Stop" if on else "Start") + " the AI/ML data log  (" +
                                self.act_ml.shortcut().toString(QKeySequence.SequenceFormat.NativeText) + ")")
-        self.act_marker.setEnabled(on)
+        self.act_marker.setEnabled(on or bool(self._marker_profiles()))
         self.ml_label.setVisible(on)
 
     def _ml_settings(self):
         self.open_editor("mllog", "settings")
 
     def _ml_marker(self, kind: str):
-        """Event marker in events.csv - the AI app turns these into draft labels."""
-        if self.ml_logger is None:
+        """Event marker: events.csv of the AI/ML log (the AI app turns these into draft labels) and
+        the event logging profiles listening to the Marker."""
+        if self.ml_logger is None and not self._marker_profiles():
             return
         t = time.time()                          # the moment of the click, not of the OK
         dlg = MarkerDialog(self, MARKER_TYPES, kind, t)
-        if not dlg.exec() or self.ml_logger is None:
+        if not dlg.exec():
             return
         kind, text = dlg.result()
         title = dict(MARKER_TYPES)[kind].split(" (")[0]
-        self.ml_logger.event(kind, self.project.operator or "operator", text, t)
+        self._gate_events("marker", "", f"{title}: {text}" if text else title, t)
+        if self.ml_logger is not None:
+            self.ml_logger.event(kind, self.project.operator or "operator", text, t)
         self._log(f"Marker {kind}: {text}")
         self.toast.popup(f"Marker saved: {title}")
 
@@ -3237,7 +3374,9 @@ class DaqWindow(AppWindow):
         self._drain_notifier()
         self._update_alarm_indicator()
         self.alarm_page.update_live()
-        self.var_page.update_live()
+        self._update_gates()
+        if hasattr(self, "logging_page"):            # rows per minute: sampled on every page
+            self.logging_page.sample_activity()
         self._update_nav_dots()
         page = self.doc_tabs.currentWidget()
         if isinstance(page, dv.ViewPage):
@@ -3251,6 +3390,8 @@ class DaqWindow(AppWindow):
             self.start_page.update_live()
         elif page is getattr(self, "assets_page", None):
             self.assets_page.update_live()
+        elif page is getattr(self, "logging_page", None) and self.recorder is not None:
+            self.logging_page.update_live()
         self._asset_tick = (getattr(self, "_asset_tick", 0) + 1) % 4
         if not self._asset_tick:                     # the status dots and rollups: every 4th update
             self._update_asset_status(page)
@@ -3347,6 +3488,7 @@ class DaqWindow(AppWindow):
                                  f"{ap.fmt_val(ev['value'], unit)} (setpoint {ev['setpoint']:g})", ev.get("t"))
         s = self.project.alarm_settings
         if ev["event"] == "ON":
+            self._gate_events("alarm", ev["alarm_id"], f"{lvl} {ev['type']} {name}", ev.get("t") or time.time())
             cmp = "<" if ev["type"] in ar.DOWN_TYPES else ">"
             self._log(f"ALARM ON   {lvl} {ev['type']}: {name} = {ap.fmt_val(ev['value'], unit)}  "
                       f"({cmp} {ev['setpoint']:g})")
@@ -3671,7 +3813,6 @@ class DaqWindow(AppWindow):
             del self.streams[tid]
         self.variable_engine.reset()
         self._variables_reload()
-        self.var_page.refresh()
         self._rebuild_project_tree()
         self._alarms_reload()
         self._stat_dirty = True
@@ -4693,19 +4834,6 @@ class DaqWindow(AppWindow):
             if self.stats.wants(t.key):
                 self.stats.feed(t.key, np.array([now]), vb.y[0])
             self._compute_variables(tid, now, vb)
-
-    def _new_variable_key(self):
-        """Add a variable from another form (pop-up action) -> (its key, new choices) or None."""
-        before = {v["id"] for v in self.project.variables}
-        self.var_page.add_variable("formula", popup=True)
-        new = [v for v in self.project.variables if v["id"] not in before]
-        return (vr.var_key(new[0]["id"]), self.channel_choices()) if new else None
-
-    def _var_action(self, what: str, source=None):
-        self._show_doc("variables")
-        if what == "add":
-            QTimer.singleShot(0, lambda: self.var_page.add_variable("formula" if source is None else "statistic",
-                                                                    source))
 
     def alarm_seq(self) -> int:
         return self.alarm_engine.seq

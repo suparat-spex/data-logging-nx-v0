@@ -133,7 +133,7 @@ class TileDialog(QDialog):
         chosen = c.get("channels", [])
         self.picker = ChannelPicker(self.choices, chosen[:1] if k == "stft" else chosen, multi=k != "stft")
         cw = QWidget(); cv = QVBoxLayout(cw); cv.addWidget(self.picker)
-        cv.addWidget(label("Variables are listed with the devices - add them in Project Files → Variables.",
+        cv.addWidget(label("Every tag category is listed - By asset picks the tags of an area or a machine.",
                            muted=True, small=True))
         self.tabs.addTab(cw, "Tag" if k == "stft" else "Tags")
 

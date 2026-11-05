@@ -16,6 +16,8 @@ from nxlogger.core import aggregation as ag
 from nxlogger.core import analysis as an
 from nxlogger.core import assets as am
 from nxlogger.core import channel_math as cm
+from nxlogger.core import log_files as lf
+from nxlogger.core import log_types as lt
 from nxlogger.core import system_tags as ss
 from nxlogger.core import view_model as vm
 from nxlogger.core import virtual_tags as vt
@@ -81,6 +83,36 @@ def device_target(w, did: str) -> PropTarget | None:
                       [("Device", general), ("Connection", settings), ("Status", status)],
                       {**vals, **live()}, None, [("Edit...", "pencil", lambda: w.edit_device(did))], live,
                       key=("device", did), readonly=True)
+
+
+def log_profile_target(w, pid: str) -> PropTarget | None:
+    """A logging profile - information only (Edit...: its pop-up)."""
+    pr = next((x for x in w.project.logging_profiles if x["id"] == pid), None)
+    if pr is None:
+        return None
+    kind = lt.type_of(pr)
+    st, count = w.log_status(pr)
+    rows = {"Name": pr["name"], "Type": lt.TYPE[kind][1], "When": lt.describe(pr, w.key_name, w.alarm_name),
+            "Tags": w.profile_tags_text(pr), "Format": pr.get("format", "CSV"),
+            "Folder": w.profile_live(pr)["folder"], "New file": lf.describe(lf.normalize_output(dict(pr))),
+            "Enabled": "Yes" if pr["enabled"] else "No", "Status": st.capitalize() + (f" · {count}" if count else ""),
+            "Description": pr.get("description") or "-"}
+    return PropTarget(pr["name"], lt.TYPE[kind][2], f"Logging profile · {lt.TYPE[kind][1]}",
+                      [("Logging profile", [F(k, k, "info", "") for k in rows])], rows, None,
+                      [("Edit...", "pencil", lambda: w.edit_log_profile(pid))], key=("lprof", pid), readonly=True)
+
+
+def log_type_target(w, kind: str | None) -> PropTarget:
+    """Project tree > Logging / a logging type."""
+    profs = [p for p in w.project.logging_profiles if kind is None or lt.type_of(p) == kind]
+    name, icon, what = lt.TYPE[kind][1:] if kind else \
+        ("Logging", "file-text", "Logging profiles by type - every enabled one runs on Record")
+    rows = {"What": what, "Profiles": str(len(profs)), "Enabled": str(sum(1 for p in profs if p["enabled"])),
+            "Log folder": w.project.logging.folder}
+    return PropTarget(name, icon, "Logging" + (f" · {name}" if kind else ""),
+                      [("Logging", [F(k, k, "info", "") for k in rows])], rows, None,
+                      [("Add...", "plus", lambda: w.add_log_profile(kind or "interval"))], key=("logtype", kind),
+                      readonly=True)
 
 
 def enterprise_target(w) -> PropTarget:

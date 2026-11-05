@@ -16,6 +16,8 @@ from nxlogger import paths
 from nxlogger.core import aggregation as agg
 from nxlogger.core import assets as am
 from nxlogger.core import alarm_rules as ar
+from nxlogger.core import log_files as lf
+from nxlogger.core import log_types as lt
 from nxlogger.core import ml_log as mlg
 from nxlogger.core import variables as vr
 from nxlogger.core import virtual_tags as vt
@@ -55,13 +57,17 @@ STAT_INTERVALS = [("1 s", 1), ("10 s", 10), ("1 min", 60), ("10 min", 600), ("1 
                   ("1 day", 86400)]
 
 
-def new_log_profile(kind: str = "signal", name: str = "") -> dict:
-    """Logging profile: what to write each Record run (see recording.Recorder)."""
-    return {"id": uuid.uuid4().hex[:8], "name": name or ("Data" if kind == "signal" else "Statistics"),
-            "enabled": True, "type": kind, "format": "CSV", "keep_raw": False,
+def new_log_profile(kind: str = "interval", name: str = "") -> dict:
+    """Logging profile: what to write each Record run (see recording.Recorder). kind: a type of
+    core/log_types.py ("signal" of older files = interval)."""
+    kind = lt.type_of({"type": kind})
+    return {"id": uuid.uuid4().hex[:8], "name": name or ("Data" if kind == "interval" else lt.TYPE[kind][1]),
+            "enabled": True, "type": kind, "format": "CSV", "keep_raw": False, "description": "",
             "channels": None,                   # None = all enabled tags, else [[device_id, index]]
             "assets": [],                       # + whole assets (ids), kept live (their tags as they change)
-            "interval_s": 1.0 if kind == "signal" else 60.0, "stats": ["mean", "min", "max"]}
+            "interval_s": 60.0, "stats": ["mean", "min", "max"],      # statistic
+            "when": lt.default_when(kind),      # the other types (log_types.DEFAULT_WHEN)
+            "output": lf.default_output(kind)}  # folder, date folders, new file per ... (log_files.py)
 
 
 def fmt_interval(s: float) -> str:
@@ -136,7 +142,7 @@ class Project:
                 asset_templates=list(d.get("asset_templates", [])), quick_hidden=d.get("quick_hidden", []),
                 ml_log={**mlg.new_settings(), **d.get("ml_log", {})}, migrated_from=migrated)
         if "logging_profiles" not in d:          # v5 file: its one format becomes a profile
-            p.logging_profiles = [{**new_log_profile("signal", "Waveform"), "format": p.logging.format,
+            p.logging_profiles = [{**new_log_profile("interval", "Waveform"), "format": p.logging.format,
                                    "keep_raw": p.logging.keep_raw}]
         if d.get("_v5"):
             p.alarm_profiles = p.alarm_profiles or [ar.new_profile("popup", "Popup + sound")]
@@ -147,8 +153,12 @@ class Project:
         for x in p.alarm_profiles:
             ar.normalize_profile(x)
         for x in p.logging_profiles:
-            for k, v in new_log_profile(x.get("type", "signal")).items():
+            if "output" not in x:                # older profiles: the session folder, a file per session
+                x["output"] = lf.default_output()
+            for k, v in new_log_profile(x.get("type", "interval")).items():
                 x.setdefault(k, v)
+            lt.normalize_when(x)                 # "signal" -> interval (every value), when: defaults
+            lf.normalize_output(x)
             if x["format"] not in ("CSV", "WPK"):    # TDMS is no longer written
                 x["format"] = "CSV"
         p.logging.format = "CSV" if p.logging.format == "TDMS" else p.logging.format
@@ -172,7 +182,7 @@ class Project:
     def default(cls) -> "Project":
         sim = new_device("sim", "Simulator")
         p = cls(name="Demo project", devices=[sim],
-                logging_profiles=[new_log_profile("signal"),
+                logging_profiles=[new_log_profile("interval"),
                                   {**new_log_profile("statistic", "Statistics 1 min"), "enabled": False}],
                 alarm_profiles=[ar.new_profile("popup", "Popup + sound")])
         p.views = [default_view("Overview", [(sim.id, t.index) for t in sim.tags])]

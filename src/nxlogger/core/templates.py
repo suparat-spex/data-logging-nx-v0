@@ -36,7 +36,7 @@ WATER_PLANT_BASE = "nxlogger/demo/wtp1"             # the simulator's default to
 
 
 def _base(name: str) -> Project:
-    return Project(name=name, logging_profiles=[new_log_profile("signal")],
+    return Project(name=name, logging_profiles=[new_log_profile("interval")],
                    alarm_profiles=[ar.new_profile("popup", "Popup + sound")])
 
 
@@ -219,9 +219,19 @@ def _factory_energy() -> Project:
 
     report = [main_kw, main_pf, solar_kw, list(vt.vt_key(total["id"])), list(ag.agg_key(demand["id"]))] + \
         [k(m, "kw") for m in feeders]
-    p.logging_profiles = [new_log_profile("signal", "Data 1 s"),
-                          {**new_log_profile("statistic", "Energy report 15 min"), "interval_s": 900.0,
-                           "channels": report}]
+    data = new_log_profile("interval", "Data 1 s")
+    data["when"]["every_s"] = 1.0
+    comp = {**new_log_profile("trigger", "Compressor 1 runs"), "channels": [k("comp1", f) for f in ("kw", "pf", "i")],
+            "description": "Compressor 1 while it runs (above 5 kW), 30 s before and 60 s after"}
+    comp["when"].update(start={"key": k("comp1", "kw"), "op": ">", "value": 5.0}, debounce_s=2.0, every_s=1.0)
+    snap = {**new_log_profile("event", "Alarm snapshots"),
+            "channels": [main_kw, main_pf, list(vt.vt_key(cost["id"])), list(ag.agg_key(demand["id"]))],
+            "description": "The incomer, cost and demand at every alarm"}
+    shift = {**new_log_profile("batch", "Shift report"), "channels": [main_kw, list(vt.vt_key(total["id"]))],
+             "description": "Each shift (06:00, 18:00): the incomer every minute and a summary row"}
+    shift["when"].update(by="shift", shifts="06:00, 18:00", every_s=60.0, stats=["mean", "min", "max"])
+    p.logging_profiles = [data, {**new_log_profile("statistic", "Energy report 15 min"), "interval_s": 900.0,
+                                 "channels": report}, comp, snap, shift]
     _factory_assets(p, dev, k, [list(vt.vt_key(cost["id"])), list(ag.agg_key(energy["id"])),
                                 list(ag.agg_key(cost_day["id"])), list(ag.agg_key(peak["id"]))])
     return p

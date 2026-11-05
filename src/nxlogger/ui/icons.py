@@ -105,7 +105,7 @@ def level_icon(level: int, size: int = 10) -> QIcon:
     return QIcon(pm)
 
 
-STATUS_TOKEN = {"alarm": "bad", "ok": "ok", "none": "muted"}
+STATUS_TOKEN = {"alarm": "bad", "ok": "ok", "armed": "warn", "none": "muted"}
 STATUS_SIZE = (30, 16)                         # the tree's iconSize for status_icon
 
 

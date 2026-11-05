@@ -43,14 +43,19 @@ menus exist and what the pop-ups look like. **When to use** an editor tab or a p
       Production      (3)       the icon turns red on an alarm)
       Utilities       (4)
       Templates       (1)       muted, always last (click: the templates)
-  ▸ Logging
+  ▾ Logging                     every profile + the log folder
+      Interval        (2)       the logging types, one level (click: its profiles;
+      On change       (1)       muted while empty) - profiles only in the document
+      Trigger         (1)
+      Event           (0)
+      Batch / Shift   (1)
+      Statistics      (1)
   ▸ Alarms
-  ▸ Variables
   ▸ Views
 ```
 
-Section headers (the project, Connectivity, Tags, Assets, Logging, Alarms, Variables, Views)
-and the category / area nodes have **no right-click menu** (double-click an area: its pop-up).
+Section headers (the project, Connectivity, Tags, Assets, Logging, Alarms, Views)
+and the category / area / logging-type nodes have **no right-click menu** (double-click an area: its pop-up).
 
 ## 3. Connectivity document
 
@@ -246,6 +251,92 @@ Project tree > Templates: the templates left, their attributes right
 - Collections, the Assets of 2.x and Tags groups of older projects become areas and machines with
   the same tags ("A / B / C": area A, machine "B / C").
 
+### Logging (Project tree > Logging)
+
+A logging profile says **when** to write and **which tags**; every enabled profile runs on
+Record and writes into the same session folder (docs/recording-format.md). Six types
+(`core/log_types.py`):
+
+| Type | Writes | When tab |
+|---|---|---|
+| Interval | every value, or one row every N s | Every |
+| On change | a row when a tag moves more than its deadband, at least every heartbeat | Deadband (% / abs), Heartbeat, Min. gap |
+| Trigger | only while a condition is true, with the seconds before / after it (`run` column) | Start when, Stop, Debounce, Pre / Post-trigger, While active |
+| Event | one row of chosen tags (any category, text too) per event | On: alarm (any / one) · condition · time of day · Marker; Debounce |
+| Batch / Shift | rows while a batch / shift runs (`batch` column) + a summary row at its end | Batches by (shift times / condition), Batch name tag, Summary, While it runs |
+| Statistics | one row per period: mean, min, max ... | Period, Statistics |
+
+```
+Project tree > Interval: its profiles left, the selected one right (card + tags)
+┌──────────────────────────────┬───────────────────────────────────────────────────────┐
+│▌⏱ Interval                   │ ⏱ Data 1 s                         ● Writing  [Edit…] │
+│ ◂ All profiles               │ 📁 E:\Trend\2026\11\05                   [Open] [Copy] │
+│ ● Data 1 s                   │───────────────────────────────────────────────────────│
+│   every 1 s · All enabled    │ Every      1 s                New file  every day 00:00│
+│ ○ Fast trend                 │ Format     CSV                Keep      90 days       │
+│   every value · 4 tags · off │ Folders    Year \ Month \ Day  Files     38 · 1.2 GB   │
+│                              │───────────────────────────────────────────────────────│
+│                              │ Tags (99)        [+ Add tags...][Remove]   [Search]   │
+│                              │ Name      Source          Unit  Value   Asset         │
+└──────────────────────────────┴───────────────────────────────────────────────────────┘
+Project tree > Logging: the types left (click one: open it), every profile right
+│ Name         Type        When          Folder               Tags        Status       │
+```
+
+- **Health strip** (always on top): ● RECORDING and its time / ○ Ready, how many profiles are writing,
+  armed, **stalled** (a writing profile without a row for 3 intervals - a device that stopped) or in
+  **error** (its folder), the first issue as a link (selects that profile), disk free and **days
+  left** at the measured (estimated before recording) size a day, rows/s and dropped blocks.
+- **All profiles** table: Name, Type, When, Folder, Last write, Rate, Size/day, Status.
+  On the Logging page a click on a type (left) shows only its profiles in the table; a double
+  click (or Project tree > the type) opens the type page.
+- **A type** has no "All profiles" row (the Project tree / Backspace goes back): the band shows the
+  type and its count, each profile three lines (name / when · tags / rate · size a day).
+- **The profile view:** a header (name, status · last row, ✎ Edit, ⋯ more - icon buttons) and its
+  folder (📂 open, ⧉ copy), then tabs
+  **Overview** (its settings as a sentence, key values, rows per minute, problems) · **Tags**
+  (last logged value and time, quality, asset) · **Files** (its files in a period - Open, Show in
+  folder, Copy path; ● writing / ✓ complete) · **History** (interval, on change, statistics: size
+  a day for 30 days, amber = a day without data; trigger / batch: runs and minutes per hour;
+  event: the newest events).
+- **The card** shows the profile's folder first (today's date folder; while recording the folder
+  of the file written now; *(default)* = the project's; ⚠ not reachable in red), its type's
+  settings, the folder layout, when the next file starts, keep / compress, and live counts
+  (rows, files, disk, the file written now). The settings change only in the pop-up (*Edit…*).
+- **The tags table:** *All enabled* lists every enabled tag (new ones join); *Add tags...* (By
+  tag / By asset - whole assets kept live, one expandable row) and *Remove* make it a list.
+- **Status:** ● Writing (green) · ● Armed (amber: a trigger / batch waiting, an event profile
+  listening) · ○ Off. Counts (runs, events, batches) update while recording and stay after Stop.
+- **Add ▾** offers the six types (inside a type: that type); double-click a profile: its pop-up;
+  in *All profiles* double-click opens its type with it selected. While recording, profiles cannot
+  change; *Test* fires a trigger (a 5 s run) or an event (one row) into the running session.
+- **Profile pop-up** (tabs): *General* (name, enabled, type - fixed, description) · *When* (the
+  type's settings; conditions = tag ▾ / operator / value - a Virtual logic tag for anything
+  more) · *Tags* · *Output*:
+
+```
+Folder       (●) Project default  D:\Logs     ( ) This folder [E:\Trend     ] [Browse...]   ✓ exists
+Folders      [Year \ Month \ Day ▾]   None · Session · Year · Year \ Month · Year \ Month \ Day · Date · Custom
+New file     [Every day ▾] at [00:00]   Per session · hour · day (at) · week (day, at) · month · N MB · per run / batch
+File name    [automatic: {profile}_{device}_{yyyy}{MM}{dd}]  [Tokens ▾]
+Preview      E:\Trend\2026\11\05\Data_1_s_Energy_meters_20261105.csv
+             E:\Trend\2026\11\06\Data_1_s_Energy_meters_20261106.csv   (next)
+Closed files [ ] Compress (.zst)                       Keep [90 days]
+Format       [CSV ▾]   [ ] Also raw packets (.wpk)
+```
+
+  Tokens: `{yyyy} {MM} {MMM} {dd} {HH} {ww} {project} {profile} {device} {run} {session}`. A
+  rotation without its token in the name gets it added (a note says so). *Keep N days* needs
+  `{profile}` in the name - it deletes only this profile's files (and empty date folders).
+  New profiles: interval - year \ month \ day, a file a day; on change - year \ month, a month;
+  trigger - year \ month \ day, a file per run; event - year, a month; batch - year \ month, per
+  batch; statistics - year, a month. Older profiles keep the session folder, a file per session.
+- **Project pop-up > Files:** the *default log folder* and which profiles use it.
+- **Data dock:** the sessions of every folder in use, plus one row per profile writing into date
+  folders (double-click: today's folder).
+- **Row menu:** Edit... · Enable / Disable · Test (trigger, event) · Duplicate · Open folder · Delete...
+- Variables are gone from the tree and the menus; those of older projects still run and log.
+
 ## 5. Settings pop-ups
 
 All use `common.popup_form` (header band with icon, title and one line; tabs; footer with
@@ -357,7 +448,7 @@ Page at startup" is the check box at its bottom.
 - **Layout:** two columns on a wide page, one below 980 px. Tiles go 3 → 2 → 1 columns. The
   page never scrolls sideways.
 - **At startup the Start Page is the only tab** (Connectivity when it is switched off). Every
-  other document - Connectivity, Tags, Logging, Alarms, Variables and the project's views - opens
+  other document - Connectivity, Tags, Assets, Logging, Alarms and the project's views - opens
   as a tab when it is first used (Project tree, menus, buttons).
 - **Quick View** (live plots of every tag) is still in the Project menu (Ctrl+1); it no longer
   opens at startup.
@@ -418,5 +509,5 @@ control HMI. Enter with **Monitor** on a view's toolbar, View > Monitor mode or 
 - An MCP Server (Web Services) so AI clients can read tags, alarms and history.
 - Per-category table columns (Role, URL, Auth ...) once those connectors exist.
 - Tags > Action and Tags > Memory.
-- Statistics of Variables moving into Aggregation; Virtual and Aggregation tags in the
-  recording files.
+- Converting the Variables of older projects into Virtual / Aggregation tags; Virtual and
+  Aggregation tags in the recording files (event profiles already snapshot them).

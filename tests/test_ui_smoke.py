@@ -502,7 +502,7 @@ def test_start_page(win, monkeypatch, tmp_path):
     monkeypatch.setattr(pd.ProjectDialog, "exec", proj_exec)
     win._project_popup()
     assert win.project.name == "Plant B" and win.project.operator == "Ann" and win.dirty
-    assert win.props.target.values["name"] == "Plant B" and win.p_name.text() == "Plant B"
+    assert win.props.target.values["name"] == "Plant B"
     win._set_project(saved, None)                                  # back to the shared test project
     win.dirty = False
     vp = next(iter(win.view_pages.values()))                       # and its view in front, as before
@@ -717,14 +717,13 @@ def test_editor_tabs(win, monkeypatch):
     assert win.props.target.readonly and win.props.target.apply is None
     assert [a[0] for a in win.props.target.actions] == ["Edit..."]
     # every other kind opens as a tab (new and existing)
-    for kind, ident, ctx in (("alarm", None, {}), ("aprofile", None, {"kind": "rest"}), ("variable", None, {}),
-                             ("lprofile", None, {"kind": "statistic"}),
-                             ("lprofile", win.project.logging_profiles[0]["id"], {})):
+    for kind, ident, ctx in (("alarm", None, {}), ("aprofile", None, {"kind": "rest"}),
+                             ("alarm", None, {})):
         e = win.open_editor(kind, ident, **ctx)
         assert isinstance(e, FormTab) and e.dlg is not None, kind
     # closing a modified editor asks (Apply / Don't apply / Cancel)
     import nxlogger.ui.widgets.form_tab as ft
-    e = win.open_editor("lprofile", win.project.logging_profiles[0]["id"])
+    e = win.open_editor("aprofile", win.project.alarm_profiles[0]["id"])     # a saved one
     assert not e.btn_apply.isEnabled() and not e.btn_refresh.isEnabled()      # nothing to apply yet
     e._set_modified(True)
     assert e.btn_apply.isEnabled() and e.btn_refresh.isEnabled()
@@ -1106,3 +1105,141 @@ def test_tag_import_export_popups(win, monkeypatch, tmp_path):
     monkeypatch.setattr(itd.ImportTagsDialog, "exec", import_copy)
     win.import_tags(dev.id)
     assert len(dev.tags) == n + 1 and dev.tags[-1].name != dev.tags[0].name
+
+
+def test_logging_types_page_and_recording(win, monkeypatch, tmp_path):
+    import glob
+    from PySide6.QtCore import Qt
+    from nxlogger.core import log_types as lt
+    from nxlogger.core.project import Project
+    from nxlogger.ui.dialogs import log_profile_dialog as ld
+    monkeypatch.setattr("nxlogger.ui.main_window.confirm", lambda *a_, **k_: True)
+    p = Project.default()
+    p.logging.folder = str(tmp_path)
+    win._set_project(p, None)
+    dev = p.devices[0]
+    k = [(dev.id, t.index) for t in dev.tags]
+    page = win.logging_page
+    root = win.ptree.topLevelItem(0)                             # Project tree: Logging > the six types
+    logn = next(root.child(i) for i in range(root.childCount()) if root.child(i).text(0) == "Logging")
+    assert [logn.child(i).data(0, Qt.ItemDataRole.UserRole) for i in range(logn.childCount())] == \
+        [("logtype", t[0]) for t in lt.TYPES]
+    assert all(logn.child(i).childCount() == 0 for i in range(logn.childCount()))
+    assert not any(root.child(i).text(0).startswith("Variables") for i in range(root.childCount()))
+    win._show_doc("logging"); page.show_type(None)
+    assert page.table.topLevelItemCount() == 2 and page.table.headerItem().text(3) == "Folder"
+    assert page.table.topLevelItem(0).text(3).endswith("(default)")
+    page.tree.setCurrentItem(page._items[("type", "interval")]); _pump(0.05)   # a click: only that type
+    assert page.kind is None and page.table.topLevelItemCount() == 1 and page.stack.currentWidget() is page.table
+    page.tree.setCurrentItem(page._items[("type", "trigger")]); _pump(0.05)
+    assert page.stack.currentWidget() is page.empty and page.empty.title.text() == "No trigger profiles"
+    page._left_double(page._items[("type", "trigger")], 0); _pump(0.05)      # a double click: the type page
+    assert page.kind == "trigger"
+    page.show_type(None)
+    assert page.table.topLevelItemCount() == 2                         # back: every profile again
+    page.show_type("trigger")
+    assert page.stack.currentWidget() is page.empty and page.empty.title.text() == "No trigger logging yet"
+
+    def add(kind, name, setup):
+        def run(dlg):                                            # the pop-up: General / When / Tags / Output
+            assert [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())] == ["General", "When", "Tags", "Output"]
+            dlg.name.setText(name)
+            setup(dlg)
+            dlg._check()
+            assert dlg.ok_btn.isEnabled(), dlg.err.text()
+            return True
+        monkeypatch.setattr(ld.LogProfileDialog, "exec", run)
+        win.add_log_profile(kind); _pump(0.05)
+        return next(x for x in win.project.logging_profiles if x["name"] == name)
+
+    def trig(dlg):                                               # always true: on at the first value
+        dlg.start.tag.setCurrentIndex(dlg.start.tag.findData(list(k[0])))
+        dlg.start.op.setCurrentText(">"); dlg.start.value.setValue(-1e9)
+        dlg.pre.setValue(1); dlg.post.setValue(1)
+        dlg.all.setChecked(False)
+        for leaf in dlg.picker.leaves[:3]:
+            leaf.setCheckState(0, Qt.CheckState.Checked)
+        assert [dlg.tabs.tabText(i) for i in range(4)][3] == "Output"         # its own folder, a file per run
+        dlg.f_own.setChecked(True); dlg.f_path.setText(str(tmp_path / "runs"))
+        dlg.folders.setCurrentIndex(dlg.folders.findData("none"))
+        assert dlg.new_file.currentData() == "run" and "will be created" in dlg.f_state.text()
+        assert "Run_1.csv" in dlg.preview.text() and "(next run)" in dlg.preview.text()
+    tr = add("trigger", "Run log", trig)
+    assert tr["output"]["folder"] == str(tmp_path / "runs") and tr["output"]["folders"] == "none"
+    assert tr["when"]["start"] == {"key": list(k[0]), "op": ">", "value": -1e9} and tr["when"]["stop"] is None
+
+    def marks(dlg):
+        dlg.source.setCurrentIndex(dlg.source.findData("marker"))
+        dlg.all.setChecked(False)
+        for leaf in dlg.picker.leaves[:2]:
+            leaf.setCheckState(0, Qt.CheckState.Checked)
+    snap = add("event", "Marks", marks)
+    assert snap["when"]["source"] == "marker" and len(snap["channels"]) == 2
+    ch = add("change", "Changes", lambda d: (d.deadband.setValue(2), d.mode.setCurrentIndex(d.mode.findData("abs"))))
+    assert ch["when"]["deadband"] == 2 and ch["when"]["mode"] == "abs"
+
+    def dup(dlg):                                                # names stay unique
+        dlg.name.setText("Run log"); dlg._check()
+        assert not dlg.ok_btn.isEnabled() and "already" in dlg.err.text()
+        return False
+    monkeypatch.setattr(ld.LogProfileDialog, "exec", dup)
+    win._log_profile_popup(ch["id"])
+    page.show_type("trigger")                                    # a type: its profiles, the card, the tags
+    assert list(page._items) == [tr["id"]] and page.stack.currentWidget() is page.view
+    card = {page.view.grid.itemAt(i).widget().text() for i in range(page.view.grid.count())}
+    assert "Start when" in card and "per run / batch" in card and page.view.folder.toolTip() == str(tmp_path / "runs")
+    assert [page.view.tabs.tabText(i) for i in range(4)] == ["Overview", "Tags (3)", "Files", "History"]
+    assert "Writes while" in page.view.sentence.text() and page.band.text.text() == "Trigger  (1)"
+    assert page.tree.topLevelItemCount() == 1                            # no "All profiles" row: the tree goes back
+    page.view.tabs.setCurrentIndex(1)
+    assert page.view.tags.topLevelItemCount() == 3                       # the simulator's first 3 tags (picked)
+    assert "Ready" in page.health.state.text()
+    page.show_type("change")
+    assert page.view.tags_note.text().startswith("All enabled")
+    win.log_profile_remove(ch["id"], [k[0]], [])                         # All enabled -> the list without it
+    assert ch["channels"] and list(k[0]) not in ch["channels"]
+    assert win.log_status(tr) == ("off", "")
+    win.select_object(("lprof", tr["id"]))
+    assert win.props.target.readonly and win.props.target.values["Type"] == "Trigger"
+
+    class Mark:                                                  # the Marker pop-up
+        def __init__(self, *a_): pass
+        def exec(self): return True
+        def result(self): return "note", "valve opened"
+    monkeypatch.setattr("nxlogger.ui.main_window.MarkerDialog", Mark)
+    win._start_all()
+    _pump(1.0)
+    win._start_recording()
+    rec = win.recorder
+    try:
+        assert rec is not None and len(rec.profiles) == 4              # Statistics 1 min is off
+        _pump(1.5)
+        assert win.log_status(tr)[0] == "writing" and win.log_status(snap)[0] == "armed"
+        assert win.act_marker.isEnabled()
+        win._ml_marker("note")
+        win.test_log_profile(snap["id"])
+        _pump(0.6)
+        page.show_type("trigger")
+        page.update_live()
+        assert "RECORDING" in page.health.state.text() and "writing" in page.health.counts.text()
+        assert page.view.state.text().startswith("● Writing")
+    finally:                                                     # never leave a recording running
+        win._stop_recording()
+        win.drivers.stop_all()
+    assert win.log_status(snap) == ("off", "2 events") and win.log_status(tr)[1] == "1 run"
+    page.show_type("trigger", tr["id"])
+    page.view.tabs.setCurrentIndex(3)                                    # History: the run
+    assert page.view.hist.topLevelItemCount() == 1 and page.view.hist.topLevelItem(0).text(0) == "Run 1"
+    page.view.tabs.setCurrentIndex(2)                                    # Files: its file
+    assert page.view.files.topLevelItemCount() == 1 and "Run_1" in page.view.files.topLevelItem(0).text(0)
+    page.show_type("event", snap["id"]); page.view.tabs.setCurrentIndex(3)
+    assert page.view.hist.topLevelItemCount() == 2                       # the newest events
+    month = time.strftime("%Y%m")                               # a new event profile: year folder, a file a month
+    rows = (tmp_path / month[:4] / f"Marks_{month}.csv").read_text(encoding="utf-8-sig").splitlines()
+    assert (tmp_path / month[:4] / "index.json").exists()
+    assert [r.split(",")[2] for r in rows[4:]] == ["Note: valve opened", "Test"]
+    run = glob.glob(str(tmp_path / "runs" / "Run_log_*_Run_1.csv"))
+    assert run and ",run," in open(run[0], encoding="utf-8-sig").read().splitlines()[3] + ","
+    assert (tmp_path / month[:4] / month[4:] / f"Changes_Simulator_{month}.csv").exists()    # year / month, monthly
+    win.delete_log_profile(ch["id"])
+    assert ch not in win.project.logging_profiles
