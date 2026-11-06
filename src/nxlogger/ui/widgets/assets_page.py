@@ -39,6 +39,7 @@ from nxlogger.core import assets as am
 from nxlogger.ui.icons import STATUS_SIZE, status_icon, swatch
 from nxlogger.ui.theme.ui_kit import T, label, make_icon, vsep
 from nxlogger.ui.widgets.connectivity import Band
+from nxlogger.ui.widgets.summary_strip import SummaryStrip, plural
 
 MCOLS = ["Name", "Type", "Area", "Template", "Tags", "Value", "Status", "Description"]
 TCOLS = ["Name", "Tag", "Source", "Machine", "Value", "Unit", "Quality", "Updated"]
@@ -169,7 +170,9 @@ class AssetsPage(QWidget):
         split = QSplitter(); split.addWidget(left); split.addWidget(right)
         split.setStretchFactor(1, 1); split.setSizes([260, 780]); split.setChildrenCollapsible(False)
         v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
-        v.addWidget(bar); v.addWidget(split, 1)
+        self.summary = SummaryStrip()                # the summary under the toolbar (no rollup)
+        self.summary.chip_clicked.connect(self._summary_chip)
+        v.addWidget(bar); v.addWidget(self.summary); v.addWidget(split, 1)
 
     def _button(self, text, icon, slot, tip) -> QToolButton:
         b = QToolButton(); b.setToolTip(tip)
@@ -313,13 +316,14 @@ class AssetsPage(QWidget):
             root = QTreeWidgetItem([f"All templates  ({len(self.templates)})"])
             for t in self.templates:
                 rows.append((t, f"{t['name']}  ({am.template_used(self.assets, t['id'])} used)"))
-        root.setIcon(0, make_icon("list", T["text"]))
+        root.setIcon(0, self._all_icon())                # the dot column: the worst state of the rows below
         root.setData(0, Qt.ItemDataRole.UserRole, None)
         self.tree.addTopLevelItem(root)
+        self._root = root
         for x, text in rows:
             it = QTreeWidgetItem([text])
-            if self._mode == TPL:
-                it.setIcon(0, make_icon(am.icon_of(x), T["muted"]))
+            if self._mode == TPL:                        # templates: no state - an empty dot slot
+                it.setIcon(0, status_icon(am.icon_of(x), "blank", T["muted"]))
             else:
                 it.setIcon(0, status_icon(am.icon_of(x), am.status(self.assets, x["id"], self.host.asset_state),
                                           T["muted"]))
@@ -362,6 +366,7 @@ class AssetsPage(QWidget):
     def _fill(self):
         {ENT: self._fill_machines, AREA: self._fill_tags, TPL: self._fill_attributes}[self._mode]()
         self._update_buttons()
+        self.refresh_summary()
 
     def _show(self, table, empty):
         """The table, or (empty = (icon, title, text, actions)) the empty state."""
@@ -499,6 +504,45 @@ class AssetsPage(QWidget):
         self.hint.setText(f"{len(self.templates)} template(s) · double-click to edit · Match: the tag names "
                           "Map tags... looks for")
 
+    # ---------------------------------------------------------------- the summary strip
+    def refresh_summary(self):
+        """Enterprise │ areas · machines │ tags good · no data │ not mapped · in alarm · empty - a chip
+        opens the first machine it counts; the first machine in alarm on a second line."""
+        h = self.host.assets_summary()
+        name = self.host.enterprise_name()
+        if not self.assets:
+            self.summary.set("muted", "○ No assets yet - group your tags by area and machine", (), None,
+                             [("+  Add area", lambda: self.host.add_asset("area", None))])
+            return
+        state = "bad" if h["alarm"] else ("warn" if h["not_mapped"] or h["nodata"] else "ok")
+        chips = [("areas", plural(h["areas"], "area"), ""), ("machines", plural(h["machines"], "machine"), ""),
+                 ("|", "", ""), ("good", f"{h['tags']:,} tags · {h['good']:,} good", "ok")]
+        if h["nodata"]:
+            chips.append(("nodata", f"{h['nodata']:,} no data", "warn"))
+        extra = [(k, text, tok) for k, text, tok in
+                 (("not_mapped", f"{h['not_mapped']:,} not mapped", "warn"),
+                  ("alarm", f"{plural(h['alarm'], 'machine')} in alarm", "bad"),
+                  ("empty", f"{plural(h['empty'], 'empty machine')}", "muted")) if h[k]]
+        if extra:
+            chips += [("|", "", "")] + extra
+        issue = None
+        first = h["first"].get("alarm")
+        if first:
+            m = am.by_id(self.assets).get(first)
+            issue = (f"{am.path(self.assets, first)} in alarm" + (f"  (+{h['alarm'] - 1} more)" if h["alarm"] > 1 else ""),
+                     "bad", [("Open machine ›", lambda i=first: self.open(i))]) if m else None
+        self.summary.set(state, f"● {name}", chips, issue)
+
+    def _summary_chip(self, key):
+        """A chip: open the first machine it counts (areas / machines: the Enterprise)."""
+        self.summary.clear_filter()
+        target = self.host.assets_summary()["first"].get(key)
+        if key in ("areas", "machines", "good"):
+            self.show_enterprise()
+        elif target:
+            self.open(target)
+        self.refresh_summary()
+
     def update_live(self):
         """The tags' values (an area) - the dots and rollups follow on refresh_status."""
         if self._mode != AREA:
@@ -514,10 +558,23 @@ class AssetsPage(QWidget):
                     it.setText(c, text or "")
             it.setForeground(C_QUAL, ok if good else (bad if good is False else muted))
 
+    def _all_icon(self):
+        """The "All ..." row: the list icon after the worst state of the area / plant (no dot: templates)."""
+        if self._mode == TPL:
+            return status_icon("list", "blank")
+        return status_icon("list", am.status(self.assets, self._area if self._mode == AREA else None,
+                                              self.host.asset_state))
+
     def refresh_status(self):
-        """The status dots and rollups (every few seconds)."""
+        """The status dots and rollups (every few seconds) - and the summary strip."""
+        self.refresh_summary()
         if self._mode == TPL:
             return
+        if getattr(self, "_root", None) is not None:
+            try:
+                self._root.setIcon(0, self._all_icon())
+            except RuntimeError:                         # the list was rebuilt
+                self._root = None
         for aid, it in self._items.items():
             if aid in am.by_id(self.assets):
                 a = am.by_id(self.assets)[aid]

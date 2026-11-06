@@ -1,14 +1,15 @@
-"""Add / edit an alarm notification profile (log, popup, REST, MQTT, e-mail)."""
+"""Add / edit an alarm notification profile (log, popup, REST, MQTT, e-mail): the settings pop-up,
+tabs style - General (name, enabled, type, levels, events) · Target (URL / topic / address)."""
 from __future__ import annotations
 
 import copy
 
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QStackedWidget,
+                               QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QStackedWidget, QTabWidget,
                                QVBoxLayout, QWidget)
 
 from nxlogger.core.alarm_rules import LEVELS, PROFILE_KINDS, normalize_profile
-from nxlogger.ui.dialogs.common import spin
+from nxlogger.ui.dialogs.common import form_page, spin
 from nxlogger.ui.icons import level_icon
 from nxlogger.ui.theme.ui_kit import label, set_prop
 
@@ -21,8 +22,8 @@ class AlarmProfileDialog(QDialog):
         self.p = copy.deepcopy(normalize_profile(profile))
         self.setWindowTitle("Notification profile")
         self.setMinimumWidth(520)
-        v = QVBoxLayout(self)
-        f = QFormLayout(); f.setSpacing(8)
+        tabs = self.tabs = QTabWidget()
+        gp, f = form_page()
         self.name = QLineEdit(self.p["name"])
         self.enabled = QCheckBox("Enabled", checked=self.p["enabled"])
         r = QHBoxLayout(); r.addWidget(self.name, 1); r.addWidget(self.enabled)
@@ -46,7 +47,7 @@ class AlarmProfileDialog(QDialog):
             er.addWidget(c)
         er.addStretch(1)
         f.addRow("Events", er)
-        v.addLayout(f)
+        tabs.addTab(gp, "General")
 
         self.stack = QStackedWidget()
         pages = {}
@@ -88,16 +89,18 @@ class AlarmProfileDialog(QDialog):
                 it = pf.itemAt(i, QFormLayout.ItemRole.SpanningRole)
                 if it and isinstance(it.widget(), QLabel):
                     it.widget().setWordWrap(True)
-        v.addWidget(self.stack)
+        tw = QWidget(); tv = QVBoxLayout(tw); tv.setContentsMargins(4, 4, 4, 4)
+        tv.addWidget(self.stack); tv.addStretch(1)
+        tabs.addTab(tw, "Target")
         self.kind.currentIndexChanged.connect(self._kind)
         self._kind()
 
         self.err = QLabel(); self.err.setObjectName("statusMsg")
-        v.addWidget(self.err)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        set_prop(bb.button(QDialogButtonBox.StandardButton.Ok), "primary", True)
+        self.ok_btn = bb.button(QDialogButtonBox.StandardButton.Ok)
+        set_prop(self.ok_btn, "primary", True)
         bb.accepted.connect(self._ok); bb.rejected.connect(self.reject)
-        v.addWidget(bb)
+        v = QVBoxLayout(self); v.addWidget(tabs, 1); v.addWidget(self.err); v.addWidget(bb)
 
     def _kind(self):
         self.stack.setCurrentIndex(self.kind.currentIndex())

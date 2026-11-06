@@ -63,6 +63,7 @@ def new_log_profile(kind: str = "interval", name: str = "") -> dict:
     kind = lt.type_of({"type": kind})
     return {"id": uuid.uuid4().hex[:8], "name": name or ("Data" if kind == "interval" else lt.TYPE[kind][1]),
             "enabled": True, "type": kind, "format": "CSV", "keep_raw": False, "description": "",
+            "icon": "",                         # "" = the type's (log_types.icon_of)
             "channels": None,                   # None = all enabled tags, else [[device_id, index]]
             "assets": [],                       # + whole assets (ids), kept live (their tags as they change)
             "interval_s": 60.0, "stats": ["mean", "min", "max"],      # statistic
@@ -158,6 +159,8 @@ class Project:
             for k, v in new_log_profile(x.get("type", "interval")).items():
                 x.setdefault(k, v)
             lt.normalize_when(x)                 # "signal" -> interval (every value), when: defaults
+            if x.get("icon") and x["icon"] not in lt.ICONS:   # only the app's own icons
+                x["icon"] = ""
             lf.normalize_output(x)
             if x["format"] not in ("CSV", "WPK"):    # TDMS is no longer written
                 x["format"] = "CSV"

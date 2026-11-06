@@ -568,6 +568,7 @@ def popup_form(dlg: QDialog, icon: str, title: str, subtitle: str, verb: str, wi
     scroll.setFrameShape(QFrame.Shape.NoFrame)
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     head, _ic, t, _sub = dialog_header(icon, title, subtitle)
+    dlg.header_icon = _ic                            # a form can change it live (an icon picker)
     foot = QFrame(); foot.setObjectName("dlgFooter")
     fh = QHBoxLayout(foot); fh.setContentsMargins(20, 10, 20, 10); fh.setSpacing(8)
     mv = QVBoxLayout(); mv.setSpacing(0)

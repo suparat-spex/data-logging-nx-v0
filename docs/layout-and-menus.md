@@ -57,6 +57,27 @@ menus exist and what the pop-ups look like. **When to use** an editor tab or a p
 Section headers (the project, Connectivity, Tags, Assets, Logging, Alarms, Views)
 and the category / area / logging-type nodes have **no right-click menu** (double-click an area: its pop-up).
 
+## Summary strip (Connectivity, Tags, Assets, Logging)
+
+One line under the toolbar when all is well, a second line only for the worst problem
+(`ui/widgets/summary_strip.py`):
+
+```
+● Connected · 1 h 42 min  │ 5 online  1 error  1 disabled │ 1,240 values/s │ 0 errors /h
+⚠ PLC-02: timeout (192.168.1.12)                                  [Open device ›] [Retry]
+○ Not connected · 6 devices ready (1 disabled)
+```
+
+| Page | Title | Chips (a click filters / opens; again: all) | Problem line |
+|---|---|---|---|
+| Connectivity | Connected · time / Not connected · ready | online, connecting, stalled, error, stopped, disabled · values/s · errors /h · poll load ≥ 50 % | Open device › · Retry |
+| Tags | N tags / not connected | good, bad, no data, disabled · in alarm, formula errors · values/s | Show bad › · Open device › |
+| Assets | ● the Enterprise (no rollup) | areas, machines · tags good, no data · not mapped, in alarm, empty (opens the first such machine) | Open machine › |
+| Logging | Recording · time / Not recording | writing, armed, stalled, error, off · disk free and days left · rows/s, dropped | Open profile › |
+
+Counts use real plurals (1 device, 3 devices); chips are coloured by state (theme tokens). No Connect /
+Record buttons in the strip - those stay on the main toolbar (Assets keeps *+ Add area* when empty).
+
 ## 3. Connectivity document
 
 ```
@@ -310,7 +331,8 @@ Project tree > Logging: the types left (click one: open it), every profile right
 - **Add ▾** offers the six types (inside a type: that type); double-click a profile: its pop-up;
   in *All profiles* double-click opens its type with it selected. While recording, profiles cannot
   change; *Test* fires a trigger (a 5 s run) or an event (one row) into the running session.
-- **Profile pop-up** (tabs): *General* (name, enabled, type - fixed, description) · *When* (the
+- **Profile pop-up** (tabs): *General* (name, enabled, type - fixed, **icon** - the grid of the app's
+  icons, *Default* = the type's; shown in the lists, the table, the header and Properties - description) · *When* (the
   type's settings; conditions = tag ▾ / operator / value - a Virtual logic tag for anything
   more) · *Tags* · *Output*:
 
@@ -336,6 +358,31 @@ Format       [CSV ▾]   [ ] Also raw packets (.wpk)
   folders (double-click: today's folder).
 - **Row menu:** Edit... · Enable / Disable · Test (trigger, event) · Duplicate · Open folder · Delete...
 - Variables are gone from the tree and the menus; those of older projects still run and log.
+
+### Alarms (Project tree > Alarms)
+
+```
+▾ Alarms  ·  1 active             the live view: Active (level, alarm, tag, value, since) · Alarm log
+    Limit  H / L          (4)     H / L - a new one: HH / H / L / LL as its 4 levels
+    Rate of change        (0)     RH / RL units/s
+    Deviation             (0)     DV |value − SP| > band (SP: a constant or the reference tag) · dH / dL
+    State                 (0)     S value = / ≠ a state (a trip, a door, a breaker)
+    Data loss             (0)     D no data for N s
+    Notifications         (1)     log, popup, REST, MQTT, e-mail
+```
+
+- An alarm sits in the type of its **Level 1** (`alarm_rules.group_of`); the type's icon turns red
+  while one of its alarms is active.
+- **A type:** its alarms left (dot = active / normal / disabled + its icon), the alarm right: header
+  (state, ✎ Edit, ⋯ Enable / Duplicate / Open tag / Delete), its tag, **Overview** (a sentence, the
+  levels with their state, where it notifies) · **History** (its ON / OFF).
+- **Notifications:** profiles left (dot = last send ok / failed), the profile right (type, target,
+  levels, events, last result, used by; ⋯ Send test).
+- **Summary strip:** `● 1 active alarm │ 1 L1 │ 1 today │ 4 alarms`, the worst active alarm on a
+  second line with *Open alarm ›*; a level chip shows only that level in Active.
+- **Pop-ups** (tabs, like devices / tags / logging): alarm - *General* (name, tag, reference,
+  description, **icon** - *Default* = its type's, shown in the lists and headers) · *Levels* (type, setpoint, SP / state, hysteresis, on-delay) · *Notify*; profile -
+  *General* (name, type, levels, events) · *Target*. No alarm editor tabs any more.
 
 ## 5. Settings pop-ups
 

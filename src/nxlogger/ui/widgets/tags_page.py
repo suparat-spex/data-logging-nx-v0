@@ -63,6 +63,7 @@ from nxlogger.core.tags import DRIVERS, describe_address, driver_label
 from nxlogger.ui.icons import swatch
 from nxlogger.ui.theme.ui_kit import T, label, make_icon, vsep
 from nxlogger.ui.widgets.connectivity import STATE_TOKEN, Band
+from nxlogger.ui.widgets.summary_strip import SummaryStrip, plural
 
 COLS = ["Name", "Source", "Assets", "Address", "Type", "Access", "Unit", "Value", "Quality", "Updated",
         "Description"]
@@ -181,7 +182,10 @@ class TagsPage(QWidget):
         split = QSplitter(); split.addWidget(left); split.addWidget(right)
         split.setStretchFactor(1, 1); split.setSizes([230, 800]); split.setChildrenCollapsible(False)
         v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
-        v.addWidget(bar); v.addWidget(split, 1)
+        self.summary = SummaryStrip()                # the summary under the toolbar
+        self.summary.chip_clicked.connect(self._quality_chip)
+        self._quality: str | None = None             # a chip's filter: good / bad / nodata / disabled / alarm / formula
+        v.addWidget(bar); v.addWidget(self.summary); v.addWidget(split, 1)
 
     def _button(self, text, icon, slot, tip) -> QToolButton:
         b = QToolButton(); b.setToolTip(tip)
@@ -482,6 +486,9 @@ class TagsPage(QWidget):
                 tok = r.color if r is not None and r.color in T else ""
                 it.setForeground(C_VALUE, QBrush(QColor(T[tok])) if tok else
                                  (QBrush(QColor(T["bad"])) if good is False else QBrush()))
+        if self._quality is not None:                    # a quality chip: rows move in / out
+            self._apply_filter()
+        self.refresh_summary()
 
     def refresh_assets(self):
         """Assets changed: only the Assets column."""
@@ -490,8 +497,56 @@ class TagsPage(QWidget):
 
     def _apply_filter(self):
         text = self.filter.text().strip().lower()
-        for it in self._rows.values():
-            it.setHidden(bool(text) and not any(text in it.text(c).lower() for c in C_FILTER))
+        q = self._quality
+        for key, it in self._rows.items():
+            hide = bool(text) and not any(text in it.text(c).lower() for c in C_FILTER)
+            if q == "alarm":
+                hide = hide or not self.host.alarm_engine.channel_state(*key)[0]
+            elif q == "formula":
+                hide = hide or not ((vt.is_vt(key[0]) and key[0][len(vt.VT_PREFIX):] in self.host.vt_engine.errors) or
+                                    (ag.is_agg(key[0]) and key[0][len(ag.AGG_PREFIX):] in self.host.agg_engine.errors))
+            elif q is not None:
+                hide = hide or self.host.tag_quality(key) != q
+            it.setHidden(hide)
+
+    # ---------------------------------------------------------------- the summary strip
+    def refresh_summary(self):
+        """Tags · good │ bad · no data · disabled │ in alarm · formula errors │ values/s - chips filter
+        the table; the first bad device on a second line."""
+        h = self.host.tags_summary()
+        title = f"● {plural(h['total'], 'tag')}"
+        state = "bad" if h["bad"] or h["formula"] else ("warn" if h["alarm"] else "ok")
+        chips = [(k, f"{h[k]:,} {text}", tok) for k, text, tok in
+                 (("good", "good", "ok"), ("bad", "bad", "bad"), ("nodata", "no data", "warn"),
+                  ("disabled", "disabled", "muted")) if h[k]]
+        extra = [(k, f"{h[k]:,} {text}", tok) for k, text, tok in
+                 (("alarm", "in alarm", "bad"), ("formula", "formula errors", "bad")) if h[k]]
+        if extra:
+            chips += [("|", "", "")] + extra
+        actions, issue = [], None
+        if h["running"]:
+            chips += [("|", "", ""), ("rate", f"{h['rate']:,.0f} values/s", "")]
+        else:
+            title = f"○ {plural(h['total'], 'tag')} · not connected - values appear when devices run"
+            state = "muted"
+            chips = [c for c in chips if c[0] in ("disabled", "formula")]   # Connect: the main toolbar
+        if h["bad_keys"]:
+            names = [self.host.key_label(k).split(" · ")[-1] for k in h["bad_keys"][:3]]
+            d = self.host.project.device(h["bad_device"])
+            why = self.host.device_state(d.id)[1] if d else ""
+            issue = (f"{len(h['bad_keys'])} bad: {', '.join(names)}" + (" …" if len(h["bad_keys"]) > 3 else "")
+                     + (f"  ({d.name}{' - ' + why if why else ''})" if d else ""), "bad",
+                     [("Show bad ›", lambda: (setattr(self.summary, "active", "bad"), self._quality_chip("bad"))),
+                      ("Open device ›", lambda i=h["bad_device"]: self.host.open_device_page(i))])
+        self.summary.set(state, title, chips, issue, actions)
+
+    def _quality_chip(self, key):
+        if key == "rate":
+            self.summary.clear_filter()
+            key = None
+        self._quality = key
+        self._apply_filter()
+        self.refresh_summary()
 
     # ---------------------------------------------------------------- selection
     def selected_tags(self) -> list[tuple[str, int]]:

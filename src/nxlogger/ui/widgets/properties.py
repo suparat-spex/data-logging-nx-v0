@@ -97,7 +97,7 @@ def log_profile_target(w, pid: str) -> PropTarget | None:
             "Folder": w.profile_live(pr)["folder"], "New file": lf.describe(lf.normalize_output(dict(pr))),
             "Enabled": "Yes" if pr["enabled"] else "No", "Status": st.capitalize() + (f" · {count}" if count else ""),
             "Description": pr.get("description") or "-"}
-    return PropTarget(pr["name"], lt.TYPE[kind][2], f"Logging profile · {lt.TYPE[kind][1]}",
+    return PropTarget(pr["name"], lt.icon_of(pr), f"Logging profile · {lt.TYPE[kind][1]}",
                       [("Logging profile", [F(k, k, "info", "") for k in rows])], rows, None,
                       [("Edit...", "pencil", lambda: w.edit_log_profile(pid))], key=("lprof", pid), readonly=True)
 

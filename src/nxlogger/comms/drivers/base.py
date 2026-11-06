@@ -11,12 +11,19 @@ timer drains the queue (CLAUDE.md: threads never touch widgets). Messages:
 
 A value of None means bad quality (read error, not received yet, not a number).
 PollDriver reconnects by itself (2 s, 4 s ... 10 s back-off) until stopped.
+
+Diagnostics (read by the GUI, written by the driver thread - plain counters and bounded deques):
+  scans, errors, values (good values read), last_ok, scan_times [(t, ms)] of the last hour,
+  events [(t, state, text)] (the last 500 state changes), error_times (the last 1000),
+  blocks [{"unit", "area", "start", "count", "tags", "ms", "error"}] of the last scan (Modbus),
+  comm [(t, "TX" | "RX" | "ERR", text)] while comm_on (the Diagnostics tab is open)
 """
 from __future__ import annotations
 
 import queue
 import threading
 import time
+from collections import deque
 
 STATES = {"stopped": "Stopped", "connecting": "Connecting", "online": "Online", "error": "Error"}
 
@@ -26,8 +33,14 @@ class Driver:
         self.dev, self.out = dev, out             # dev: a private copy of the DeviceCfg
         self.id = dev.id
         self.state, self.message = "stopped", ""
-        self.scans = self.errors = self.dropped = 0
+        self.scans = self.errors = self.dropped = self.values = 0
         self.last_ok = 0.0
+        self.scan_times: deque = deque(maxlen=3600)
+        self.events: deque = deque(maxlen=500)
+        self.error_times: deque = deque(maxlen=1000)
+        self.blocks: list[dict] = []
+        self.comm: deque = deque(maxlen=200)
+        self.comm_on = False
         self._stop = threading.Event()
         self._writes: "queue.Queue[tuple[int, float]]" = queue.Queue()
         self._thread = threading.Thread(target=self._main, name=f"drv-{dev.name}", daemon=True)
@@ -57,8 +70,17 @@ class Driver:
 
     def status(self, state: str, text: str = ""):
         if (state, text) != (self.state, self.message):
+            if state != self.state or state == "error":
+                self.events.append((time.time(), state, text))
+            if state == "error":
+                self.error_times.append(time.time())
             self.state, self.message = state, text
             self.put(("status", self.id, state, text))
+
+    def log(self, direction: str, text: str):
+        """The comm log (only while someone looks at it)."""
+        if self.comm_on:
+            self.comm.append((time.time(), direction, text))
 
     def sleep(self, s: float) -> bool:
         """Wait, but wake at once on stop. True = keep running."""
@@ -109,13 +131,17 @@ class PollDriver(Driver):
                     self.status("online", f"{len(tags)} tag(s) every {period:g} s")
                 self._do_writes()
                 t = time.time()
+                t0 = time.perf_counter()
                 vals = self.read(tags) if tags else []
+                self.scan_times.append((t, (time.perf_counter() - t0) * 1000.0))
+                self.values += sum(1 for v in vals if v is not None)
                 self.scans += 1
                 if any(v is not None for v in vals) or not tags:
                     self.last_ok = t
                 self.put(("scan", self.id, t, period, index, vals))
             except Exception as e:
                 self.errors += 1
+                self.log("ERR", str(e)[:200] or type(e).__name__)
                 fails += 1
                 connected = False
                 self.status("error", str(e)[:200] or type(e).__name__)

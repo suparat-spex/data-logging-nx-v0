@@ -136,7 +136,10 @@ class MqttDriver(Driver):
 
     def _on_message(self, client, userdata, msg):
         rx = time.time()
+        self.log("RX", f"{msg.topic}  {len(msg.payload)} bytes")
         if self.dev.wave:
+            self.last_ok = rx
+            self.values += 1
             self.put(("wave", self.id, rx, bytes(msg.payload)))
             return
         for t in self.number_tags():
@@ -146,6 +149,7 @@ class MqttDriver(Driver):
                 with self._lock:
                     self.latest[t.index] = v
                 self.last_ok = rx
+                self.values += v is not None
 
     # ---- writing / publishing
     def _do_writes(self):

@@ -383,8 +383,9 @@ class EmptyState(QWidget):
         lay = QVBoxLayout(self)
         lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.setSpacing(8)
-        i = QLabel(icon)
+        i = QLabel()                                  # icon: an app icon name (Lucide) - no emoji
         i.setObjectName("emptyIcon")
+        i.setPixmap(make_icon(icon, T["muted"]).pixmap(40, 40))
         i.setAlignment(Qt.AlignmentFlag.AlignCenter)
         t = QLabel(title)
         t.setObjectName("emptyTitle")
@@ -511,7 +512,7 @@ class AppWindow(QMainWindow):
         return Accordion()
 
     def build_center(self):
-        return EmptyState("🗺️", "Nothing here yet", "Override build_center() to put your main view here.")
+        return EmptyState("layout", "Nothing here yet", "Override build_center() to put your main view here.")
 
     def build_bottom_bar(self):
         return None                # optional QFrame with objectName "bottomBar"
@@ -749,7 +750,7 @@ class DemoWindow(AppWindow):
         days = QHBoxLayout()
         for d in ("Mon", "Tue", "Wed"):
             f, fl = tile()
-            for w in (QLabel(f"<b>{d}</b>"), QLabel("☀️"), QLabel("<b>34°</b> / 25°C"), label("ET₀ 4.1 mm/d", True, True)):
+            for w in (QLabel(f"<b>{d}</b>"), QLabel("<b>34°</b> / 25°C"), label("ET₀ 4.1 mm/d", True, True)):
                 w.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 fl.addWidget(w)
             days.addWidget(f)
@@ -757,7 +758,7 @@ class DemoWindow(AppWindow):
         v.addLayout(days)
         v.addStretch(1)
         tabs.addTab(summary, "Summary")
-        tabs.addTab(EmptyState("📈", "No forecast yet", "Click the map to fetch one.", "Open file", lambda: None), "Forecast")
+        tabs.addTab(EmptyState("chart", "No forecast yet", "Click the map to fetch one.", "Open file", lambda: None), "Forecast")
         return tabs
 
     def build_bottom_bar(self):

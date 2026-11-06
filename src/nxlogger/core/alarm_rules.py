@@ -10,6 +10,9 @@ Alarm definition (plain dict, saved in the project file):
                dL  difference low      (channel - reference channel) < setpoint
                RH  rate-of-change rise mean rises faster than setpoint units/s
                RL  rate-of-change fall mean falls faster than setpoint units/s
+               DV  deviation band      |value - SP| > setpoint (SP: the reference tag, else `sp`)
+               S   state               value = setpoint (op "=") or value != setpoint (op "!=")
+                                       - a discrete / digital alarm (trip, door, breaker)
                D   data loss           no data from the channel for setpoint seconds
     setpoint, hysteresis (the alarm clears only when the value is back by this much),
     on-delay   the condition must hold this long before the alarm turns ON
@@ -52,8 +55,29 @@ TYPES = {
     "dL": "Difference low (channel − reference)",
     "RH": "Rate of change, rise (units/s)",
     "RL": "Rate of change, fall (units/s)",
+    "DV": "Deviation band |value − setpoint|",
+    "S": "State (value = / ≠ a state)",
     "D": "Data loss (no data for N s)",
 }
+GROUPS = [   # the Project tree's alarm types (an alarm sits in its Level 1 type's group)
+    ("limit", "Limit  H / L", "gauge", ("H", "L"), "High / low limits - HH / H / L / LL as levels"),
+    ("rate", "Rate of change", "activity", ("RH", "RL"), "Rises or falls faster than N units/s"),
+    ("deviation", "Deviation", "sliders", ("DV", "dH", "dL"), "Away from a setpoint (a band) or from a reference tag"),
+    ("state", "State", "circle-dot", ("S",), "Discrete: a trip, a door, a breaker - value = / ≠ a state"),
+    ("data", "Data loss", "plug", ("D",), "No data from the tag for N seconds"),
+]
+GROUP = {g[0]: g for g in GROUPS}
+TYPE_GROUP = {t: g[0] for g in GROUPS for t in g[3]}
+STATE_OPS = {"=": "=", "!=": "≠"}
+ICONS = [      # the icons an alarm can have (resources/icons/ui, Lucide) - the five types first
+    "gauge", "activity", "sliders", "circle-dot", "plug", "bell", "flag", "zap", "power", "waves",
+    "audio-waveform", "chart", "chart-column", "sigma", "clock", "star", "tag", "database", "server", "cpu",
+    "factory", "boxes", "house", "network", "radio", "globe", "send", "hash", "list", "info"]
+
+
+def icon_of(a: dict) -> str:
+    """An alarm's icon: its own (one of ICONS), else its type's (the group of its Level 1)."""
+    return a["icon"] if a.get("icon") in ICONS else GROUP[group_of(a)][2]
 REF_TYPES = {"dH", "dL"}
 UP_TYPES, DOWN_TYPES = {"H", "dH", "RH"}, {"L", "dL", "RL"}
 LEVEL_TOKEN = {1: "bad", 2: "accent", 3: "warn", 4: "info"}
@@ -69,12 +93,36 @@ MAX_LOG = 1000
 
 # ====================================================================== model helpers
 def new_level(kind: str = "H") -> dict:
-    return {"enabled": False, "type": kind, "value": 0.0, "hyst": 0.0, "delay_s": 0.0}
+    """sp: the deviation band's setpoint (DV without a reference tag); op: "=" / "!=" (S)."""
+    return {"enabled": False, "type": kind, "value": 0.0, "hyst": 0.0, "delay_s": 0.0, "sp": 0.0, "op": "="}
+
+
+def group_of(a: dict) -> str:
+    """An alarm's group: the type of its first enabled level (else Level 1's)."""
+    lv = next((x for x in a.get("levels", []) if x.get("enabled")), (a.get("levels") or [new_level()])[0])
+    return TYPE_GROUP.get(lv.get("type", "H"), "limit")
+
+
+def preset_alarm(group: str, channel=None, name: str = "") -> dict:
+    """A new alarm of a group: Level 1 on with the group's first type (Limit: HH / H / L / LL)."""
+    a = new_alarm(channel, name)
+    if group == "limit":
+        a["levels"] = [new_level("H"), new_level("H"), new_level("L"), new_level("L")]
+    else:
+        t = GROUP.get(group, GROUPS[0])[3][0]
+        a["levels"] = [new_level(t) for _ in range(LEVELS)]
+    a["levels"][0]["enabled"] = True
+    if group == "state":
+        a["levels"][0]["value"] = 1.0
+    if group == "data":
+        a["levels"][0]["value"] = 10.0
+    return a
 
 
 def new_alarm(channel=None, name: str = "") -> dict:
     return {"id": uuid.uuid4().hex[:8], "name": name or "New alarm", "enabled": True,
             "channel": list(channel) if channel else None, "ref": None, "description": "",
+            "icon": "",                                  # "" = its type's (icon_of)
             "levels": [new_level(k) for k in ("H", "L", "H", "L")], "profiles": []}
 
 
@@ -92,6 +140,8 @@ def normalize_alarm(a: dict) -> dict:
     lv = list(a.get("levels") or [])[:LEVELS]
     lv += [new_level() for _ in range(LEVELS - len(lv))]
     a["levels"] = [{**new_level(), **x} for x in lv]
+    if a.get("icon") and a["icon"] not in ICONS:         # only the app's own icons
+        a["icon"] = ""
     return a
 
 
@@ -101,17 +151,22 @@ def normalize_profile(p: dict) -> dict:
     return p
 
 
-def describe_level(lv: dict, unit: str = "") -> str:
+def describe_level(lv: dict, unit: str = "", extras: bool = True) -> str:
     if not lv.get("enabled"):
         return ""
     t, v = lv["type"], lv["value"]
     unit = " s" if t == "D" else (f" {unit}/s" if t in ("RH", "RL") and unit else
                                   ("/s" if t in ("RH", "RL") else (f" {unit}" if unit else "")))
-    s = f"{t} {v:g}{unit}"
-    if lv.get("hyst"):
-        s += f" ±{lv['hyst']:g}"
-    if lv.get("delay_s"):
-        s += f" ⏱{lv['delay_s']:g}s"
+    if t == "S":
+        s = f"S {STATE_OPS.get(lv.get('op', '='), '=')} {v:g}"
+    elif t == "DV":
+        s = f"DV ±{v:g}{unit}" + (f" of {lv.get('sp', 0):g}" if lv.get("sp") else "")
+    else:
+        s = f"{t} {v:g}{unit}"
+    if extras and lv.get("hyst"):                    # extras: hysteresis / on-delay (tables have own columns)
+        s += f", hysteresis {lv['hyst']:g}"
+    if extras and lv.get("delay_s"):
+        s += f", delay {lv['delay_s']:g} s"
     return s
 
 
@@ -214,6 +269,16 @@ class AlarmEngine:
                         continue
                     r = rate if t == "RH" else -rate
                     on, off, v = r > sp, r < sp - h, rate
+                elif t == "DV":                       # |PV - SP| outside the band (SP: ref tag or `sp`)
+                    centre = self.ref_value(*a["ref"]) if a.get("ref") else float(lv.get("sp") or 0)
+                    if centre is None:
+                        continue
+                    d = vlast - centre
+                    on, off, v = abs(d) > sp, abs(d) < sp - h, d
+                elif t == "S":                        # a discrete state (0 / 1, a code)
+                    eq = abs(vlast - sp) < 1e-9
+                    on = eq if lv.get("op", "=") == "=" else not eq
+                    on, off, v = on, not on, vlast
                 else:
                     continue                          # D: see tick()
                 self._step(a, i + 1, lv, now, on, off, v)

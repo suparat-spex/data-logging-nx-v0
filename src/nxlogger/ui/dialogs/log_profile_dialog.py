@@ -24,7 +24,7 @@ import copy
 import os
 import time
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
                                QFileDialog, QGridLayout, QMenu, QPushButton, QRadioButton, QSpinBox, QToolButton,
                                QHBoxLayout, QLineEdit, QStackedWidget, QTabWidget, QVBoxLayout, QWidget)
@@ -34,7 +34,9 @@ from nxlogger.core import log_types as lt
 from nxlogger.core import recording as dl
 from nxlogger.core.project import STAT_INTERVALS
 from nxlogger.ui.dialogs.common import ChannelPicker, form_page
-from nxlogger.ui.theme.ui_kit import label, set_prop
+from nxlogger.ui.theme.ui_kit import T, label, make_icon, set_prop
+
+ICON_COLS = 10
 
 
 def _secs(value: float, maximum: float = 86400.0, special: str = "") -> QDoubleSpinBox:
@@ -100,6 +102,24 @@ class LogProfileDialog(QDialog):
         gf.addRow("Name", self.name)
         gf.addRow("", self.enabled)
         gf.addRow("Type", label(f"{tname} - {what}", muted=True))
+        self._icon = self.p.get("icon") if self.p.get("icon") in lt.ICONS else ""
+        icons = QWidget(); iv = QVBoxLayout(icons); iv.setContentsMargins(0, 0, 0, 0); iv.setSpacing(4)
+        grid = QGridLayout(); grid.setSpacing(2)
+        self.icon_btns: dict[str, QToolButton] = {}
+        for i, name_ in enumerate(lt.ICONS):
+            b = QToolButton(); b.setCheckable(True); b.setAutoRaise(True); b.setToolTip(name_)
+            b.setIconSize(QSize(18, 18)); b.setFixedSize(30, 30)
+            b.clicked.connect(lambda _=False, n=name_: self._set_icon(n))
+            grid.addWidget(b, i // ICON_COLS, i % ICON_COLS)
+            self.icon_btns[name_] = b
+        iv.addLayout(grid)
+        irow = QHBoxLayout(); irow.setSpacing(6)
+        self.icon_default = QPushButton("Default"); self.icon_default.clicked.connect(lambda: self._set_icon(""))
+        self.icon_default.setToolTip(f"The {tname} icon")
+        self.icon_note = label("", muted=True, small=True)
+        irow.addWidget(self.icon_default); irow.addWidget(self.icon_note, 1)
+        iv.addLayout(irow)
+        gf.addRow("Icon", icons)
         gf.addRow("Description", self.desc)
         gf.addRow("", label("Every enabled profile runs on Record and writes into the same session folder.",
                             muted=True, small=True))
@@ -327,7 +347,24 @@ class LogProfileDialog(QDialog):
         for le in (getattr(self, "times", None), getattr(self, "shifts", None)):
             if le is not None:
                 le.textChanged.connect(lambda _: self._check())
+        self._paint_icons()
         self._output_changed()
+
+    # ---------------------------------------------------------------- icon
+    def _set_icon(self, name: str):
+        self._icon = name if name in lt.ICONS else ""
+        self._paint_icons()
+
+    def _paint_icons(self):
+        shown = self._icon or lt.TYPE[self.kind][2]
+        for n, b in self.icon_btns.items():
+            b.setIcon(make_icon(n, T["text"] if n == shown else T["muted"]))
+            b.setChecked(n == shown)
+        self.icon_default.setEnabled(bool(self._icon))
+        self.icon_note.setText(f"Default: the {lt.TYPE[self.kind][1]} icon" if not self._icon else f"Icon: {self._icon}")
+        head = getattr(self, "header_icon", None)            # the pop-up's header (common.popup_form)
+        if head is not None:
+            head.setPixmap(make_icon(shown, T["accent"]).pixmap(32, 32))
 
     # ---------------------------------------------------------------- output
     def _browse(self):
@@ -435,6 +472,7 @@ class LogProfileDialog(QDialog):
     def result_profile(self) -> dict:
         p = self.p
         p.update(name=self.name.text().strip(), enabled=self.enabled.isChecked(), description=self.desc.text().strip(),
+                 icon=self._icon,
                  format=self.fmt.currentData(), type=self.kind, when=self._when(),
                  channels=None if self.all.isChecked() else self.picker.checked_outside_assets(),
                  assets=[] if self.all.isChecked() else self.picker.checked_assets(),

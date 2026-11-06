@@ -9,7 +9,7 @@ They are tinted per theme token and cached, so theme switches stay fast.
   check_icon_file / grip_icon_file      file paths for QSS (stylesheets only load files)
   swatch(color)                         channel colour chip
   level_icon(level), level_color(level) alarm level dot / colour
-  status_icon(name, state)              Assets: status dot (alarm / ok / none) + icon, STATUS_SIZE
+  status_icon(name, state)              left lists: status dot (alarm / armed / ok / none / blank) + icon
   app_icon()                            window, taskbar (resources/icons/app/nxlogger.ico)
 """
 from __future__ import annotations
@@ -114,7 +114,9 @@ def _status(name: str, state: str, dot: str, color: str) -> QIcon:
     w, h = STATUS_SIZE
     pm = QPixmap(2 * w, 2 * h); pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    if state == "none":                          # no data: a ring
+    if state == "blank":                         # no state: the slot stays (icons line up)
+        pass
+    elif state == "none":                        # no data: a ring
         p.setPen(QColor(dot)); p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawEllipse(3, h - 7, 13, 13)
     else:
@@ -128,7 +130,8 @@ def _status(name: str, state: str, dot: str, color: str) -> QIcon:
 
 
 def status_icon(name: str, state: str, color: str | None = None) -> QIcon:
-    """Assets: a status dot (alarm / ok / none = no data, a ring) + an icon, STATUS_SIZE."""
+    """Left lists (Assets, Connectivity, Logging): a status dot (alarm / armed / ok / none = no data,
+    a ring / blank = an empty slot) + an icon, STATUS_SIZE - every row the same two columns."""
     from nxlogger.ui.theme.ui_kit import T
     return _status(name, state, QColor(T[STATUS_TOKEN.get(state, "muted")]).name(), QColor(color or T["text"]).name())
 

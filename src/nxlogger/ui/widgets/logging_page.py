@@ -39,9 +39,9 @@ import os
 import time
 
 from PySide6.QtCore import QRect, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QPainter
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QPainter
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QMenu, QPushButton, QSplitter, QStackedWidget,
+                               QHeaderView, QLabel, QLineEdit, QMenu, QSplitter, QStackedWidget,
                                QStyle, QStyledItemDelegate, QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
@@ -52,6 +52,7 @@ from nxlogger.ui.icons import STATUS_SIZE, status_icon, swatch
 from nxlogger.ui.theme.ui_kit import T, fixed_width, label, make_icon, vsep
 from nxlogger.ui.widgets.assets_page import EmptyState
 from nxlogger.ui.widgets.connectivity import Band
+from nxlogger.ui.widgets.summary_strip import SummaryStrip, plural
 
 ALL_COLS = ["Name", "Type", "When", "Folder", "Last write", "Rate", "Size/day", "Status"]
 TAG_COLS = ["Name", "Source", "Unit", "Last logged", "Quality", "Asset"]
@@ -130,6 +131,7 @@ class TwoLineDelegate(QStyledItemDelegate):
         style = option.widget.style() if option.widget else QApplication.style()
         name = option.text
         option.text = ""
+        option.icon = QIcon()                            # the icon is painted below, on the first line
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, option, p, option.widget)
         r = option.rect.adjusted(6, 4, -6, -4)
         icon = index.data(Qt.ItemDataRole.DecorationRole)
@@ -210,69 +212,7 @@ class Bars(QWidget):
     def _fmt(self, v: float) -> str:
         if self.unit == "B":
             return fmt_bytes(v)
-        return f"{v / 1e6:.1f}M" if v >= 1e6 else (f"{v / 1e3:.1f}k" if v >= 1e3 else f"{v:g}")
-
-
-class HealthStrip(QFrame):
-    """The top of the Logging document: is the data safe right now."""
-
-    def __init__(self, page):
-        super().__init__()
-        self.page = page
-        self.setObjectName("subBar")
-        v = QVBoxLayout(self); v.setContentsMargins(12, 6, 12, 6); v.setSpacing(2)
-        r1 = QHBoxLayout(); r1.setSpacing(14)
-        self.state = QLabel(); f = self.state.font(); f.setBold(True); self.state.setFont(f)
-        self.counts = QLabel()
-        self.issue = QPushButton(); self.issue.setFlat(True)
-        self.issue.clicked.connect(self._goto_issue)
-        r1.addWidget(self.state); r1.addWidget(self.counts); r1.addStretch(1); r1.addWidget(self.issue)
-        r2 = QHBoxLayout(); r2.setSpacing(14)
-        self.disk = label("", muted=True, small=True)
-        self.rate = label("", muted=True, small=True)
-        r2.addWidget(self.disk); r2.addStretch(1); r2.addWidget(self.rate)
-        v.addLayout(r1); v.addLayout(r2)
-        self._issue_pid = None
-
-    def refresh(self, kind: str | None = None):
-        h = self.page.host.log_health()
-        if h["recording"]:
-            self.state.setText(f"● RECORDING  {time.strftime('%H:%M:%S', time.gmtime(h['elapsed']))}")
-            self.state.setStyleSheet(f"color: {T['bad']};")
-        else:
-            self.state.setText("○ Ready - not recording")
-            self.state.setStyleSheet(f"color: {T['muted']};")
-        st = h["states"]
-        parts = [f"{h['profiles']} profile(s)"] + [f"{st[k]} {STATE_TEXT[k].lower()}" for k in
-                                                   ("writing", "armed", "stalled", "error") if st.get(k)]
-        if kind:
-            mine = [p for p in self.page.profiles if lt.type_of(p) == kind]
-            parts.insert(0, f"{lt.TYPE[kind][1]}: {len(mine)} profile(s)")
-        self.counts.setText("  ·  ".join(parts))
-        issues = h["issues"]
-        self._issue_pid = issues[0][0] if issues else None
-        self.issue.setVisible(bool(issues))
-        if issues:
-            self.issue.setText(f"⚠ {len(issues)} issue(s) - {issues[0][1]}  ›")
-            self.issue.setStyleSheet(f"color: {T['warn']}; text-align: right;")
-            self.issue.setToolTip("\n".join(t for _p, t in issues))
-        free = h["free"]
-        if free is None:
-            self.disk.setText(f"Disk {h['drive']}: not reachable")
-            self.disk.setStyleSheet(f"color: {T['bad']};")
-        else:
-            days = h["days"]
-            low = days is not None and days < 7
-            self.disk.setText(f"Disk {h['drive']}  {fmt_bytes(free)} free" +
-                              (f"  ·  ~{days:,.0f} days at {fmt_bytes(h['per_day'])}/day" if days else ""))
-            self.disk.setStyleSheet(f"color: {T['bad'] if low else T['muted']};")
-        self.rate.setText(f"{h['rate']:,.0f} rows/s  ·  dropped {h['dropped']}" if h["recording"] else
-                          "Estimates from the tags and intervals - measured while recording")
-
-    def _goto_issue(self):
-        pr = self.page._profile(self._issue_pid)
-        if pr is not None:
-            self.page.show_type(lt.type_of(pr), pr["id"])
+        return f"{v / 1e6:.1f}M" if v >= 1e6 else (f"{v / 1e3:.1f}k" if v >= 1e3 else f"{v:.3g}")
 
 
 class ProfileView(QWidget):
@@ -401,8 +341,7 @@ class ProfileView(QWidget):
         pr = self.profile()
         if pr is None:
             return
-        kind = lt.type_of(pr)
-        self.icon.setPixmap(make_icon(lt.TYPE[kind][2], T["text"]).pixmap(QSize(18, 18)))
+        self.icon.setPixmap(make_icon(lt.icon_of(pr), T["text"]).pixmap(QSize(18, 18)))
         self.title.setText(pr["name"])
         self.ficon.setPixmap(make_icon("folder", T["muted"]).pixmap(QSize(16, 16)))
         self.tabs.setTabText(1, f"Tags ({sum(len(r[3]) if r[0] == 'asset' else 1 for r in self.host.profile_tag_rows(pr))})")
@@ -467,7 +406,7 @@ class ProfileView(QWidget):
             rows += [("Period", lt.fmt_s(pr.get("interval_s", 60))),
                      ("Statistics", ", ".join(dl.STAT_LABELS[s] for s in pr.get("stats", [])))]
         est = "" if live["measured"] else " (est.)"
-        rows += [("Format", pr.get("format", "CSV")),
+        rows += [("Tags", self.host.profile_tags_text(pr)), ("Format", pr.get("format", "CSV")),
                  ("New file", lf.describe(out)),
                  ("Rate", fmt_rate(live["rate"]) + est if live["rate"] is not None else "depends on the process"),
                  ("Size/day", fmt_bytes(live["per_day"]) + est if live["per_day"] is not None else "-"),
@@ -779,12 +718,15 @@ class LoggingPage(QWidget):
         self.filter.setClearButtonEnabled(True); self.filter.setMaximumWidth(220); self.filter.setMinimumWidth(120)
         self.filter.textChanged.connect(lambda _: self._apply_filter())
         bl.addWidget(self.filter)
-        self.health = HealthStrip(self)
+        self.health = SummaryStrip()                 # the summary under the toolbar
+        self.health.chip_clicked.connect(self._status_chip)
+        self._status: str | None = None              # a chip's filter: writing / armed / stalled / error / off
 
         self.band = Band()
         self.tree = QTreeWidget(); self.tree.setObjectName("navTree")
         self.tree.setHeaderHidden(True); self.tree.setIndentation(6); self.tree.setRootIsDecorated(False)
         self.tree.setProperty("plainSel", True)
+        self.tree.setIconSize(QSize(*STATUS_SIZE))        # every row: a dot column, then the icon
         self.tree.setItemDelegate(TwoLineDelegate(self.tree))
         self.tree.currentItemChanged.connect(lambda cur, _p: self._left_selected(cur))
         self.tree.itemDoubleClicked.connect(self._left_double)
@@ -883,6 +825,16 @@ class LoggingPage(QWidget):
         self.refresh(select)
         self.activate()
 
+    def _worst(self, profiles) -> str:
+        """The dot of an "All ..." / type row: the worst state of its profiles (enabled ones)."""
+        dots = {STATE_DOT[self.host.log_status(p)[0]] for p in profiles if p["enabled"]}
+        return next((d for d in ("alarm", "armed", "ok") if d in dots), "none")
+
+    def _profile_icon(self, pr: dict, st: str):
+        """A profile row: its state dot, then its type's icon (muted when disabled)."""
+        return status_icon(lt.icon_of(pr), STATE_DOT[st] if pr["enabled"] else "none",
+                           T["text"] if pr["enabled"] else T["muted"])
+
     def _sub(self, pr: dict) -> str:
         """The lines under a profile's name in a type's list."""
         live = self.host.profile_live(pr)
@@ -907,12 +859,15 @@ class LoggingPage(QWidget):
             for pr in self.profiles:
                 counts[lt.type_of(pr)] += 1
             root = QTreeWidgetItem([f"All profiles  ({len(self.profiles)})"])
-            root.setIcon(0, make_icon("list", T["text"]))
+            root.setIcon(0, status_icon("list", self._worst(self.profiles)))
+            self._items[("all", None)] = root
             root.setData(0, Qt.ItemDataRole.UserRole, ("all", None))
             self.tree.addTopLevelItem(root)
             for k, name, icon, what in lt.TYPES:
                 it = QTreeWidgetItem([f"{name}  ({counts[k]})"])
-                it.setIcon(0, make_icon(icon, T["text"] if counts[k] else T["muted"]))
+                mine_k = [p for p in self.profiles if lt.type_of(p) == k]
+                it.setIcon(0, status_icon(icon, self._worst(mine_k) if counts[k] else "blank",
+                                          T["text"] if counts[k] else T["muted"]))
                 if not counts[k]:
                     it.setForeground(0, QBrush(QColor(T["muted"])))
                 it.setData(0, Qt.ItemDataRole.UserRole, ("type", k))
@@ -925,9 +880,9 @@ class LoggingPage(QWidget):
             self.band.set(f"{name}  ({len(mine)})", icon, what + " - Backspace / the Project tree: every profile")
             for pr in mine:
                 st, _c = self.host.log_status(pr)
-                it = QTreeWidgetItem([pr["name"]])
-                it.setData(0, SUB, self._sub(pr))
-                it.setIcon(0, status_icon("", STATE_DOT[st]) if pr["enabled"] else status_icon("", "none"))
+                it = QTreeWidgetItem([pr["name"]])          # the name only - its summary: the tooltip, Overview
+                it.setToolTip(0, f"{self._sub(pr)}\n{STATE_TEXT[st]}" + ("" if pr["enabled"] else " - disabled"))
+                it.setIcon(0, self._profile_icon(pr, st))
                 it.setData(0, Qt.ItemDataRole.UserRole, ("profile", pr["id"]))
                 if not pr["enabled"]:
                     it.setForeground(0, QBrush(QColor(T["muted"])))
@@ -936,7 +891,7 @@ class LoggingPage(QWidget):
             if self._pid in self._items:
                 self.tree.setCurrentItem(self._items[self._pid])
         self.tree.blockSignals(False)
-        self.health.refresh(self._kind)
+        self.refresh_health()
         self._fill_right(cur)
 
     def _left_selected(self, it):
@@ -1010,11 +965,13 @@ class LoggingPage(QWidget):
             if self._only not in (None, k):
                 continue
             st, _count = self.host.log_status(pr)
+            if self._status is not None and st != self._status:
+                continue
             live = self.host.profile_live(pr)
             it = QTreeWidgetItem(self._table_values(pr))
             it.setToolTip(3, live["folder"])
             it.setData(0, Qt.ItemDataRole.UserRole, pr["id"])
-            it.setIcon(0, make_icon(lt.TYPE[k][2], T["text"] if pr["enabled"] else T["muted"]))
+            it.setIcon(0, make_icon(lt.icon_of(pr), T["text"] if pr["enabled"] else T["muted"]))
             it.setIcon(s_col, status_icon("", STATE_DOT[st]))
             for c in (4, 5, 6):
                 it.setTextAlignment(c, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1052,6 +1009,53 @@ class LoggingPage(QWidget):
         else:
             self.stack.setCurrentWidget(self.table)
 
+    # ---------------------------------------------------------------- the summary strip
+    def refresh_health(self):
+        """Recording · how long │ the profiles by state (chips filter the table) │ disk days left │
+        rows/s; the worst problem on a second line."""
+        h = self.host.log_health()
+        st = h["states"]
+        chips = [(k, f"{st[k]} {STATE_TEXT[k].lower()}", STATE_TOKEN[k]) for k in
+                 ("writing", "armed", "stalled", "error", "off") if st.get(k)]
+        free, days = h["free"], h["days"]
+        disk = f"Disk {h['drive']} {fmt_bytes(free)} free" + (f" · ~{days:,.0f} days" if days and days <= 365 else (" · over a year" if days else "")) \
+            if free is not None else f"Disk {h['drive']} not reachable"
+        low = free is None or (days is not None and days < 7)
+        chips += [("|", "", ""), ("disk", disk, "bad" if low else "")]
+        actions, issue = [], None
+        if h["recording"]:
+            title = f"● Recording · {time.strftime('%H:%M:%S', time.gmtime(h['elapsed']))}"
+            state = "bad"
+            chips += [("|", "", ""), ("rate", f"{h['rate']:,.0f} rows/s", "")]
+            if h["dropped"]:
+                chips.append(("dropped", f"{h['dropped']:,} dropped", "bad"))
+        else:
+            on = sum(1 for p in self.profiles if p["enabled"])
+            title = "○ Not recording · " + (f"{plural(on, 'profile')} enabled" if self.profiles else "no profiles yet")
+            state = "muted"                                       # Record: the main toolbar
+        if h["issues"]:
+            pid, text = h["issues"][0]
+            more = f"  (+{len(h['issues']) - 1} more)" if len(h["issues"]) > 1 else ""
+            pr = self._profile(pid)
+            issue = (text + more, "bad" if pr and self.host.log_status(pr)[0] == "error" else "warn",
+                     [("Open profile ›", lambda p=pr: p and self.show_type(lt.type_of(p), p["id"]))])
+        self.health.set(state, title, chips, issue, actions)
+
+    def _status_chip(self, key):
+        """A chip of the summary: only the profiles in that state (every type)."""
+        if key in ("disk", "rate", "dropped"):           # figures: open the folder / nothing to filter
+            self.health.clear_filter()
+            if key == "disk":
+                self.host.open_log_folder()
+            self.refresh_health()
+            return
+        self._status = key
+        if key is not None and self._kind is not None:
+            self.show_type(None)
+        else:
+            self._fill_right(None)
+        self.refresh_health()
+
     def sample_activity(self):
         """Once a minute while recording: rows written per profile (the Overview chart)."""
         rec = self.host.recorder if hasattr(self.host, "recorder") else None
@@ -1075,15 +1079,22 @@ class LoggingPage(QWidget):
     def update_live(self):
         """Health, status, counts and values (the GUI timer, while the page is shown)."""
         self.sample_activity()
-        self.health.refresh(self._kind)
+        if self._kind is None:                           # the overview's dots: the worst state per type
+            for key, it in list(self._items.items()):
+                if not isinstance(key, tuple):
+                    continue
+                mine = self.profiles if key[0] == "all" else [p for p in self.profiles if lt.type_of(p) == key[1]]
+                icon = "list" if key[0] == "all" else lt.TYPE[key[1]][2]
+                it.setIcon(0, status_icon(icon, self._worst(mine) if mine else "blank",
+                                          T["text"] if mine else T["muted"]))
+        self.refresh_health()
         if self.stack.currentWidget() is self.view:
             self.view.refresh_live()
             pr = self._profile(self._pid)
             it = self._items.get(self._pid)
             if pr is not None and it is not None:
                 st, _c = self.host.log_status(pr)
-                it.setIcon(0, status_icon("", STATE_DOT[st]) if pr["enabled"] else status_icon("", "none"))
-                it.setData(0, SUB, self._sub(pr))
+                it.setIcon(0, self._profile_icon(pr, st))
         elif self.stack.currentWidget() is self.table:
             self.table.blockSignals(True)
             for pid, it in self._rows.items():

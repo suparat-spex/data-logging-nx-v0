@@ -716,24 +716,30 @@ def test_editor_tabs(win, monkeypatch):
     win.select_object(("tag", dev.id, 0))
     assert win.props.target.readonly and win.props.target.apply is None
     assert [a[0] for a in win.props.target.actions] == ["Edit..."]
-    # every other kind opens as a tab (new and existing)
-    for kind, ident, ctx in (("alarm", None, {}), ("aprofile", None, {"kind": "rest"}),
-                             ("alarm", None, {})):
-        e = win.open_editor(kind, ident, **ctx)
-        assert isinstance(e, FormTab) and e.dlg is not None, kind
-    # closing a modified editor asks (Apply / Don't apply / Cancel)
+    # alarms and notification profiles are pop-ups too (tabs style), not editor tabs
+    from nxlogger.ui.dialogs import alarm_dialog as ad
+    from nxlogger.ui.dialogs import alarm_profile_dialog as apd
+    seen = []
+
+    def alarm_exec(dlg):
+        seen.append(([dlg.tabs.tabText(i) for i in range(dlg.tabs.count())], dlg.ok_btn.text()))
+        return False
+    monkeypatch.setattr(ad.AlarmDialog, "exec", alarm_exec)
+    monkeypatch.setattr(apd.AlarmProfileDialog, "exec", alarm_exec)
+    tabs = win.doc_tabs.count()
+    win._alarm_popup(None, "state"); win._aprofile_popup(None, "rest")
+    assert seen == [(["General", "Levels", "Notify"], "Add alarm"), (["General", "Target"], "Add profile")]
+    assert win.doc_tabs.count() == tabs
+    # the AI/ML log settings are the one editor tab left; closing it modified asks (Apply / Don't / Cancel)
     import nxlogger.ui.widgets.form_tab as ft
-    e = win.open_editor("aprofile", win.project.alarm_profiles[0]["id"])     # a saved one
-    assert not e.btn_apply.isEnabled() and not e.btn_refresh.isEnabled()      # nothing to apply yet
+    e = win.open_editor("mllog", "settings")
+    assert isinstance(e, FormTab) and e.dlg is not None
     e._set_modified(True)
     assert e.btn_apply.isEnabled() and e.btn_refresh.isEnabled()
     monkeypatch.setattr(ft, "ask_unsaved", lambda *a, **k: "cancel")
     assert not win.close_editor(e) and win.doc_tabs.indexOf(e) >= 0
     monkeypatch.setattr(ft, "ask_unsaved", lambda *a, **k: "discard")
     assert win.close_editor(e)
-    # the AI/ML log settings are an editor tab; views and components are pop-ups (like devices / tags)
-    e = win.open_editor("mllog", "settings")
-    assert isinstance(e, FormTab) and e.dlg is not None
     page = next(iter(win.view_pages.values()))
     from nxlogger.ui.dialogs import tile_dialog as td
     from nxlogger.ui.dialogs import view_dialog as vd
@@ -770,7 +776,7 @@ def test_connectivity_device_table(win, monkeypatch, tmp_path):
     page = win.conn_page
     win._show_doc("connectivity")
     assert page.table.topLevelItemCount() == len(win.project.devices)
-    assert page.table.columnCount() == 8                         # devices only, no tag columns
+    assert page.table.columnCount() == 11                        # devices + live columns, no tag columns
     dev = win.project.devices[0]
     page.select(dev.id)
     assert page.selected() == [dev.id] and win._prop_key == ("device", dev.id)
@@ -1156,6 +1162,9 @@ def test_logging_types_page_and_recording(win, monkeypatch, tmp_path):
         dlg.start.tag.setCurrentIndex(dlg.start.tag.findData(list(k[0])))
         dlg.start.op.setCurrentText(">"); dlg.start.value.setValue(-1e9)
         dlg.pre.setValue(1); dlg.post.setValue(1)
+        assert not dlg.icon_default.isEnabled() and dlg.icon_btns["zap"].isChecked()     # Default: the type's
+        dlg._set_icon("gauge")
+        assert dlg.icon_btns["gauge"].isChecked() and dlg.icon_default.isEnabled()
         dlg.all.setChecked(False)
         for leaf in dlg.picker.leaves[:3]:
             leaf.setCheckState(0, Qt.CheckState.Checked)
@@ -1166,6 +1175,7 @@ def test_logging_types_page_and_recording(win, monkeypatch, tmp_path):
         assert "Run_1.csv" in dlg.preview.text() and "(next run)" in dlg.preview.text()
     tr = add("trigger", "Run log", trig)
     assert tr["output"]["folder"] == str(tmp_path / "runs") and tr["output"]["folders"] == "none"
+    assert tr["icon"] == "gauge"                                  # its own icon (Default = the type's)
     assert tr["when"]["start"] == {"key": list(k[0]), "op": ">", "value": -1e9} and tr["when"]["stop"] is None
 
     def marks(dlg):
@@ -1193,7 +1203,7 @@ def test_logging_types_page_and_recording(win, monkeypatch, tmp_path):
     assert page.tree.topLevelItemCount() == 1                            # no "All profiles" row: the tree goes back
     page.view.tabs.setCurrentIndex(1)
     assert page.view.tags.topLevelItemCount() == 3                       # the simulator's first 3 tags (picked)
-    assert "Ready" in page.health.state.text()
+    assert page.health.title.text().startswith("○ Not recording")
     page.show_type("change")
     assert page.view.tags_note.text().startswith("All enabled")
     win.log_profile_remove(ch["id"], [k[0]], [])                         # All enabled -> the list without it
@@ -1221,7 +1231,8 @@ def test_logging_types_page_and_recording(win, monkeypatch, tmp_path):
         _pump(0.6)
         page.show_type("trigger")
         page.update_live()
-        assert "RECORDING" in page.health.state.text() and "writing" in page.health.counts.text()
+        assert page.health.title.text().startswith("● Recording")
+        assert any(getattr(c, "text", lambda: "")().endswith("writing") for c in page.health._chips)
         assert page.view.state.text().startswith("● Writing")
     finally:                                                     # never leave a recording running
         win._stop_recording()
@@ -1243,3 +1254,130 @@ def test_logging_types_page_and_recording(win, monkeypatch, tmp_path):
     assert (tmp_path / month[:4] / month[4:] / f"Changes_Simulator_{month}.csv").exists()    # year / month, monthly
     win.delete_log_profile(ch["id"])
     assert ch not in win.project.logging_profiles
+
+
+def test_connectivity_health_and_connector_page(win):
+    from PySide6.QtCore import Qt
+    from nxlogger.core.project import Project
+    p = Project.default()
+    win._set_project(p, None)
+    page = win.conn_page
+    dev = p.devices[0]                                           # the simulator
+    win._show_doc("connectivity"); page.show_category("protocols", force=True)
+    assert page.health.title.text().startswith("○ Not connected · 1 device ready") and page.connector is None
+    assert page.health._buttons == []                            # Connect / Record: the main toolbar only
+    sim = next(page.clist.topLevelItem(i) for i in range(page.clist.topLevelItemCount())
+               if page.clist.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole) == ("driver", "sim"))
+    page.clist.setCurrentItem(sim); _pump(0.05)                  # a click: only its devices
+    assert page.connector is None and list(page._rows) == [dev.id]
+    page._list_double(sim, 0); _pump(0.05)                       # a double click: the connector page
+    assert page.connector == "sim" and page.stack.currentWidget() is page.view
+    assert page.band.text.text() == "Simulation  (1)" and list(page._dev_items) == [dev.id]
+    assert [page.view.tabs.tabText(i) for i in range(4)] == ["Overview", f"Tags ({len(dev.tags)})", "Diagnostics", "History"]
+    assert "Simulates" in page.view.sentence.text() and page.selected() == [dev.id]
+    win.start_device(dev.id)
+    try:
+        _pump(3.0)
+        page.update_states(force=True)
+        live = win.device_live(dev.id)
+        assert live["state"] == "online" and live["last"] is not None and live["rate"]
+        assert win.device_status(dev.id) == "online" and page.health.title.text().startswith("● Connected")
+        online = next(c for c in page.health._chips if getattr(c, "text", lambda: "")() == "1 online")
+        online.click()                                           # a chip: only the online devices
+        assert page.connector is None and page._status == "online" and not page._rows[dev.id].isHidden()
+        online = next(c for c in page.health._chips if getattr(c, "text", lambda: "")() == "1 online")
+        online.click()
+        assert page._status is None
+        page.open_connector("sim")
+        assert page.view.state.text().startswith("● Online")
+        page.view.tabs.setCurrentIndex(1)
+        assert page.view.tags.topLevelItemCount() == len(dev.tags)
+        _pump(0.6); page.update_states()
+        assert page.view.tags.topLevelItem(0).text(3)                # live values
+        page.view.tabs.setCurrentIndex(3)
+        assert page.view.hist.topLevelItemCount() >= 2               # connecting, online
+        page.view.tabs.setCurrentIndex(2)
+        assert win.drivers.driver(dev.id).comm_on                     # the comm log only while it is shown
+    finally:
+        win.stop_device(dev.id)
+    _pump(0.3)
+    page.view.tabs.setCurrentIndex(0)
+    assert not win.drivers.driver(dev.id) or not win.drivers.driver(dev.id).comm_on
+    page.show_category("protocols")                               # the Project tree goes back
+    assert page.connector is None and page.stack.currentWidget() is page.table
+
+
+def test_summary_strips_tags_and_assets(win):
+    from nxlogger.core import templates
+    win._confirm_discard = lambda: True
+    win._set_project(templates.make("factory_energy"), None)
+    win._show_doc("tags"); win.tags_page.update_live()
+    t = win.tags_page.summary
+    assert t.title.text().startswith("○ ") and "tags" in t.title.text()       # not connected
+    assert t._buttons == []
+    win._show_doc("assets"); win.assets_page.show_enterprise()
+    a = win.assets_page.summary
+    assert a.title.text() == "● Demo factory"                                  # no rollup
+    texts = [getattr(c, "text", lambda: "")() for c in a._chips]
+    assert "5 areas" in texts and "11 machines" in texts and any("tags" in x for x in texts)
+    nodata = next(c for c in a._chips if getattr(c, "text", lambda: "")().endswith("no data"))
+    nodata.click()                                                            # opens the first such machine
+    assert win.assets_page.mode == "area"
+
+
+def test_alarms_tree_types_and_popups(win, monkeypatch):
+    import numpy as np
+    from PySide6.QtCore import Qt
+    from nxlogger.core import alarm_rules as ar
+    from nxlogger.core.project import Project
+    from nxlogger.ui.dialogs import alarm_dialog as ad
+    monkeypatch.setattr("nxlogger.ui.main_window.confirm", lambda *a_, **k_: True)
+    p = Project.default()
+    win._set_project(p, None)
+    dev = p.devices[0]
+    root = win.ptree.topLevelItem(0)                             # Project tree: Alarms > 5 types + Notifications
+    al = next(root.child(i) for i in range(root.childCount()) if root.child(i).text(0).startswith("Alarms"))
+    assert [al.child(i).data(0, Qt.ItemDataRole.UserRole) for i in range(al.childCount())] ==         [("alarmgrp", g[0]) for g in ar.GROUPS] + [("aprofs",)]
+
+    def add(group, setup):
+        def run(dlg):
+            setup(dlg)
+            dlg._check()
+            assert dlg.ok_btn.isEnabled(), dlg.err.text()
+            return True
+        monkeypatch.setattr(ad.AlarmDialog, "exec", run)
+        win._alarm_popup(None, group, (dev.id, 0))
+        return win.project.alarms[-1]
+
+    def trip(dlg):                                               # State: alarm while = 1
+        dlg.name.setText("Trip")
+        assert dlg.rows[0][1].currentData() == "S" and dlg.rows[0][3].currentIndex() == 2
+        assert dlg.icon_btns["circle-dot"].isChecked() and not dlg.icon_default.isEnabled()   # Default: the type's
+        dlg._set_icon("zap")
+    st = add("state", trip)
+    assert st["icon"] == "zap" and ar.icon_of(st) == "zap"
+    assert ar.group_of(st) == "state" and st["levels"][0]["type"] == "S" and st["levels"][0]["value"] == 1.0
+
+    def dev_band(dlg):                                           # Deviation: |PV - 50| > 5
+        dlg.name.setText("Away from 50")
+        dlg.rows[0][2].setValue(5.0); dlg.rows[0][4].setValue(50.0)
+    dv = add("deviation", dev_band)
+    assert dv["levels"][0]["type"] == "DV" and dv["levels"][0]["sp"] == 50.0
+    def limits(dlg):
+        assert dlg.rows[0][0].text().startswith("HH")             # Limit: HH / H / L / LL
+        dlg.name.setText("Hot")
+    lim = add("limit", limits)
+    page = win.alarm_page
+    page.show_node("state")
+    assert page.band.text.text() == "State  (1)" and page.stack.currentWidget() is page.aview
+    assert "S = 1" in page.a_sentence.text()
+    eng = win.alarm_engine                                        # the engine trips the State alarm
+    eng.feed(dev.id, 0, 100.0, np.array([1.0]))
+    page.update_live(force=True)
+    assert page.ahead.state.text().startswith("● ALARM L1")
+    page.show_node(ar.GROUP["limit"][0])
+    assert list(k for k in page._items if isinstance(k, str)) == [lim["id"]]
+    page.show_node("live")
+    assert page.summary.title.text() == "● 3 active alarms"       # 1.0 on the tag: H 0, |1 - 50| > 5, = 1
+    win.delete_alarm(st["id"]); win.delete_alarm(dv["id"]); win.delete_alarm(lim["id"])
+    assert not win.project.alarms

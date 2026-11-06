@@ -111,7 +111,7 @@ from nxlogger.ui.dialogs.tile_dialog import TileDialog
 from nxlogger.ui.dialogs.virtual_tag_dialog import VirtualTagDialog
 from nxlogger.ui.dialogs.view_dialog import ViewDialog
 from nxlogger.ui.dialogs.write_value_dialog import WriteValueDialog
-from nxlogger.ui.icons import check_icon_file, grip_icon_file, level_icon, swatch
+from nxlogger.ui.icons import check_icon_file, grip_icon_file, swatch
 from nxlogger.ui.theme import ui_kit as ui
 from nxlogger.ui.theme.app_style import DENSE_QSS, EXTRA_QSS, blend, fusion_palette, fusion_qss
 from nxlogger.ui.theme.ui_kit import (AppWindow, Card, Chip, EmptyState, T, fixed_width, label, make_icon, refit,
@@ -149,7 +149,8 @@ CHIP_W = 132                    # status chips keep one width whatever the text
 
 
 # ======================================================================= window
-HEADER_NODES = ("project", "doc", "conncat", "asset", "templates", "tagsroot", "logtype", "alarms", "views")   # Project tree sections: no right-click menu
+HEADER_NODES = ("project", "doc", "conncat", "asset", "templates", "tagsroot", "logtype", "alarms", "alarmgrp",
+                "aprofs", "views")   # Project tree sections: no right-click menu
 
 
 class _NoFlash(QObject):
@@ -595,10 +596,10 @@ class DaqWindow(AppWindow):
         self.glw = pg.GraphicsLayoutWidget()
         self.screen_stack = QStackedWidget()
         self.screen_stack.addWidget(EmptyState(
-            "🧩", "No tags enabled", "Add a device and its tags in Connectivity, or enable one, "
+            "tag", "No tags enabled", "Add a device and its tags in Connectivity, or enable one, "
             "to see them here.", "Open Connectivity", lambda: self._show_doc("connectivity")))
         self.screen_stack.addWidget(EmptyState(
-            "📡", "Waiting for data", "Connect: every enabled device starts and its tags appear "
+            "radio", "Waiting for data", "Connect: every enabled device starts and its tags appear "
             "here.", "Connect", self._start_all))
         self.screen_stack.addWidget(self.glw)
 
@@ -1345,83 +1346,123 @@ class DaqWindow(AppWindow):
             QTimer.singleShot(0, lambda: self.tags_page.select_tag(dev.id, t.index))
         self.set_status(f"Tag '{t.name}' " + ("added" if new else "saved"), "ok")
 
-    # ---- alarms and notification profiles
-    def _spec_alarm(self, aid, channel=None):
+    # ---- alarms and notification profiles: settings pop-ups (like devices, tags, assets, logging)
+    def _alarm(self, aid: str) -> dict | None:
+        return next((x for x in self.project.alarms if x["id"] == aid), None)
+
+    def _aprofile(self, pid: str) -> dict | None:
+        return next((x for x in self.project.alarm_profiles if x["id"] == pid), None)
+
+    def add_alarm(self, group: str | None = "limit", channel=None):
+        QTimer.singleShot(0, lambda: self._alarm_popup(None, group or "limit", channel))
+
+    def edit_alarm(self, aid: str):
+        QTimer.singleShot(0, lambda: self._alarm_popup(aid))
+
+    def _alarm_popup(self, aid: str | None = None, group: str = "limit", channel=None):
+        """Add / edit an alarm (tabs General / Levels / Notify) - the project changes on Add / Save."""
         new = aid is None
+        cur = None if new else self._alarm(aid)
+        if not new and cur is None:
+            return
+        ch = self.channel_choices()
+        if not ch:
+            self.toast.popup("Add a device with tags first")
+            return
         if new:
-            ch = self.channel_choices()
-            if not ch:
-                self.toast.popup("Add a device with tags first")
-                return None
-            a = ar.new_alarm(tuple(channel) if channel else ch[0][:2])
+            a = ar.preset_alarm(group, tuple(channel) if channel else ch[0][:2])
             a["profiles"] = [p["id"] for p in self.project.alarm_profiles if p["enabled"]]
-            a["levels"][0]["enabled"] = True
         else:
-            a = next((x for x in self.project.alarms if x["id"] == aid), None)
-            if a is None:
-                return None
-        spec = {"key": f"edit:alarm:{a['id']}", "title": a["name"], "icon": "bell",
-                "path": f"Project / Alarms / {a['name']}", "kind": "alarm", "is_new": new}
+            a = copy.deepcopy(cur)
+            group = ar.group_of(a)
+        dlg = AlarmDialog(self, a, ch, self.project.alarm_profiles)
+        if new and dlg.name.text() == "New alarm":
+            dlg.name.clear(); dlg.name.setPlaceholderText("default: the tag name")
+        gname = ar.GROUP[group][1].split("  ")[0]
+        dlg.ok_btn, title = popup_form(dlg, ar.icon_of(a), f"New {gname.lower()} alarm" if new else a["name"],
+                                       f"Alarm · {gname}", "Add alarm" if new else "Save", width=760)
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or (f"New {gname.lower()} alarm" if new
+                                                                             else a["name"])))
+        dlg._paint_icons()                           # the header follows the chosen icon from now on
+        dlg._check()
+        if not dlg.exec():
+            return
+        res = dlg.result_alarm()
+        if new:
+            self.project.alarms.append(res)
+        else:
+            cur.clear(); cur.update(res)
+        self.alarms_changed()
+        self.alarm_page.select_alarm(res["id"])
+        self.set_status(f"Alarm '{res['name']}' " + ("added" if new else "saved"), "ok")
 
-        def build():
-            dlg = AlarmDialog(self, a, self.channel_choices(), self.project.alarm_profiles)
-            if spec["is_new"] and dlg.name.text() == "New alarm":
-                dlg.name.clear(); dlg.name.setPlaceholderText("default: the tag name")
-            return dlg
-        spec["build"] = build
+    def delete_alarm(self, aid: str):
+        a = self._alarm(aid)
+        if a is None or not confirm(self, "Delete alarm", f"Delete alarm '{a['name']}'?", "Delete alarm"):
+            return
+        self.project.alarms[:] = [x for x in self.project.alarms if x is not a]
+        self.alarms_changed()
 
-        def apply(dlg):
-            res = dlg.result_alarm()
-            a.clear(); a.update(res)
-            if spec["is_new"]:
-                self.project.alarms.append(a)
+    def duplicate_alarm(self, aid: str):
+        a = self._alarm(aid)
+        if a is None:
+            return
+        b = copy.deepcopy(a); b["id"] = uuid.uuid4().hex[:8]
+        b["name"] = self._unique_name(f"{a['name']} copy", {x["name"] for x in self.project.alarms})
+        self.project.alarms.insert(self.project.alarms.index(a) + 1, b)
+        self.alarms_changed()
+        self.alarm_page.select_alarm(b["id"])
+
+    def toggle_alarm(self, aid: str):
+        a = self._alarm(aid)
+        if a is not None:
+            a["enabled"] = not a["enabled"]
             self.alarms_changed()
-            spec["tab"].set_identity(f"edit:alarm:{a['id']}", a["name"], f"Project / Alarms / {a['name']}")
-            return True
-        spec["apply"] = apply
-        spec["new"] = lambda: self.open_editor("alarm", None)
-        exists = lambda: any(x is a for x in self.project.alarms)                  # noqa: E731
 
-        def delete():
-            if confirm(self, "Delete alarm", f"Delete alarm '{a['name']}'?", "Delete alarm"):
-                self.project.alarms[:] = [x for x in self.project.alarms if x is not a]
-                self.alarms_changed()
-        spec["actions"] = [self._delete_action(spec, delete, exists)]
-        return spec
+    def add_aprofile(self, kind: str = "popup"):
+        QTimer.singleShot(0, lambda: self._aprofile_popup(None, kind))
 
-    def _spec_aprofile(self, pid, kind: str = "popup"):
+    def edit_aprofile(self, pid: str):
+        QTimer.singleShot(0, lambda: self._aprofile_popup(pid))
+
+    def _aprofile_popup(self, pid: str | None = None, kind: str = "popup"):
+        """Add / edit a notification profile (tabs General / Target)."""
         new = pid is None
-        p = ar.new_profile(kind) if new else next((x for x in self.project.alarm_profiles if x["id"] == pid), None)
-        if p is None:
-            return None
-        spec = {"key": f"edit:aprofile:{p['id']}", "title": p["name"], "icon": "send",
-                "path": f"Project / Alarms / Notification profiles / {p['name']}", "kind": "notification profile",
-                "is_new": new, "section": "Notification profile"}
-        spec["build"] = lambda: AlarmProfileDialog(self, p)
+        cur = None if new else self._aprofile(pid)
+        if not new and cur is None:
+            return
+        p = ar.new_profile(kind) if new else copy.deepcopy(cur)
+        dlg = AlarmProfileDialog(self, p)
+        dlg.ok_btn, title = popup_form(dlg, ap.PROFILE_ICON.get(p["kind"], "send"),
+                                       "New notification profile" if new else p["name"],
+                                       "Notification profile · where alarm events go",
+                                       "Add profile" if new else "Save", width=560)
+        dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or p["name"]))
+        if not dlg.exec():
+            return
+        res = dlg.result_profile()
+        if new:
+            self.project.alarm_profiles.append(res)
+        else:
+            cur.clear(); cur.update(res)
+        self.alarms_changed()
+        self.alarm_page.select_profile(res["id"])
 
-        def apply(dlg):
-            res = dlg.result_profile()
-            p.clear(); p.update(res)
-            if spec["is_new"]:
-                self.project.alarm_profiles.append(p)
+    def delete_aprofile(self, pid: str):
+        p = self._aprofile(pid)
+        if p is None or not confirm(self, "Delete notification profile", f"Delete notification profile '{p['name']}'?",
+                                    "Delete profile", "Alarms that use it stop sending to it."):
+            return
+        self.project.alarm_profiles.remove(p)
+        for x in self.project.alarms:
+            x["profiles"] = [i for i in x["profiles"] if i != p["id"]]
+        self.alarms_changed()
+
+    def toggle_aprofile(self, pid: str):
+        p = self._aprofile(pid)
+        if p is not None:
+            p["enabled"] = not p["enabled"]
             self.alarms_changed()
-            spec["tab"].set_identity(f"edit:aprofile:{p['id']}", p["name"],
-                                     f"Project / Alarms / Notification profiles / {p['name']}")
-            return True
-        spec["apply"] = apply
-        spec["new"] = lambda: self.open_editor("aprofile", None, kind=p["kind"])
-        exists = lambda: any(x is p for x in self.project.alarm_profiles)          # noqa: E731
-
-        def delete():
-            if confirm(self, "Delete notification profile", f"Delete notification profile '{p['name']}'?",
-                       "Delete profile", "Alarms that use it stop sending to it."):
-                self.project.alarm_profiles.remove(p)
-                for x in self.project.alarms:
-                    x["profiles"] = [i for i in x["profiles"] if i != p["id"]]
-                self.alarms_changed()
-        spec["actions"] = [("Send test", "send", lambda: self.test_profile(p) if exists() else None),
-                           self._delete_action(spec, delete, exists)]
-        return spec
 
     # ---- views and their components
     def _spec_mllog(self, _ident):
@@ -2048,23 +2089,17 @@ class DaqWindow(AppWindow):
                 li.setForeground(0, muted)
             self.nav_logtypes[k] = li
         self.nav_alarms = node(root, "Alarms", make_icon("bell", T["text"]), ("alarms",),
-                               "4-level alarms, active list, alarm log - right-click to add")
-        self.ptree_alarms = {}
-        for a in self.project.alarms:
-            ai = node(self.nav_alarms, a["name"], level_icon(0, 5), ("alarm", a["id"]),
-                      ", ".join(x for x in (ar.describe_level(lv) for lv in a["levels"]) if x)
-                      + ("" if a["enabled"] else "  ·  disabled"))
-            if not a["enabled"]:
-                ai.setForeground(0, muted)
-            self.ptree_alarms[a["id"]] = ai
-        profs = node(self.nav_alarms, "Notification profiles", make_icon("send", T["muted"]), ("aprofs",),
-                     "Where alarm events are sent: log, popup, REST API, MQTT")
-        for pf in self.project.alarm_profiles:
-            pi = node(profs, pf["name"], make_icon("send", T["muted"]), ("aprof", pf["id"]),
-                      f"{ar.PROFILE_KINDS.get(pf['kind'])} · {ap.target_text(pf)}"
-                      + ("" if pf["enabled"] else "  ·  disabled"))
-            if not pf["enabled"]:
-                pi.setForeground(0, muted)
+                               "Active alarms and the alarm log - the types: their alarms")
+        self.nav_alarm_groups = {}
+        for key, name, icon, _types, what in ar.GROUPS:     # the alarm types, one level - alarms: the document
+            n = sum(1 for a in self.project.alarms if ar.group_of(a) == key)
+            gi = node(self.nav_alarms, f"{name}  ({n})", make_icon(icon, T["text" if n else "muted"]),
+                      ("alarmgrp", key), what)
+            if not n:
+                gi.setForeground(0, muted)
+            self.nav_alarm_groups[key] = gi
+        node(self.nav_alarms, f"Notifications  ({len(self.project.alarm_profiles)})", make_icon("send", T["text"]),
+             ("aprofs",), "Where alarm events go: log, popup, REST API, MQTT, e-mail")
         views = node(root, "Views", make_icon("layout", T["text"]), ("views",),
                      "Screens: headers, trends, numbers, gauges, tables on a snap grid - right-click for New view")
         for vw in self.project.views:
@@ -2084,14 +2119,13 @@ class DaqWindow(AppWindow):
 
     def _update_nav_dots(self, force: bool = False):
         eng = self.alarm_engine
-        for aid, it in getattr(self, "ptree_alarms", {}).items():
-            lvl = eng.alarm_state(aid)
-            a = eng.by_id.get(aid)
-            key = f"__a{aid}"
-            state = lvl if lvl else (-1 if a is None or not a["enabled"] else 0)
-            if force or self._dot_cache.get(key) != state:
-                self._dot_cache[key] = state
-                it.setIcon(0, level_icon(lvl, 5) if lvl else self._dot("ok" if state == 0 else "muted"))
+        for key, it in getattr(self, "nav_alarm_groups", {}).items():     # a type in alarm: its icon red
+            mine = [a for a in self.project.alarms if ar.group_of(a) == key]
+            hot = any(eng.alarm_state(a["id"]) for a in mine)
+            tok = "bad" if hot else ("text" if mine else "muted")
+            if force or self._dot_cache.get(f"__g{key}") != tok:
+                self._dot_cache[f"__g{key}"] = tok
+                it.setIcon(0, make_icon(ar.GROUP[key][2], T[tok]))
         if getattr(self, "nav_alarms", None) is not None:
             act = eng.count()
             text = "Alarms" + (f"  ·  {act} active" if act else "")
@@ -2180,16 +2214,15 @@ class DaqWindow(AppWindow):
             self._show_doc("logging")
             self.logging_page.show_type(d[1])
             self.logging_page.activate()
-        elif d[0] == "alarms":
+        elif d[0] == "alarms":                       # the live view: Active, Alarm log
             self._show_doc("alarms")
-            self.alarm_page.tabs.setCurrentIndex(0)
-        elif d[0] == "alarm":
-            self.alarm_page.select_alarm(d[1])
-        elif d[0] in ("aprofs", "aprof"):
-            if d[0] == "aprof":
-                self.alarm_page.select_profile(d[1])
-            else:
-                self._show_doc("alarms"); self.alarm_page.tabs.setCurrentIndex(3)
+            self.alarm_page.show_node(ap.LIVE)
+        elif d[0] == "alarmgrp":                     # one alarm type: its alarms
+            self._show_doc("alarms")
+            self.alarm_page.show_node(d[1])
+        elif d[0] == "aprofs":
+            self._show_doc("alarms")
+            self.alarm_page.show_node(ap.NOTIFY)
 
     def _nav_double_clicked(self, it, _col):
         """Double-click opens the item's editor tab (no pop-up)."""
@@ -2199,8 +2232,7 @@ class DaqWindow(AppWindow):
         go = {"device": lambda: self.edit_device(d[1]),
               "tag": lambda: self.edit_tag(d[1], d[2]),
               "asset": lambda: self.edit_asset(d[1]),
-              "alarm": lambda: self.open_editor("alarm", d[1]),
-              "aprof": lambda: self.open_editor("aprofile", d[1])}.get(d[0])
+}.get(d[0])
         if go:
             QTimer.singleShot(0, go)             # editors rebuild trees: not inside the click
 
@@ -2258,33 +2290,12 @@ class DaqWindow(AppWindow):
                 m.addAction("Delete view", lambda: self.delete_view(page))
                 m.addSeparator()
             m.addAction("New view...", self._new_view)
-        elif d[0] in ("alarms", "alarm", "aprofs", "aprof"):
-            pg_ = self.alarm_page
-            if d[0] == "alarm":
-                a = next((x for x in self.project.alarms if x["id"] == d[1]), None)
-                m.addAction("Edit alarm...", later(lambda: self.open_editor("alarm", d[1])))
-                m.addAction("Disable" if a and a["enabled"] else "Enable", lambda: pg_.toggle_alarm(d[1]))
-                m.addAction("Delete alarm", lambda: (pg_.select_alarm(d[1]), pg_.delete_alarm()))
-                m.addSeparator()
-            elif d[0] == "aprof":
-                pf = next((x for x in self.project.alarm_profiles if x["id"] == d[1]), None)
-                m.addAction("Edit profile...", later(lambda: self.open_editor("aprofile", d[1])))
-                m.addAction("Disable" if pf and pf["enabled"] else "Enable", lambda: pg_.toggle_profile(d[1]))
-                m.addAction("Send test", lambda: pf and self.test_profile(pf))
-                m.addAction("Delete profile", lambda: (pg_.select_profile(d[1]), pg_.delete_profile()))
-                m.addSeparator()
-            if d[0] in ("aprofs", "aprof"):
-                add = m.addMenu("New notification profile")
-                for k, text in ar.PROFILE_KINDS.items():
-                    add.addAction(text, lambda kk=k: self.open_editor("aprofile", None, kind=kk))
-            else:
-                m.addAction("New alarm...", later(lambda: self.open_editor("alarm", None)))
         else:
             add = m.addMenu("Add device")
             for k, dd in DRIVERS.items():
                 add.addAction(dd["label"] + "...", lambda kk=k: self.add_device(kk))
             m.addAction("New view...", self._new_view)
-        free = ("views", "view", "alarms", "alarm", "aprofs", "aprof")
+        free = ("views", "view")
         for a in m.actions():
             a.setEnabled(a.isEnabled() and (self.recorder is None or d[0] in free or a.text().startswith(
                 ("Add alarm", "Connect", "Disconnect", "Write", "Export", "Edit"))))
@@ -2490,10 +2501,11 @@ class DaqWindow(AppWindow):
         dev = next((d.name for d in self.project.devices if d.enabled), "Device")
         dlg = LogProfileDialog(self, pr, choices, taken, [(a["id"], a["name"]) for a in self.project.alarms],
                                self.project.logging.folder, self.project.name, dev)
-        dlg.ok_btn, title = popup_form(dlg, lt.TYPE[kind][2], f"New {lt.TYPE[kind][1].lower()} profile" if new
+        dlg.ok_btn, title = popup_form(dlg, lt.icon_of(pr), f"New {lt.TYPE[kind][1].lower()} profile" if new
                                        else pr["name"], f"Logging profile · {lt.TYPE[kind][1]}",
                                        "Add profile" if new else "Save", width=640)
         dlg.name.textChanged.connect(lambda s_: title.setText(s_.strip() or pr["name"]))
+        dlg._paint_icons()                           # the header shows the chosen icon from now on
         dlg.resize(dlg.width(), 560)
         dlg._check()
         if not dlg.exec():
@@ -2817,6 +2829,211 @@ class DaqWindow(AppWindow):
                      f"stalled - no row for {lt.fmt_s(live['last'] or 0)}"))
                 del probs[pr["id"]][:-50]
             last[pr["id"]] = st
+
+    # ---- Connectivity health and device diagnostics (the Connectivity document)
+    def sample_devices(self):
+        """Every stats tick: values per second of each device (from its driver's counter)."""
+        rates = self.__dict__.setdefault("_dev_rates", {})
+        now = time.time()
+        for d in self.project.devices:
+            drv = self.drivers.driver(d.id)
+            if drv is None:
+                rates.pop(d.id, None)
+                continue
+            t0, v0, r = rates.get(d.id, (now, drv.values, None))
+            if now - t0 >= 2.0:
+                rates[d.id] = (now, drv.values, (drv.values - v0) / (now - t0))
+            elif d.id not in rates:
+                rates[d.id] = (now, drv.values, None)
+
+    def device_live(self, did: str) -> dict:
+        """A device's health: state, last poll age, values / s, errors last hour, scan time, load,
+        online since, stalled."""
+        d = self.project.device(did)
+        state, text = self.device_state(did)
+        info = {"state": state, "text": text, "last": None, "rate": None, "err_h": 0, "scan_avg": None,
+                "scan_max": None, "load": None, "since": None, "stalled": False, "scans": 0, "errors": 0}
+        drv = self.drivers.driver(did)
+        if d is None or drv is None:
+            return info
+        now = time.time()
+        info.update(scans=drv.scans, errors=drv.errors,
+                    err_h=sum(1 for t in list(drv.error_times) if now - t < 3600),
+                    rate=self.__dict__.get("_dev_rates", {}).get(did, (0, 0, None))[2])
+        if drv.last_ok:
+            info["last"] = now - drv.last_ok
+        recent = [ms for t, ms in list(drv.scan_times) if now - t < 60]
+        if recent:
+            info["scan_avg"], info["scan_max"] = sum(recent) / len(recent), max(recent)
+            if not d.wave and d.scan_ms:
+                info["load"] = info["scan_avg"] / d.scan_ms * 100.0
+        if state == "online":
+            info["since"] = next((t for t, st, _x in reversed(list(drv.events)) if st == "online"), None)
+            limit = 30.0 if d.wave else max(10.0, 3 * d.scan_ms / 1000.0)
+            quiet = info["last"] if info["last"] is not None else (now - info["since"] if info["since"] else 0)
+            info["stalled"] = d.enabled and quiet > limit and bool(d.tags)
+        return info
+
+    def device_status(self, did: str) -> str:
+        """online / stalled / connecting / error / stopped / disabled."""
+        d = self.project.device(did)
+        if d is None or not d.enabled:
+            return "disabled"
+        live = self.device_live(did)
+        return "stalled" if live["stalled"] else live["state"]
+
+    def conn_health(self) -> dict:
+        """The Connectivity health strip."""
+        states, issues, rate, err_h, load = {}, [], 0.0, 0, 0.0
+        since = []
+        for d in self.project.devices:
+            st = self.device_status(d.id)
+            states[st] = states.get(st, 0) + 1
+            live = self.device_live(d.id)
+            if st in ("error", "stalled"):
+                issues.append((d.id, f"{d.name}: " + ((live["text"] or "error") if st == "error" else
+                                                      f"no data for {int(live['last'] or 0)} s")))
+            rate += live["rate"] or 0.0
+            err_h += live["err_h"]
+            load = max(load, live["load"] or 0.0)
+            if live["since"]:
+                since.append(live["since"])
+        return {"running": self.drivers.any_running, "since": min(since) if since else None, "states": states,
+                "issues": issues, "rate": rate, "err_h": err_h, "load": load, "devices": len(self.project.devices)}
+
+    def device_diag(self, did: str, comm: bool | None = None) -> dict:
+        """Diagnostics of a running device: blocks of the last scan, state events, the comm log
+        (comm True / False: switch the log on / off)."""
+        drv = self.drivers.driver(did)
+        if drv is None:
+            return {"blocks": [], "events": [], "comm": [], "running": False}
+        if comm is not None:
+            drv.comm_on = comm
+        return {"blocks": list(drv.blocks), "events": list(drv.events), "comm": list(drv.comm), "running": True,
+                "scan_times": list(drv.scan_times)}
+
+    def clear_comm_log(self, did: str):
+        drv = self.drivers.driver(did)
+        if drv is not None:
+            drv.comm.clear()
+
+    def device_tag_rows(self, did: str) -> list[dict]:
+        """The device page's tags: name, address, type, unit, assets, alarm level."""
+        d = self.project.device(did)
+        if d is None:
+            return []
+        out = []
+        for t in d.tags:
+            lvl, typ = self.alarm_engine.channel_state(d.id, t.index)
+            out.append({"key": (d.id, t.index), "name": t.name, "enabled": t.enabled,
+                        "address": describe_address(d.driver, "", t), "type": t.address.get("dtype", t.kind) if t.kind == "number"
+                        else t.kind, "unit": t.unit, "assets": ", ".join(am.assets_of(self.project.assets, (d.id, t.index))),
+                        "alarm": f"L{lvl} {typ}" if lvl else ""})
+        return out
+
+    # ---- summaries under the toolbars (ui/widgets/summary_strip.py)
+    def open_device_page(self, did: str):
+        """Connectivity > the device's connector page, the device selected."""
+        d = self.project.device(did)
+        if d is not None:
+            self._show_doc("connectivity")
+            self.conn_page.open_connector(d.driver, did)
+
+    def tags_summary(self) -> dict:
+        """Every tag of the project: good / bad / no data / disabled / in alarm / formula errors,
+        values per second, and the first bad device tags (for the issue line)."""
+        out = {"total": 0, "good": 0, "bad": 0, "nodata": 0, "disabled": 0, "alarm": 0, "formula": 0,
+               "rate": sum((r[2] or 0.0) for r in self.__dict__.get("_dev_rates", {}).values()),
+               "running": self.drivers.any_running, "bad_keys": [], "bad_device": None}
+        keys = []
+        for d in self.project.devices:
+            for t in d.tags:
+                out["total"] += 1
+                if not (d.enabled and t.enabled):
+                    out["disabled"] += 1
+                else:
+                    keys.append((d.id, t.index))
+        for v in self.project.virtual_tags:
+            out["total"] += 1
+            if not v.get("enabled", True):
+                out["disabled"] += 1
+            else:
+                keys.append(vt.vt_key(v["id"]))
+            if v["id"] in self.vt_engine.errors:
+                out["formula"] += 1
+        for a in self.project.aggregations:
+            out["total"] += 1
+            if not a.get("enabled", True):
+                out["disabled"] += 1
+            else:
+                keys.append(ag.agg_key(a["id"]))
+            if a["id"] in self.agg_engine.errors:
+                out["formula"] += 1
+        for t in self.sys_tags():
+            out["total"] += 1
+            keys.append(t.key)
+        for k in keys:
+            good = self.tag_live(*k)[2]
+            if good:
+                out["good"] += 1
+            elif good is False:
+                out["bad"] += 1
+                if not vt.is_vt(k[0]) and not ag.is_agg(k[0]) and not ss.is_sys(k[0]):
+                    out["bad_keys"].append(k)
+            else:
+                out["nodata"] += 1
+            if self.alarm_engine.channel_state(*k)[0]:
+                out["alarm"] += 1
+        if out["bad_keys"]:
+            out["bad_device"] = out["bad_keys"][0][0]
+        return out
+
+    def tag_quality(self, key) -> str:
+        """good / bad / nodata / disabled - the Tags summary's filters."""
+        tid, idx = key
+        d = self.project.device(tid)
+        if d is not None:
+            t = d.tag(idx)
+            if not d.enabled or t is None or not t.enabled:
+                return "disabled"
+        elif vt.is_vt(tid):
+            v = self.virtual_tag(tid)
+            if v is None or not v.get("enabled", True):
+                return "disabled"
+        elif ag.is_agg(tid):
+            a = self.aggregation(tid)
+            if a is None or not a.get("enabled", True):
+                return "disabled"
+        good = self.tag_live(tid, idx)[2]
+        return "good" if good else ("bad" if good is False else "nodata")
+
+    def assets_summary(self) -> dict:
+        """The plant: areas, machines, their tags good / no data, template slots not mapped,
+        machines in alarm and without tags - and the first machine of each (Open machine)."""
+        A = self.project.assets
+        out = {"areas": len(am.areas(A)), "machines": 0, "tags": 0, "good": 0, "nodata": 0, "not_mapped": 0,
+               "alarm": 0, "empty": 0, "first": {}}
+        for m in am.machines(A, None):
+            out["machines"] += 1
+            if not m["attributes"]:
+                out["empty"] += 1
+                out["first"].setdefault("empty", m["id"])
+            if any(not x["key"] for x in m["attributes"]):
+                out["not_mapped"] += sum(1 for x in m["attributes"] if not x["key"])
+                out["first"].setdefault("not_mapped", m["id"])
+            st = am.status(A, m["id"], self.asset_state)
+            if st == "alarm":
+                out["alarm"] += 1
+                out["first"].setdefault("alarm", m["id"])
+        for k in am.keys(A, None):
+            out["tags"] += 1
+            if self.tag_live(*k)[2]:
+                out["good"] += 1
+            else:
+                out["nodata"] += 1
+                out["first"].setdefault("nodata", next((a["id"] for a in A if any(
+                    x["key"] and tuple(x["key"]) == tuple(k) for x in a["attributes"])), None))
+        return out
 
     def browse_log_folder(self):
         self._browse_log_folder()
@@ -3377,6 +3594,7 @@ class DaqWindow(AppWindow):
         self._update_gates()
         if hasattr(self, "logging_page"):            # rows per minute: sampled on every page
             self.logging_page.sample_activity()
+        self.sample_devices()
         self._update_nav_dots()
         page = self.doc_tabs.currentWidget()
         if isinstance(page, dv.ViewPage):
@@ -3475,7 +3693,7 @@ class DaqWindow(AppWindow):
     def _alarm_action(self, what: str, channel=None):
         self._show_doc("alarms")
         if what == "add":
-            QTimer.singleShot(0, lambda: self.alarm_page.add_alarm(channel))
+            self.add_alarm("limit", channel)
 
     def add_alarm_for(self, key):
         self._alarm_action("add", tuple(key))

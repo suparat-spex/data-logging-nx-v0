@@ -35,6 +35,15 @@ TYPES = [   # key, name, icon, what
     ("statistic", "Statistics", "sigma", "One row per period: mean, min, max ..."),
 ]
 TYPE = {t[0]: t for t in TYPES}
+ICONS = [      # the icons a profile can have (resources/icons/ui, Lucide) - the six types first
+    "clock", "waves", "zap", "flag", "rows", "sigma", "chart", "chart-column", "gauge", "activity",
+    "audio-waveform", "power", "bell", "star", "tag", "database", "folder", "file-text", "house", "cpu",
+    "grid", "factory", "boxes", "server", "network", "plug", "sliders", "hash", "list", "circle-dot"]
+
+
+def icon_of(pr: dict) -> str:
+    """A profile's icon: its own (one of ICONS), else its type's."""
+    return pr["icon"] if pr.get("icon") in ICONS else TYPE[type_of(pr)][2]
 OPS = [">", ">=", "<", "<=", "==", "!="]
 EVENT_SOURCES = [("alarm", "Alarm comes in"), ("condition", "Condition becomes true"),
                  ("schedule", "Time of day"), ("marker", "Marker (toolbar)")]

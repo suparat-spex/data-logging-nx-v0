@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import inspect
 import struct
+import time
 
 from nxlogger.comms.drivers.base import PollDriver
 from nxlogger.core.tags import MODBUS_TYPES
+
+AREA_FC = {"coil": "FC01", "discrete": "FC02", "holding": "FC03", "input": "FC04"}
 
 MAX_GAP = 4
 _FMT = {"int16": "h", "uint16": "H", "int32": "i", "uint32": "I", "float32": "f",
@@ -117,16 +120,33 @@ class ModbusDriver(PollDriver):
 
     def read(self, tags):
         out = {}
+        blocks = []                                          # Diagnostics: each request of this scan
         for unit, area, start, count, members in self._blocks:
             fn = {"holding": "read_holding_registers", "input": "read_input_registers",
                   "coil": "read_coils", "discrete": "read_discrete_inputs"}[area]
-            rr = self._call(fn, start, count=count, unit=unit)
+            info = {"unit": unit, "area": area, "start": start, "count": count, "tags": len(members),
+                    "ms": None, "error": ""}
+            blocks.append(info)
+            self.log("TX", f"unit {unit} {AREA_FC.get(area, '')} {area} {start} x{count}")
+            t0 = time.perf_counter()
+            try:
+                rr = self._call(fn, start, count=count, unit=unit)
+            except Exception as e:
+                info["error"] = str(e)[:120] or type(e).__name__
+                self.blocks = blocks
+                raise
+            info["ms"] = (time.perf_counter() - t0) * 1000.0
             if rr.isError():
+                info["error"] = str(rr)[:120]
+                self.log("ERR", f"unit {unit} {area} {start}: {info['error']}")
                 if not hasattr(rr, "exception_code"):        # no reply / framing: the link is gone
+                    self.blocks = blocks
                     raise ConnectionError(str(rr))
                 for t, _ in members:                         # Modbus exception: only these tags bad
                     out[t.index] = None
                 continue
+            self.log("RX", f"unit {unit} {area} {start}: {count} {'bits' if area in ('coil', 'discrete') else 'registers'}"
+                           f" in {info['ms']:.0f} ms")
             for t, off in members:
                 a = t.address
                 if area in ("coil", "discrete"):
@@ -136,6 +156,7 @@ class ModbusDriver(PollDriver):
                 v = regs_to_value(rr.registers[off:off + n], a.get("dtype", "uint16"), a.get("order", "ABCD"))
                 bit = int(a.get("bit", -1))
                 out[t.index] = float((int(v) >> bit) & 1) if bit >= 0 else v
+        self.blocks = blocks
         return [out.get(t.index) for t in tags]
 
     def do_write(self, tag, value):
